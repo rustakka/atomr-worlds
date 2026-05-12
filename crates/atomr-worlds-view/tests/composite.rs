@@ -9,12 +9,12 @@
 use std::sync::Arc;
 
 use atomr_worlds_core::coord::IVec3;
+use atomr_worlds_generate::{BrickGenerator, TerrainConfig, TerrainGenerator};
 use atomr_worlds_view::scene::{MaterialPalette, MeshNode};
 use atomr_worlds_view::{
-    greedy_mesh, render_composite, render_skybox_from_meshes, Camera, CompositeScene,
-    FragmentMode, RenderConfig, SkyboxConfig,
+    greedy_mesh, render_composite, render_skybox_from_meshes, Camera, CompositeScene, FragmentMode,
+    RenderConfig, SkyboxConfig,
 };
-use atomr_worlds_generate::{BrickGenerator, TerrainConfig, TerrainGenerator};
 
 const SEED: u64 = 0xDEAD_BEEF_CAFE_F00D;
 
@@ -40,12 +40,7 @@ fn mesh_node_at(t: [[f32; 4]; 4]) -> MeshNode {
 }
 
 fn ident() -> [[f32; 4]; 4] {
-    [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
+    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
 }
 
 #[test]
@@ -122,12 +117,7 @@ fn fragment_fade_midpoint_alpha_blends() {
 
 #[test]
 fn no_skybox_falls_back_to_background_color() {
-    let cfg = RenderConfig {
-        width: 8,
-        height: 8,
-        background: [42, 43, 44, 255],
-        ..Default::default()
-    };
+    let cfg = RenderConfig { width: 8, height: 8, background: [42, 43, 44, 255], ..Default::default() };
     let scene = CompositeScene::new(None, &[], &[], [0.0, 0.0, 0.0], 1.0, 10.0);
     let fb = render_composite(&scene, &unit_camera(), &cfg);
     for chunk in fb.pixels.chunks_exact(4) {

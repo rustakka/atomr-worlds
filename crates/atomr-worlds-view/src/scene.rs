@@ -98,12 +98,7 @@ pub fn scene_from_bricks(
         let tx = bc.x as f32 * edge;
         let ty = bc.y as f32 * edge;
         let tz = bc.z as f32 * edge;
-        let transform = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [tx, ty, tz, 1.0],
-        ];
+        let transform = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [tx, ty, tz, 1.0]];
         meshes.push(MeshNode {
             id: idx as SceneId,
             mesh: Arc::new(mesh),
@@ -135,12 +130,7 @@ mod tests {
         b.set(IVec3::new(3, 3, 3), Voxel::new(1));
         let cam = Camera::isometric_default(1.0);
         let palette = Arc::new(MaterialPalette::default());
-        let scene = scene_from_bricks(
-            &[(IVec3::new(0, 0, 0), Arc::new(b))],
-            cam,
-            MeshMode::Flat,
-            palette,
-        );
+        let scene = scene_from_bricks(&[(IVec3::new(0, 0, 0), Arc::new(b))], cam, MeshMode::Flat, palette);
         assert_eq!(scene.meshes.len(), 1);
         assert!(!scene.meshes[0].mesh.vertices.is_empty());
     }

@@ -41,14 +41,7 @@ impl Mesh {
 const EDGE: usize = BRICK_EDGE;
 
 /// Six face directions, indexed by axis (0=x, 1=y, 2=z) and sign (0=−, 1=+).
-const FACE_DIRS: [[i32; 3]; 6] = [
-    [-1, 0, 0],
-    [1, 0, 0],
-    [0, -1, 0],
-    [0, 1, 0],
-    [0, 0, -1],
-    [0, 0, 1],
-];
+const FACE_DIRS: [[i32; 3]; 6] = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]];
 
 fn material_at(brick: &Brick, x: i32, y: i32, z: i32) -> u16 {
     if x < 0 || y < 0 || z < 0 || x >= EDGE as i32 || y >= EDGE as i32 || z >= EDGE as i32 {
@@ -70,7 +63,13 @@ pub fn greedy_mesh(brick: &Brick) -> Mesh {
 
 fn meshing_axis(brick: &Brick, face_idx: usize, mesh: &mut Mesh) {
     let dir = FACE_DIRS[face_idx];
-    let axis = if dir[0] != 0 { 0 } else if dir[1] != 0 { 1 } else { 2 };
+    let axis = if dir[0] != 0 {
+        0
+    } else if dir[1] != 0 {
+        1
+    } else {
+        2
+    };
     let positive = dir[axis] > 0;
 
     // u, v are the in-plane axes (the two non-`axis` axes).
@@ -129,9 +128,7 @@ fn meshing_axis(brick: &Brick, face_idx: usize, mesh: &mut Mesh) {
                     h += 1;
                 }
                 // Emit quad.
-                emit_quad(
-                    mesh, axis, positive, layer, ui, vi, w, h, m, u_axis, v_axis,
-                );
+                emit_quad(mesh, axis, positive, layer, ui, vi, w, h, m, u_axis, v_axis);
                 // Zero the consumed region.
                 for j in 0..h {
                     for i in 0..w {
@@ -176,11 +173,8 @@ fn emit_quad(
     let base = mesh.vertices.len() as u32;
     let p0 = origin;
     let p1 = [origin[0] + u_vec[0], origin[1] + u_vec[1], origin[2] + u_vec[2]];
-    let p2 = [
-        origin[0] + u_vec[0] + v_vec[0],
-        origin[1] + u_vec[1] + v_vec[1],
-        origin[2] + u_vec[2] + v_vec[2],
-    ];
+    let p2 =
+        [origin[0] + u_vec[0] + v_vec[0], origin[1] + u_vec[1] + v_vec[1], origin[2] + u_vec[2] + v_vec[2]];
     let p3 = [origin[0] + v_vec[0], origin[1] + v_vec[1], origin[2] + v_vec[2]];
     for p in [p0, p1, p2, p3] {
         mesh.vertices.push(Vertex { pos: p, normal, material });

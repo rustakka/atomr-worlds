@@ -11,9 +11,7 @@ use std::sync::Arc;
 
 use atomr_worlds_view::camera::{transform_point, Camera, Projection};
 use atomr_worlds_view::mesh::Mesh;
-use atomr_worlds_view::{
-    render_skybox_from_meshes, CubeFace, MaterialPalette, MeshNode, SkyboxConfig,
-};
+use atomr_worlds_view::{render_skybox_from_meshes, CubeFace, MaterialPalette, MeshNode, SkyboxConfig};
 
 fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
@@ -64,8 +62,7 @@ fn sample_unit_x_lands_on_pos_x_face() {
     // Build a skybox, then paint the PosX face a distinctive color so we can
     // detect that `sample([1, 0, 0])` actually reads from it (and not, say,
     // PosZ — which would be the bug we're guarding against).
-    let mut sky =
-        render_skybox_from_meshes(&[], [0.0, 0.0, 0.0], 1.0, 100.0, 0xDEADBEEF, &cfg);
+    let mut sky = render_skybox_from_meshes(&[], [0.0, 0.0, 0.0], 1.0, 100.0, 0xDEADBEEF, &cfg);
     for chunk in sky.faces[CubeFace::PosX.index()].pixels.chunks_exact_mut(4) {
         chunk.copy_from_slice(&[10, 200, 30, 255]);
     }
@@ -80,8 +77,7 @@ fn sample_unit_x_lands_on_pos_x_face() {
 #[test]
 fn sample_is_scale_invariant() {
     let cfg = SkyboxConfig::default();
-    let mut sky =
-        render_skybox_from_meshes(&[], [0.0, 0.0, 0.0], 1.0, 100.0, 0, &cfg);
+    let mut sky = render_skybox_from_meshes(&[], [0.0, 0.0, 0.0], 1.0, 100.0, 0, &cfg);
     // Distinguish each face with a unique color.
     let palette: [[u8; 4]; 6] = [
         [200, 10, 10, 255],
@@ -140,12 +136,7 @@ fn mesh_with_pos_x_quad() -> MeshNode {
     MeshNode {
         id: 0,
         mesh: Arc::new(mesh),
-        transform: [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
+        transform: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
         material_palette: Arc::new(MaterialPalette::default()),
         lod_hint: None,
     }
@@ -176,9 +167,11 @@ fn skybox_digest_is_deterministic() {
     // The PosX face should contain non-background pixels (the quad is visible).
     let bg = cfg.background_color;
     let pos_x = &a.faces[CubeFace::PosX.index()];
-    let non_bg = pos_x.pixels.chunks_exact(4).filter(|p| {
-        !(p[0] == bg[0] && p[1] == bg[1] && p[2] == bg[2] && p[3] == bg[3])
-    }).count();
+    let non_bg = pos_x
+        .pixels
+        .chunks_exact(4)
+        .filter(|p| !(p[0] == bg[0] && p[1] == bg[1] && p[2] == bg[2] && p[3] == bg[3]))
+        .count();
     assert!(non_bg > 0, "PosX face should show the quad");
 }
 
@@ -186,22 +179,8 @@ fn skybox_digest_is_deterministic() {
 fn skybox_digest_differs_for_different_observer() {
     let cfg = SkyboxConfig::default();
     let node = mesh_with_pos_x_quad();
-    let a = render_skybox_from_meshes(
-        std::slice::from_ref(&node),
-        [0.0, 0.0, 0.0],
-        1.0,
-        100.0,
-        0,
-        &cfg,
-    );
-    let b = render_skybox_from_meshes(
-        std::slice::from_ref(&node),
-        [1.0, 0.0, 0.0],
-        1.0,
-        100.0,
-        0,
-        &cfg,
-    );
+    let a = render_skybox_from_meshes(std::slice::from_ref(&node), [0.0, 0.0, 0.0], 1.0, 100.0, 0, &cfg);
+    let b = render_skybox_from_meshes(std::slice::from_ref(&node), [1.0, 0.0, 0.0], 1.0, 100.0, 0, &cfg);
     assert_ne!(a.digest, b.digest, "moving observer should change at least one pixel");
 }
 
@@ -223,15 +202,9 @@ fn reversed_z_maps_near_to_one_and_far_to_zero() {
 
     let near_clip = transform_point(mvp, [0.0, 0.0, -cam.near]);
     let near_depth = near_clip[2] / near_clip[3];
-    assert!(
-        (near_depth - 1.0).abs() < 1e-4,
-        "near depth (reversed-z) should be ~1.0, got {near_depth}"
-    );
+    assert!((near_depth - 1.0).abs() < 1e-4, "near depth (reversed-z) should be ~1.0, got {near_depth}");
 
     let far_clip = transform_point(mvp, [0.0, 0.0, -cam.far]);
     let far_depth = far_clip[2] / far_clip[3];
-    assert!(
-        far_depth.abs() < 1e-4,
-        "far depth (reversed-z) should be ~0.0, got {far_depth}"
-    );
+    assert!(far_depth.abs() < 1e-4, "far depth (reversed-z) should be ~0.0, got {far_depth}");
 }

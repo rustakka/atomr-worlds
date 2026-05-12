@@ -17,6 +17,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod camera;
+pub mod decals;
 pub mod derived;
 pub mod iso;
 pub mod mesh;
@@ -30,8 +31,11 @@ pub mod view_cache;
 pub mod world_query;
 
 pub use camera::{Camera, Projection};
+pub use decals::{render_decals, Decal};
+pub use derived::surface_raster::{build_surface_raster, surface_raster_to_mesh, SurfaceKey, SurfaceRaster};
 pub use iso::{boundary_skirt, crossfade_overlap, surface_mesh, MeshMode, SmoothConfig};
 pub use mesh::{greedy_mesh, Mesh, Quad, Vertex};
+pub use modes::rts::{render_rts, ObliqueCamera};
 pub use observer::{ObserverState, SkyboxRefreshPolicy};
 pub use raster2d::{blend_rect, blit_rgba, fill_rect, fill_rect_stipple, StipplePattern};
 pub use render::{
@@ -39,12 +43,10 @@ pub use render::{
     Framebuffer, RenderConfig,
 };
 pub use scene::{
-    scene_from_bricks, CameraNode, FrameMetadata, LightKind, LightNode, MaterialEntry,
-    MaterialPalette, MeshNode, SceneDescription, SceneId,
+    scene_from_bricks, CameraNode, FrameMetadata, LightKind, LightNode, MaterialEntry, MaterialPalette,
+    MeshNode, SceneDescription, SceneId,
 };
-pub use skybox::{
-    render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT,
-};
+pub use skybox::{render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT};
 pub use view_cache::{CacheAabb, DerivedKey, Revision, ViewCache};
 pub use world_query::WorldQuery;
 

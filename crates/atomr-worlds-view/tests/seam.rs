@@ -19,13 +19,12 @@
 use std::sync::Arc;
 
 use atomr_worlds_core::coord::IVec3;
-use atomr_worlds_voxel::{Brick, Voxel};
 use atomr_worlds_view::scene::{MaterialPalette, MeshNode};
 use atomr_worlds_view::{
-    boundary_skirt, crossfade_overlap, greedy_mesh, render_composite,
-    render_skybox_from_meshes, Camera, CompositeScene, MeshMode, RenderConfig, SkyboxConfig,
-    SmoothConfig,
+    boundary_skirt, crossfade_overlap, greedy_mesh, render_composite, render_skybox_from_meshes, Camera,
+    CompositeScene, MeshMode, RenderConfig, SkyboxConfig, SmoothConfig,
 };
+use atomr_worlds_voxel::{Brick, Voxel};
 
 #[test]
 fn boundary_skirt_emits_geometry_for_solid_brick() {
@@ -41,10 +40,7 @@ fn boundary_skirt_emits_geometry_for_solid_brick() {
     // +X face skirt should have geometry (the cube touches the negative
     // face, so the negative-X side is the relevant one).
     let mesh_neg_x = boundary_skirt(&b, 0, -1, 4.0);
-    assert!(
-        !mesh_neg_x.vertices.is_empty(),
-        "skirt should emit vertices when the face has solid cells",
-    );
+    assert!(!mesh_neg_x.vertices.is_empty(), "skirt should emit vertices when the face has solid cells",);
     // Every triangle is well-formed: vertex indices stay in range.
     for i in &mesh_neg_x.indices {
         assert!((*i as usize) < mesh_neg_x.vertices.len());
@@ -63,11 +59,7 @@ fn boundary_skirt_empty_brick_has_no_geometry() {
 fn crossfade_overlap_returns_two_meshes() {
     let mut b = Brick::new();
     b.set(IVec3::new(5, 5, 5), Voxel::new(1));
-    let (near, far) = crossfade_overlap(
-        &b,
-        MeshMode::Smooth(SmoothConfig::default()),
-        MeshMode::Flat,
-    );
+    let (near, far) = crossfade_overlap(&b, MeshMode::Smooth(SmoothConfig::default()), MeshMode::Flat);
     // Both meshes should have at least one vertex (the single solid
     // voxel yields a non-empty surface in both modes).
     assert!(!near.vertices.is_empty());
@@ -90,12 +82,7 @@ fn composite_renders_no_holes_inside_visible_brick() {
     }
     let mesh = greedy_mesh(&b);
     let palette = Arc::new(MaterialPalette::default());
-    let ident = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
+    let ident = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
     let near = vec![MeshNode {
         id: 1,
         mesh: Arc::new(mesh.clone()),
@@ -117,13 +104,6 @@ fn composite_renders_no_holes_inside_visible_brick() {
     let fb = render_composite(&scene, &cam, &cfg);
 
     // Count non-sky pixels — these should make up the visible brick.
-    let non_sky = fb
-        .pixels
-        .chunks_exact(4)
-        .filter(|p| !(p[0] == 255 && p[1] == 0 && p[2] == 0))
-        .count();
-    assert!(
-        non_sky > 0,
-        "the brick should be visible against the red sky — got 0 non-sky pixels",
-    );
+    let non_sky = fb.pixels.chunks_exact(4).filter(|p| !(p[0] == 255 && p[1] == 0 && p[2] == 0)).count();
+    assert!(non_sky > 0, "the brick should be visible against the red sky — got 0 non-sky pixels",);
 }

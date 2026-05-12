@@ -74,28 +74,18 @@ impl ObserverState {
     /// Advance the observer by one tick. `dt_s` is used to compute
     /// velocity and advance the crossfade. The caller supplies the new
     /// position and (optional) containing frame.
-    pub fn tick(
-        &mut self,
-        new_position: DVec3,
-        new_frame: Option<ContainingFrame>,
-        dt_s: f32,
-    ) {
+    pub fn tick(&mut self, new_position: DVec3, new_frame: Option<ContainingFrame>, dt_s: f32) {
         if dt_s > 0.0 {
             let dx = new_position.x - self.position.x;
             let dy = new_position.y - self.position.y;
             let dz = new_position.z - self.position.z;
-            self.velocity_mps = DVec3::new(
-                dx / dt_s as f64,
-                dy / dt_s as f64,
-                dz / dt_s as f64,
-            );
+            self.velocity_mps = DVec3::new(dx / dt_s as f64, dy / dt_s as f64, dz / dt_s as f64);
         }
         self.position = new_position;
         if let Some(f) = new_frame {
             self.containing_frame = f;
         }
-        self.since_last_capture_ticks =
-            self.since_last_capture_ticks.saturating_add(1);
+        self.since_last_capture_ticks = self.since_last_capture_ticks.saturating_add(1);
         if self.next_skybox.is_some() && self.crossfade_duration_s > 0.0 {
             let inc = dt_s / self.crossfade_duration_s;
             self.crossfade_t = (self.crossfade_t + inc).clamp(0.0, 1.0);
@@ -178,20 +168,14 @@ mod tests {
 
     #[test]
     fn no_capture_means_refresh() {
-        let s = ObserverState::new(
-            DVec3::ZERO,
-            ContainingFrame::World(WorldAddr::ROOT),
-        );
+        let s = ObserverState::new(DVec3::ZERO, ContainingFrame::World(WorldAddr::ROOT));
         let policy = SkyboxRefreshPolicy::default();
         assert!(s.should_refresh(&policy, DVec3::ZERO, 6.371e6, None));
     }
 
     #[test]
     fn position_delta_triggers_refresh() {
-        let mut s = ObserverState::new(
-            DVec3::ZERO,
-            ContainingFrame::World(WorldAddr::ROOT),
-        );
+        let mut s = ObserverState::new(DVec3::ZERO, ContainingFrame::World(WorldAddr::ROOT));
         s.accept_next(dummy_sky(DVec3::ZERO, 100.0));
         // Within 5 % of 100 m = 5 m: should NOT refresh.
         s.position = DVec3::new(4.0, 0.0, 0.0);
@@ -204,29 +188,22 @@ mod tests {
 
     #[test]
     fn tier_change_triggers_refresh() {
-        let mut s = ObserverState::new(
-            DVec3::ZERO,
-            ContainingFrame::World(WorldAddr::ROOT),
-        );
+        let mut s = ObserverState::new(DVec3::ZERO, ContainingFrame::World(WorldAddr::ROOT));
         s.accept_next(dummy_sky(DVec3::ZERO, 100.0));
         let p = SkyboxRefreshPolicy::default();
         // Previous frame differs from current → tier changed.
         let prev = ContainingFrame::default();
         let _ = prev;
         // Force a tier change by switching to Free.
-        s.containing_frame = ContainingFrame::Free(
-            atomr_worlds_core::vehicle::ParentAddr::World(WorldAddr::ROOT),
-        );
+        s.containing_frame =
+            ContainingFrame::Free(atomr_worlds_core::vehicle::ParentAddr::World(WorldAddr::ROOT));
         let prev = ContainingFrame::World(WorldAddr::ROOT);
         assert!(s.should_refresh(&p, DVec3::ZERO, 6.371e6, Some(prev)));
     }
 
     #[test]
     fn age_threshold_triggers_refresh() {
-        let mut s = ObserverState::new(
-            DVec3::ZERO,
-            ContainingFrame::World(WorldAddr::ROOT),
-        );
+        let mut s = ObserverState::new(DVec3::ZERO, ContainingFrame::World(WorldAddr::ROOT));
         s.accept_next(dummy_sky(DVec3::ZERO, 100.0));
         s.since_last_capture_ticks = 601;
         let p = SkyboxRefreshPolicy::default();
@@ -235,10 +212,7 @@ mod tests {
 
     #[test]
     fn velocity_tracked_across_ticks() {
-        let mut s = ObserverState::new(
-            DVec3::ZERO,
-            ContainingFrame::World(WorldAddr::ROOT),
-        );
+        let mut s = ObserverState::new(DVec3::ZERO, ContainingFrame::World(WorldAddr::ROOT));
         s.tick(DVec3::new(10.0, 0.0, 0.0), None, 1.0);
         assert!((s.velocity_mps.x - 10.0).abs() < 1e-9);
         s.tick(DVec3::new(15.0, 0.0, 0.0), None, 0.5);
@@ -247,10 +221,7 @@ mod tests {
 
     #[test]
     fn crossfade_advances_with_dt() {
-        let mut s = ObserverState::new(
-            DVec3::ZERO,
-            ContainingFrame::World(WorldAddr::ROOT),
-        );
+        let mut s = ObserverState::new(DVec3::ZERO, ContainingFrame::World(WorldAddr::ROOT));
         s.accept_next(dummy_sky(DVec3::ZERO, 100.0));
         s.accept_next(dummy_sky(DVec3::new(50.0, 0.0, 0.0), 100.0));
         s.crossfade_duration_s = 1.0;
