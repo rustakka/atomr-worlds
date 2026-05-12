@@ -20,6 +20,7 @@ pub mod camera;
 pub mod iso;
 pub mod mesh;
 pub mod observer;
+pub mod raster2d;
 pub mod render;
 pub mod scene;
 pub mod skybox;
@@ -36,6 +37,7 @@ pub use scene::{
     MaterialPalette, MeshNode, SceneDescription, SceneId,
 };
 pub use observer::{ObserverState, SkyboxRefreshPolicy};
+pub use raster2d::{blend_rect, blit_rgba, fill_rect, fill_rect_stipple, StipplePattern};
 pub use skybox::{
     render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT,
 };
