@@ -28,6 +28,10 @@ pub use local::{LocalHost, LocalHostConfig};
 pub use policy::{DefaultPolicy, GenerationPolicy, PolicyResolver, PrefixPolicy};
 pub use shape::{DefaultShape, PrefixShape, ShapeResolver};
 
+pub use atomr_worlds_generate::{
+    region_id, AuthoredRegion, AuthoredRegionStore, LiteralRegion, RegionAabb, RegionId,
+};
+
 pub use atomr_worlds_persist::{
     persistence_id_for, InMemoryJournal, InMemorySnapshotStore, RecoveredState, VoxelWriteEvent,
     WorldPersistence, WorldSnapshot,

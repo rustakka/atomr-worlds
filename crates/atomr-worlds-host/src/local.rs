@@ -19,8 +19,8 @@ use atomr_worlds_core::lod::MetricScale;
 use atomr_worlds_core::shape::WorldShape;
 use atomr_worlds_core::vehicle::{AffineFrame, ParentAddr, VehicleAddr};
 use atomr_worlds_generate::{
-    default_registry, BrickGenContext, DefaultMacroGenerator, GeneratorRegistry, MacroGenerator,
-    MacroStateCache, Resolved, WorldGen, WorldMacroState,
+    default_registry, AuthoredRegionStore, BrickGenContext, DefaultMacroGenerator,
+    GeneratorRegistry, MacroGenerator, MacroStateCache, Resolved, WorldGen, WorldMacroState,
 };
 use atomr_worlds_persist::{VoxelWriteEvent, WorldPersistence, WorldSnapshot};
 use atomr_worlds_proto::{Envelope, WorldEvent, WorldRequest, AABB};
@@ -57,6 +57,11 @@ pub struct LocalHostConfig {
     /// tests with multiple `LocalHost`s in the same process) reuse one
     /// cache.
     pub macro_cache: Arc<MacroStateCache>,
+    /// Registry of hand-authored regions (Phase 13d). Each registered
+    /// region is overlaid on every brick fetch that intersects its
+    /// bounds. Shared via `Arc` so cluster shells and Python bindings
+    /// can manipulate one store. Defaults to empty.
+    pub authored_regions: Arc<std::sync::Mutex<AuthoredRegionStore>>,
     /// Default bound for per-subscriber mpsc channels.
     pub subscriber_capacity: usize,
     /// Timeout for `WorldHost::request`'s `ask` call.
@@ -86,6 +91,7 @@ impl Default for LocalHostConfig {
             // legacy bricks remain bit-identical.
             macro_generator: None,
             macro_cache: Arc::new(MacroStateCache::new()),
+            authored_regions: Arc::new(std::sync::Mutex::new(AuthoredRegionStore::new())),
             subscriber_capacity: 256,
             request_timeout: Duration::from_secs(10),
             persistence: None,
@@ -124,6 +130,27 @@ impl LocalHost {
     /// Convenience constructor with default config and a chosen root seed.
     pub async fn with_seed(seed: u64) -> Result<Self, HostError> {
         Self::new(LocalHostConfig { root_seed: seed, ..LocalHostConfig::default() }).await
+    }
+
+    /// Register an authored region (Phase 13d). The region's voxels
+    /// overlay procedural fill on every brick fetch that intersects its
+    /// bounds. Note: actors that have already cached the affected bricks
+    /// will not pick up the new region until the brick is evicted or the
+    /// actor is respawned — for now, register before subscribing.
+    pub fn register_authored_region(
+        &self,
+        region: Arc<dyn atomr_worlds_generate::AuthoredRegion>,
+    ) {
+        let mut store = self.config.authored_regions.lock().unwrap();
+        store.register(region);
+    }
+
+    /// Access the shared authored region store directly (e.g. for tests
+    /// or persistence rehydration).
+    pub fn authored_region_store(
+        &self,
+    ) -> Arc<std::sync::Mutex<AuthoredRegionStore>> {
+        self.config.authored_regions.clone()
     }
 
     /// Convenience constructor with persistence pre-wired.
@@ -191,6 +218,7 @@ impl LocalHost {
 
         let name = format!("entity-{:x}-{}", seed, map.len());
         let persistence = self.config.persistence.clone();
+        let authored_regions = self.config.authored_regions.clone();
         let initial_frame = match addr {
             Address::Vehicle(v) => Some(AffineFrame::at_origin(v.parent)),
             Address::World(_) => None,
@@ -209,6 +237,7 @@ impl LocalHost {
                         initial_frame,
                         shape,
                         macro_state.clone(),
+                        authored_regions.clone(),
                     )
                 }),
                 &name,
@@ -323,6 +352,10 @@ pub(crate) struct WorldActor {
     /// worlds (legacy behavior) or when the host config disabled macro
     /// pre-sim.
     macro_state: Option<Arc<WorldMacroState>>,
+    /// Shared per-host registry of authored regions (Phase 13d). Each
+    /// brick miss consults this store and overlays any regions whose
+    /// bounds intersect the brick.
+    authored_regions: Arc<std::sync::Mutex<AuthoredRegionStore>>,
     cache: HashMap<IVec3, Brick>,
     /// Voxel-position → user-written voxel. Mirrors what's in the journal so
     /// brick cache misses can be repopulated correctly post-recovery.
@@ -349,6 +382,7 @@ impl WorldActor {
         frame: Option<AffineFrame>,
         shape: WorldShape,
         macro_state: Option<Arc<WorldMacroState>>,
+        authored_regions: Arc<std::sync::Mutex<AuthoredRegionStore>>,
     ) -> Self {
         Self {
             addr,
@@ -356,6 +390,7 @@ impl WorldActor {
             resolved,
             shape,
             macro_state,
+            authored_regions,
             cache: HashMap::new(),
             overlay,
             subscribers: HashMap::new(),
@@ -428,6 +463,16 @@ impl WorldActor {
                     Resolved::Empty => Brick::new(),
                 }
             };
+            // Apply authored regions (Phase 13d). Each registered region
+            // whose AABB intersects this brick overlays its voxels on
+            // top of the procedural fill. Iteration order is sorted by
+            // region id — deterministic across runs.
+            {
+                let store = self.authored_regions.lock().unwrap();
+                if !store.is_empty() {
+                    let _ = store.apply_all(brick_coord, BRICK_EDGE as i64, &mut b);
+                }
+            }
             // Apply any user-write overlay falling inside this brick.
             let edge = BRICK_EDGE as i64;
             let origin = IVec3::new(brick_coord.x * edge, brick_coord.y * edge, brick_coord.z * edge);

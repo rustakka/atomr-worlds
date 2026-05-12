@@ -15,7 +15,7 @@ use atomr_worlds_core::addr::{Address, Level, LevelKey, WorldAddr};
 use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_core::lod::{Lod, MetricScale};
 use atomr_worlds_core::seed as seed_core;
-use atomr_worlds_host::{LocalHost, LocalHostConfig, WorldHost};
+use atomr_worlds_host::{LiteralRegion, LocalHost, LocalHostConfig, RegionAabb, WorldHost};
 use atomr_worlds_proto::{Envelope, WorldEvent, WorldRequest};
 use atomr_worlds_voxel::{Brick as RustBrick, Voxel as RustVoxel, BRICK_EDGE};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -332,6 +332,38 @@ impl PyWorldClient {
         self.rt
             .block_on(self.host.shutdown())
             .map_err(|e| PyRuntimeError::new_err(format!("{e}")))
+    }
+
+    /// Register an authored region of literal voxel data.
+    ///
+    /// `bounds_min` and `bounds_max` are inclusive-min, exclusive-max
+    /// voxel coordinates. `voxels` maps `(x, y, z) -> material_id`. Any
+    /// entries outside the bounds are silently ignored at application.
+    /// Useful for storytelling worlds and (Phase 13e) DEM imports.
+    #[pyo3(signature = (name, bounds_min, bounds_max, voxels))]
+    fn register_literal_region(
+        &self,
+        name: &str,
+        bounds_min: (i64, i64, i64),
+        bounds_max: (i64, i64, i64),
+        voxels: std::collections::HashMap<(i64, i64, i64), u16>,
+    ) -> PyResult<()> {
+        let bounds = RegionAabb::new(
+            IVec3::new(bounds_min.0, bounds_min.1, bounds_min.2),
+            IVec3::new(bounds_max.0, bounds_max.1, bounds_max.2),
+        );
+        let map: std::collections::HashMap<IVec3, RustVoxel> = voxels
+            .into_iter()
+            .map(|((x, y, z), m)| (IVec3::new(x, y, z), RustVoxel::new(m)))
+            .collect();
+        let region = std::sync::Arc::new(LiteralRegion::new(name, bounds, map));
+        self.host.register_authored_region(region);
+        Ok(())
+    }
+
+    /// Number of currently-registered authored regions.
+    fn authored_region_count(&self) -> usize {
+        self.host.authored_region_store().lock().unwrap().len()
     }
 }
 

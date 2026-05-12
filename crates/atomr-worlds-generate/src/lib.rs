@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod authored;
 pub mod brick;
 pub mod error;
 pub mod macro_state;
@@ -14,6 +15,10 @@ pub mod strategies;
 pub mod terrain;
 pub mod tiers;
 
+pub use authored::{
+    heightmap_from_columns, region_id, AuthoredRegion, AuthoredRegionStore, HeightmapRegion,
+    LiteralRegion, RegionAabb, RegionId, VoxFileRegion, VoxelTransform,
+};
 pub use brick::{BrickGenContext, BrickGenerator};
 pub use error::GenerateError;
 pub use macro_state::{
