@@ -145,11 +145,9 @@ async fn update_observer_pos_emits_new_bricks() {
     let mut initial_bricks = 0;
     while let Ok(Some(env)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
         match env.body {
-                WorldEvent::Tier { .. } => {}
-                WorldEvent::BrickSnapshot { .. } => initial_bricks += 1,
-                _ => {}
-            },
-            _ => break,
+            WorldEvent::Tier { .. } => {}
+            WorldEvent::BrickSnapshot { .. } => initial_bricks += 1,
+            _ => {}
         }
     }
     assert!(initial_bricks > 0, "initial subscription should emit some bricks");
@@ -173,14 +171,12 @@ async fn update_observer_pos_emits_new_bricks() {
     let mut new_bricks = 0;
     while let Ok(Some(env)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
         match env.body {
-                WorldEvent::Tier { sub_id, .. } => {
-                    assert_eq!(sub_id, 7);
-                    saw_tier = true;
-                }
-                WorldEvent::BrickSnapshot { .. } => new_bricks += 1,
-                _ => {}
-            },
-            _ => break,
+            WorldEvent::Tier { sub_id, .. } => {
+                assert_eq!(sub_id, 7);
+                saw_tier = true;
+            }
+            WorldEvent::BrickSnapshot { .. } => new_bricks += 1,
+            _ => {}
         }
     }
     assert!(saw_tier, "UpdateObserverPos should emit a Tier event");

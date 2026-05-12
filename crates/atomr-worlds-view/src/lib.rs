@@ -21,6 +21,7 @@ pub mod iso;
 pub mod mesh;
 pub mod render;
 pub mod scene;
+pub mod skybox;
 
 pub use camera::Camera;
 pub use iso::{surface_mesh, MeshMode, SmoothConfig};
@@ -29,6 +30,9 @@ pub use render::{material_color, render_brick_png, render_mesh, Framebuffer, Ren
 pub use scene::{
     scene_from_bricks, CameraNode, FrameMetadata, LightKind, LightNode, MaterialEntry,
     MaterialPalette, MeshNode, SceneDescription, SceneId,
+};
+pub use skybox::{
+    render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT,
 };
 
 #[derive(Debug, thiserror::Error)]

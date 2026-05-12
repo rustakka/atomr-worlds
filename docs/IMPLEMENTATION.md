@@ -335,7 +335,8 @@ space) so the HashMap-oracle test exercises both empty and populated regions.
 | `atomr-worlds-persist` unit tests                              | Snapshot+tail recovery; empty-voxel clears overlay; persistence id stability |
 | `atomr-worlds-accel` unit tests                                | `CpuAccelerator` matches direct `BrickGenerator`; batched-fill default impl  |
 | `atomr-worlds-accel/tests/cuda_determinism.rs` (`--ignored`)   | CUDA bricks match CPU bricks byte-for-byte; GPU runs are idempotent          |
-| `atomr-worlds-view/tests/deterministic_screenshot.rs`          | FNV-1a hash of pixels equal across runs; non-background pixels present       |
+| `atomr-worlds-view/tests/deterministic_screenshot.rs`          | FNV-1a hash of pixels equal across runs; pinned hash matches reversed-z output; non-background pixels present |
+| `atomr-worlds-view/tests/skybox.rs`                            | Cube-face basis orthonormal/right-handed; cubemap sampling scale-invariant; empty/non-empty skybox digest deterministic and observer-sensitive; reversed-z near→1, far→0 |
 
 ## Example binary
 
@@ -456,6 +457,96 @@ scene API — is blocked: `atomr-view`'s `SceneDescription` is UI-only (no
 `Mesh`/`Camera`/`Renderer`/headless path), and the `winit+wgpu` backend in
 `atomr-view-backends` is stubbed. Once the upstream scene API grows 3D
 primitives, `mesh::greedy_mesh`'s output drops straight into them.
+
+## Phase 13f (landed) — Skybox + reversed-z
+
+[`crates/atomr-worlds-view/src/camera.rs`](../crates/atomr-worlds-view/src/camera.rs)
+flips `perspective(fov_y, aspect, near, far)` from the standard `[0, 1]`
+forward-z convention to **reversed-z**: a vertex at the near plane projects to
+depth `1.0`, a vertex at the far plane to `0.0`. The change is a
+two-row swap in the projection matrix (`[2][2] = -near*nf`, `[3][2] =
+-far*near*nf` instead of `far*nf` and `far*near*nf`). The rasterizer's
+companion changes live in
+[`render.rs`](../crates/atomr-worlds-view/src/render.rs):
+`Framebuffer.depth` is now initialised to `0.0` (the far plane under
+reversed-z), and the z-buffer compare is `z > fb.depth[idx]` so the
+closer fragment (larger depth) wins.
+
+Why reversed-z? Standard `[0, 1]` depth wastes most of the f32 mantissa
+on the near third of the view frustum because `1/z` post-perspective
+divide compresses far values. Reversed-z plus an f32 depth buffer is
+the well-known fix: it spreads precision evenly across the buffer so
+celestial-body silhouettes at the far horizon stay stable against
+near-field terrain. The Phase 13f skybox needs this property — the
+skybox sits at the world's outer shell, and without reversed-z any
+parent-tier mesh capture would z-fight against background gradient.
+
+The
+[`tests/deterministic_screenshot.rs`](../crates/atomr-worlds-view/tests/deterministic_screenshot.rs)
+pinned hash is bumped to `0x71cc_a39a_1edb_1595`, matching the
+reversed-z output. The pre-existing run-to-run determinism assertion
+is unchanged; the new `pinned_hash_matches_current_render` test
+catches future drift in either the renderer or the terrain generator.
+
+[`crates/atomr-worlds-view/src/skybox.rs`](../crates/atomr-worlds-view/src/skybox.rs)
+adds the cubemap pipeline:
+
+```rust
+pub enum CubeFace { PosX, NegX, PosY, NegY, PosZ, NegZ }
+impl CubeFace {
+    pub const ALL: [CubeFace; 6];
+    pub fn forward(self) -> [f32; 3];
+    pub fn up(self)      -> [f32; 3];
+    pub fn right(self)   -> [f32; 3];
+}
+pub struct CubeFaceImage { pub width: u32, pub height: u32, pub pixels: Vec<u8> }
+pub struct Skybox {
+    pub faces: [CubeFaceImage; 6],
+    pub origin: [f64; 3], pub inner_radius_m: f64, pub outer_radius_m: f64,
+    pub captured_seed: u64, pub face_resolution: u32, pub digest: u64,
+}
+pub struct SkyboxConfig {
+    pub face_resolution: u32, pub background_color: [u8; 4],
+    pub include_parent_tier: bool,
+}
+pub fn render_skybox_from_meshes(
+    meshes: &[MeshNode], observer: [f64; 3],
+    inner_radius_m: f64, outer_radius_m: f64,
+    captured_seed: u64, cfg: &SkyboxConfig,
+) -> Skybox;
+impl Skybox {
+    pub fn sample(&self, dir_unit: [f32; 3]) -> [u8; 4];
+    pub fn compute_digest(&self) -> u64;
+}
+```
+
+`CubeFace::forward/up/right` form a right-handed orthonormal frame on
+each face (`cross(right, up) == forward`). `Skybox::sample` is the
+standard largest-axis-picks-the-face cubemap fetch and is
+scale-invariant: `sample(dir) == sample(k * dir)` for any `k > 0`.
+The digest is an FNV-1a over the concatenated face pixel buffers, in
+`CubeFace::ALL` order.
+
+`Camera::for_cube_face(eye, face, near, far)` returns a 90° FOV /
+aspect 1.0 camera looking along the face's outward normal — six of
+those tile the full sphere with no overlap and no gap.
+`render_skybox_from_meshes` walks the six faces in order, combines
+all `MeshNode`s into one transform-baked mesh per face (cheap because
+the mesh-node count for a skybox capture is small), and calls
+`render_mesh` once per face. The depth buffer is local to each face
+call, so the rasterizer state stays single-pass and the result is
+deterministic across runs.
+
+Phase 13f intentionally stops at the mesh-input boundary. A
+`WorldHost`-pulling wrapper that fetches the parent-tier brick slab
+and feeds it into `render_skybox_from_meshes` lands in Phase 13g/13i
+alongside the streaming-proto changes for skybox bursts. Keeping the
+13f surface mesh-only makes the test file at
+[`tests/skybox.rs`](../crates/atomr-worlds-view/tests/skybox.rs)
+self-contained: seven tests covering the cube-face basis, sampling,
+empty / non-empty rendering, digest determinism, observer
+sensitivity, and the reversed-z projection sanity check, none of
+which need `LocalHost`.
 
 See [`PHASES.md`](PHASES.md) for the full roadmap.
 
