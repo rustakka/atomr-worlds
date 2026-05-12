@@ -24,19 +24,16 @@ pub type StrategyId = u64;
 /// A choice of how generation should proceed for a given address. The host
 /// crate's `policy.rs` produces values of this type from its `PolicyResolver`
 /// and passes them to [`GeneratorRegistry::resolve`].
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 pub enum GenerationPolicy {
     /// Use the strategy chosen by the selector from the world seed.
+    #[default]
     Seeded,
     /// Skip generation entirely; reads return `Voxel::EMPTY`. User writes
     /// still apply through the overlay.
     Empty,
     /// Force a specific registered strategy.
     Custom(StrategyId),
-}
-
-impl Default for GenerationPolicy {
-    fn default() -> Self { GenerationPolicy::Seeded }
 }
 
 /// Const-time FNV-1a 64-bit hash of `name`. Used to build [`StrategyId`]

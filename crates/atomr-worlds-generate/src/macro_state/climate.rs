@@ -50,22 +50,22 @@ pub fn generate_climate(
     cfg: ClimateConfig,
 ) -> ClimateField {
     let n_faces = grid.face_count();
-    let mut temperature_c = vec![0.0_f32; n_faces];
-    for f in 0..n_faces {
-        let c = grid.face_centroid(f as super::surface_grid::FaceId);
-        let lat = c.y.abs() as f32; // 0..1
-        let base = cfg.equator_temp_c + (cfg.pole_temp_c - cfg.equator_temp_c) * lat;
-        let alt = elev.elev_m[f].max(0.0);
-        temperature_c[f] = base - cfg.lapse_rate_c_per_m * alt;
-    }
+    let temperature_c: Vec<f32> = (0..n_faces)
+        .map(|f| {
+            let c = grid.face_centroid(f as super::surface_grid::FaceId);
+            let lat = c.y.abs() as f32; // 0..1
+            let base = cfg.equator_temp_c + (cfg.pole_temp_c - cfg.equator_temp_c) * lat;
+            let alt = elev.elev_m[f].max(0.0);
+            base - cfg.lapse_rate_c_per_m * alt
+        })
+        .collect();
 
     // Humidity: seed from ocean (negative elevation) at 1.0, else 0.
-    let mut humidity = vec![0.0_f32; n_faces];
-    for f in 0..n_faces {
-        if elev.elev_m[f] < 0.0 {
-            humidity[f] = 1.0;
-        }
-    }
+    let mut humidity: Vec<f32> = elev
+        .elev_m
+        .iter()
+        .map(|&e| if e < 0.0 { 1.0 } else { 0.0 })
+        .collect();
 
     // Diffusion iterations — each face takes the max of its neighbours
     // times `humidity_decay`. Iteration order is fixed (face index), so

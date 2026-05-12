@@ -3,11 +3,11 @@
 //! A [`PolicyResolver`] maps an [`Address`] to one of three [`GenerationPolicy`]
 //! variants:
 //!
-//! - `Seeded`  — let the [`GeneratorRegistry`] selector pick a strategy
-//!               deterministically from the world seed (default).
-//! - `Empty`   — short-circuit generation; reads return [`Voxel::EMPTY`]. User
-//!               writes still go through the overlay/journal as normal.
-//! - `Custom`  — force a specific registered strategy id.
+//! - `Seeded` — let the [`GeneratorRegistry`] selector pick a strategy
+//!   deterministically from the world seed (default).
+//! - `Empty` — short-circuit generation; reads return [`Voxel::EMPTY`]. User
+//!   writes still go through the overlay/journal as normal.
+//! - `Custom` — force a specific registered strategy id.
 //!
 //! [`Voxel::EMPTY`]: atomr_worlds_voxel::Voxel::EMPTY
 //! [`GeneratorRegistry`]: atomr_worlds_generate::registry::GeneratorRegistry

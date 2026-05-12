@@ -143,9 +143,8 @@ async fn update_observer_pos_emits_new_bricks() {
 
     // Drain the initial Tier + BrickSnapshot burst.
     let mut initial_bricks = 0;
-    loop {
-        match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-            Ok(Some(env)) => match env.body {
+    while let Ok(Some(env)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+        match env.body {
                 WorldEvent::Tier { .. } => {}
                 WorldEvent::BrickSnapshot { .. } => initial_bricks += 1,
                 _ => {}
@@ -172,9 +171,8 @@ async fn update_observer_pos_emits_new_bricks() {
     // Expect a new Tier event + at least one BrickSnapshot for newly visible bricks.
     let mut saw_tier = false;
     let mut new_bricks = 0;
-    loop {
-        match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-            Ok(Some(env)) => match env.body {
+    while let Ok(Some(env)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+        match env.body {
                 WorldEvent::Tier { sub_id, .. } => {
                     assert_eq!(sub_id, 7);
                     saw_tier = true;

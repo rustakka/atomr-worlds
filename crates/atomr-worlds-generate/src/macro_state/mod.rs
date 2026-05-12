@@ -104,7 +104,7 @@ pub trait MacroGenerator: Send + Sync + Debug {
 
 /// Canonical CPU implementation — the three-layer pipeline described in
 /// the module docs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DefaultMacroGenerator {
     pub config: MacroConfig,
 }
@@ -112,12 +112,6 @@ pub struct DefaultMacroGenerator {
 impl DefaultMacroGenerator {
     pub fn new(config: MacroConfig) -> Self {
         Self { config }
-    }
-}
-
-impl Default for DefaultMacroGenerator {
-    fn default() -> Self {
-        Self { config: MacroConfig::default() }
     }
 }
 

@@ -14,6 +14,7 @@ pub struct BiomeMap {
 
 /// Biome identifier — assigned per face by [`classify_biomes`]. Names
 /// and ids are stable across compilations.
+#[allow(clippy::module_inception)]
 pub mod biome {
     pub const OCEAN: u8 = 0;
     pub const ICE: u8 = 1;
@@ -28,11 +29,13 @@ pub mod biome {
 }
 
 pub fn classify_biomes(elev: &ElevationField, climate: &ClimateField) -> BiomeMap {
-    let n = elev.elev_m.len();
-    let mut biome_id = vec![0u8; n];
-    for i in 0..n {
-        biome_id[i] = classify_one(elev.elev_m[i], climate.temperature_c[i], climate.humidity[i]);
-    }
+    let biome_id: Vec<u8> = elev
+        .elev_m
+        .iter()
+        .zip(climate.temperature_c.iter())
+        .zip(climate.humidity.iter())
+        .map(|((e, t), h)| classify_one(*e, *t, *h))
+        .collect();
     BiomeMap { biome_id }
 }
 
