@@ -16,9 +16,11 @@ members = [
     "examples/print-brick",
     "examples/view-png",
     "examples/sphere-flyby",
+    "examples/view-fp",
     "examples/view-overview",
     "examples/view-rts",
     "examples/view-slice",
+    "examples/view-tp",
 ]
 
 [workspace.package]
