@@ -39,6 +39,7 @@ impl WorldExtractor {
         match &message.body {
             WorldRequest::GetVoxel { addr, .. } => *addr,
             WorldRequest::GetBrick { addr, .. } => *addr,
+            WorldRequest::WriteVoxel { addr, .. } => *addr,
             WorldRequest::Subscribe { addr, .. } => *addr,
             // Unsubscribe is routed using the envelope's `from` address.
             WorldRequest::Unsubscribe { .. } => message.from,

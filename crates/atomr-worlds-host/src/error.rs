@@ -14,4 +14,10 @@ pub enum HostError {
     Shutdown,
     #[error("not yet implemented: {0}")]
     NotYetImplemented(&'static str),
+    #[error("atomr actor system error: {0}")]
+    Sys(String),
+    #[error("ask error: {0}")]
+    Ask(String),
+    #[error("subscriber channel closed before initial snapshot")]
+    SubscribeFailed,
 }

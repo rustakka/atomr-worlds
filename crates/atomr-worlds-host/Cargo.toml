@@ -10,15 +10,22 @@ authors.workspace = true
 description = "Hosting backends (local + atomr-cluster-sharding) for atomr-worlds."
 
 [dependencies]
-atomr-worlds-core  = { workspace = true }
-atomr-worlds-voxel = { workspace = true }
-atomr-worlds-proto = { workspace = true }
+atomr-worlds-core     = { workspace = true }
+atomr-worlds-voxel    = { workspace = true }
+atomr-worlds-proto    = { workspace = true }
+atomr-worlds-generate = { workspace = true }
 
+atomr                  = { workspace = true }
+atomr-config           = { workspace = true }
 atomr-core             = { workspace = true }
 atomr-cluster          = { workspace = true }
 atomr-cluster-sharding = { workspace = true }
 
 tokio       = { workspace = true }
+bytes       = { workspace = true }
 async-trait = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

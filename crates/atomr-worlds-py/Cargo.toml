@@ -1,0 +1,28 @@
+[package]
+name = "atomr-worlds-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Python bindings for atomr-worlds via PyO3."
+
+[lib]
+name = "atomrworlds_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+atomr-worlds-core     = { workspace = true }
+atomr-worlds-voxel    = { workspace = true }
+atomr-worlds-proto    = { workspace = true }
+atomr-worlds-host     = { workspace = true }
+atomr-worlds-generate = { workspace = true }
+pyo3  = { workspace = true, features = ["macros"] }
+tokio = { workspace = true }
+bytes = { workspace = true }

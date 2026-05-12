@@ -1,0 +1,20 @@
+[package]
+name = "print-brick"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "print-brick"
+path = "src/main.rs"
+
+[dependencies]
+atomr-worlds-core     = { workspace = true }
+atomr-worlds-voxel    = { workspace = true }
+atomr-worlds-proto    = { workspace = true }
+atomr-worlds-host     = { workspace = true }
+atomr-worlds-generate = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }

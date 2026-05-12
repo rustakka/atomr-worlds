@@ -12,7 +12,7 @@ pub mod octree;
 pub mod store;
 pub mod voxel;
 
-pub use brick::{Brick, BRICK_EDGE, BRICK_LEN};
+pub use brick::{Brick, BrickDecodeError, BRICK_EDGE, BRICK_LEN};
 pub use error::VoxelError;
 pub use octree::{InternalNode, NodeId, NodeKind, Octree, OCTREE_NULL};
 pub use store::SparseVoxelStore;

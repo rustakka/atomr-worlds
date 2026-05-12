@@ -7,24 +7,36 @@ voxel storage, metric levels of detail, and a hosting model that runs either emb
 
 ## Status
 
-**Phase 0 — primitives and structures.** This phase ships the type system, data structures, wire
-format, and host trait skeletons. Generation, persistence, rendering, and GPU acceleration are
-explicitly deferred to subsequent phases. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the
-overall model and [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for module-by-module specifics.
+**Phases 0 + 1 + 4 + 6 landed.** Phase 0 (primitives), Phase 1 (procedural generators + real
+`LocalHost` on atomr's actor system), Phase 4 (streaming subscriptions), and Phase 6 (Python
+bindings) are implemented and tested end-to-end. Phases 2 (rendering), 3 (persistence), and 5
+(GPU acceleration) ship as scaffolds — trait surfaces + minimal-viable backends ready for the
+next session.
+
+See [docs/PHASES.md](docs/PHASES.md) for the full roadmap, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+for the model, and [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for module-by-module specifics.
 
 ## Workspace layout
 
 ```
 atomr-worlds/
 ├── crates/
-│   ├── atomr-worlds-core      ─ coordinates, addressing, seed derivation, LOD (no atomr deps)
+│   ├── atomr-worlds-core      ─ coordinates, addressing, seed derivation, LOD
 │   ├── atomr-worlds-voxel     ─ Brick (16³), arena Octree, SparseVoxelStore trait
+│   ├── atomr-worlds-noise     ─ value/gradient/Worley noise + FBM, seeded
+│   ├── atomr-worlds-generate  ─ per-tier Generators; CPU TerrainGenerator
+│   ├── atomr-worlds-accel     ─ Accelerator trait + CPU backend (Phase 5 scaffold)
+│   ├── atomr-worlds-persist   ─ WorldJournal trait + in-memory backend (Phase 3 scaffold)
 │   ├── atomr-worlds-proto     ─ WorldRequest/WorldEvent/Envelope, bincode 2 wire format
-│   ├── atomr-worlds-host      ─ WorldHost trait, LocalHost/ClusterHost, MessageExtractor
-│   └── atomr-worlds-testkit   ─ proptest strategies, cross-crate verification
+│   ├── atomr-worlds-host      ─ WorldHost trait, real LocalHost, ClusterHost shell
+│   ├── atomr-worlds-testkit   ─ proptest strategies, cross-crate verification
+│   └── atomr-worlds-py        ─ Python bindings via PyO3 + maturin
 ├── examples/
-│   └── print-seed-chain       ─ smoke binary; prints seed chain + metric scales
+│   ├── print-seed-chain       ─ prints derived seeds + metric scales
+│   ├── print-brick            ─ ASCII slice of a generated world brick
+│   └── view-png               ─ top-down PNG of the surface (headless, no GPU)
 └── docs/
+    ├── PHASES.md              ─ roadmap for phases 1–6 + Python
     ├── ARCHITECTURE.md
     └── IMPLEMENTATION.md
 ```
@@ -49,22 +61,31 @@ Then from the repo root:
 ```sh
 cargo check --workspace
 cargo test  --workspace
-cargo run   -p print-seed-chain
+cargo run   -p print-seed-chain   # seed chain + metric scales
+cargo run   -p print-brick        # ASCII YZ-slice of generated terrain
+cargo run   -p view-png           # writes view-png-output.png (no display needed)
 ```
 
-`print-seed-chain` derives the five-level seed chain for a sample `WorldAddr` and prints the leaf
-voxel size at each tier (universe → world) for the default `MetricScale`s.
+For the Python bindings:
+
+```sh
+python3 -m venv .venv && source .venv/bin/activate
+pip install maturin pytest
+maturin develop -m crates/atomr-worlds-py/Cargo.toml
+python crates/atomr-worlds-py/python/tests/test_smoke.py
+```
 
 ## Verification gates
 
-Phase 0 ships green:
+All gates ship green:
 
 | gate                                                 | status              |
 | ---------------------------------------------------- | ------------------- |
 | `cargo check --workspace`                            | clean               |
-| `cargo test --workspace`                             | 38 tests pass       |
+| `cargo test --workspace`                             | 65 Rust tests pass  |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean             |
-| `cargo run -p print-seed-chain`                      | runs and prints     |
+| `cargo run -p print-seed-chain` / `print-brick` / `view-png` | all run        |
+| `python crates/atomr-worlds-py/python/tests/test_smoke.py` | 7 tests pass   |
 
 The test suite covers seed determinism, hash avalanche (≥ 40% bit flip on 1-bit input perturbation),
 low-byte distribution uniformity, brick / octree round-trips against a `HashMap` oracle, octree

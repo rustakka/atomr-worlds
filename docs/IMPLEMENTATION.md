@@ -9,9 +9,14 @@ Module-by-module map of phase 0. For the high-level model and design rationale, 
 | ------------------------------ | ----------------------------------------------- | ----------------------- |
 | `atomr-worlds-core`            | Coordinates, addressing, seeds, LOD             | none                    |
 | `atomr-worlds-voxel`           | Sparse voxel storage (brick + octree hybrid)    | none                    |
+| `atomr-worlds-noise`           | Deterministic seeded noise (value/grad/Worley + FBM) | none               |
+| `atomr-worlds-generate`        | Per-tier `Generator` impls; CPU `TerrainGenerator` | none                 |
+| `atomr-worlds-accel`           | Brick acceleration trait + CPU backend (Phase 5 scaffold) | none          |
+| `atomr-worlds-persist`         | World-actor journal trait + in-memory backend (Phase 3 scaffold) | none   |
 | `atomr-worlds-proto`           | Wire-format messages and envelopes              | none                    |
-| `atomr-worlds-host`            | `WorldHost` trait, local / cluster impls        | core, cluster, sharding |
+| `atomr-worlds-host`            | `WorldHost` trait, `LocalHost` (real), `ClusterHost` (shell) | atomr, cluster, sharding |
 | `atomr-worlds-testkit`         | proptest strategies, cross-crate verification   | none (dev-dep on host)  |
+| `atomr-worlds-py`              | PyO3 bindings: `atomrworlds` Python package     | none                    |
 
 `core` exports re-export their submodules; consumers can use the flat path or the module path
 interchangeably. Each crate has a `thiserror` error enum named after the crate.
@@ -334,16 +339,45 @@ Expected leaf sizes: universe ~54 Mm, galaxy ~14 km, sector ~3.5 km, system ~9 m
 - **rustfmt**: `max_width = 110`, `use_small_heuristics = "Max"`. Mirrors atomr's style.
 - **Lints**: `cargo clippy --workspace --all-targets -- -D warnings` is the gate.
 
-## What changes in phase 1
+## Phase 1 (landed)
 
-The shapes in phase 0 are intentionally minimal; phase 1 adds bodies:
+`Generator` trait impls for all five tiers in
+[`atomr-worlds-generate/src/tiers.rs`](../crates/atomr-worlds-generate/src/tiers.rs);
+voxel content comes from
+[`TerrainGenerator`](../crates/atomr-worlds-generate/src/terrain.rs) (FBM-driven
+heightfield + Worley caves + dirt layer). `LocalHost` in
+[`atomr-worlds-host/src/local.rs`](../crates/atomr-worlds-host/src/local.rs) wires
+a real `atomr::ActorSystem` and spawns one `WorldActor` per address (lazy, cached).
 
-- `Generator` implementations per tier (noise, terrain, system layouts).
-- `LocalHost` / `ClusterHost` bodies — instantiate atomr actor system, route envelopes to a
-  per-world actor, propagate events back through `mpsc::Receiver`.
-- A persistence binding (atomr-persistence) that snapshots generated bricks so generation is
-  pay-once.
-- Streaming behavior for `Subscribe` envelopes: AABB-bounded brick rollup, delta diffing,
-  backpressure.
+## Phase 4 (landed)
 
-Existing types stay stable; nothing in phase 0 is expected to break in phase 1.
+`LocalHost::subscribe` returns an `mpsc::Receiver<Envelope<WorldEvent>>`. On
+subscribe, the actor emits an initial `BrickSnapshot` for every brick that overlaps
+the requested AABB. Subsequent `WriteVoxel` requests inside the region produce
+`VoxelDelta` events. Backpressure policy is **drop subscriber on full channel** —
+the writer never blocks. Tests in
+[`atomr-worlds-host/tests/local_e2e.rs`](../crates/atomr-worlds-host/tests/local_e2e.rs)
+cover read, write, subscribe-snapshot, subscribe-delta, and out-of-region filtering.
+
+## Phase 6 (landed) — Python bindings
+
+[`atomr-worlds-py`](../crates/atomr-worlds-py/) exposes a PyO3 cdylib called
+`atomrworlds_native`, wrapped by the `atomrworlds` Python package. The
+`WorldClient` class is a `LocalHost`-backed query interface. Build with
+`maturin develop -m crates/atomr-worlds-py/Cargo.toml` inside a venv. Smoke tests
+at `crates/atomr-worlds-py/python/tests/test_smoke.py`.
+
+## Phases 2, 3, 5 (scaffolds)
+
+- **Phase 2 scaffold**: [`examples/view-png`](../examples/view-png) renders a
+  top-down PNG of generated terrain via `LocalHost`. No wgpu yet.
+- **Phase 3 scaffold**:
+  [`atomr-worlds-persist`](../crates/atomr-worlds-persist/) defines a
+  `WorldJournal` trait + `InMemoryJournal`. Binding to `atomr-persistence`'s
+  `PersistentActor` is the next step.
+- **Phase 5 scaffold**:
+  [`atomr-worlds-accel`](../crates/atomr-worlds-accel/) defines an `Accelerator`
+  trait with `fill_brick` + `fill_bricks_batch`. CPU impl wraps any
+  `BrickGenerator`; a CUDA backend will plug in behind the same trait.
+
+See [`PHASES.md`](PHASES.md) for the full roadmap.

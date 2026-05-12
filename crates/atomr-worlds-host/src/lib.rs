@@ -22,4 +22,4 @@ pub use cluster::ClusterHost;
 pub use error::HostError;
 pub use extractor::WorldExtractor;
 pub use host::WorldHost;
-pub use local::LocalHost;
+pub use local::{LocalHost, LocalHostConfig};

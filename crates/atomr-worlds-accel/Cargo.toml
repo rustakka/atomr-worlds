@@ -1,0 +1,16 @@
+[package]
+name = "atomr-worlds-accel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Brick-generation acceleration trait + CPU impl (Phase 5 scaffold; GPU backend deferred)."
+
+[dependencies]
+atomr-worlds-core     = { workspace = true }
+atomr-worlds-voxel    = { workspace = true }
+atomr-worlds-generate = { workspace = true }
+thiserror = { workspace = true }
