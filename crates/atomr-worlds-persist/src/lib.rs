@@ -7,6 +7,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+#[cfg(feature = "derived")]
+pub mod derived;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -63,19 +66,40 @@ fn world_addr_key(addr: WorldAddr) -> String {
     let w = addr.world;
     format!(
         "u:{},{},{},{}|g:{},{},{},{}|s:{},{},{},{}|sy:{},{},{},{}|w:{},{},{},{}",
-        u.coord.x, u.coord.y, u.coord.z, u.dim,
-        g.coord.x, g.coord.y, g.coord.z, g.dim,
-        s.coord.x, s.coord.y, s.coord.z, s.dim,
-        sy.coord.x, sy.coord.y, sy.coord.z, sy.dim,
-        w.coord.x, w.coord.y, w.coord.z, w.dim,
+        u.coord.x,
+        u.coord.y,
+        u.coord.z,
+        u.dim,
+        g.coord.x,
+        g.coord.y,
+        g.coord.z,
+        g.dim,
+        s.coord.x,
+        s.coord.y,
+        s.coord.z,
+        s.dim,
+        sy.coord.x,
+        sy.coord.y,
+        sy.coord.z,
+        sy.dim,
+        w.coord.x,
+        w.coord.y,
+        w.coord.z,
+        w.dim,
     )
 }
 
 fn parent_addr_key(p: ParentAddr) -> String {
     match p {
-        ParentAddr::World(a) => format!("pW|{}|lvl:{:?}", world_addr_key(a.ancestor(Level::World)), Level::World),
-        ParentAddr::System(a) => format!("pS|{}|lvl:{:?}", world_addr_key(a.ancestor(Level::System)), Level::System),
-        ParentAddr::Sector(a) => format!("pK|{}|lvl:{:?}", world_addr_key(a.ancestor(Level::Sector)), Level::Sector),
+        ParentAddr::World(a) => {
+            format!("pW|{}|lvl:{:?}", world_addr_key(a.ancestor(Level::World)), Level::World)
+        }
+        ParentAddr::System(a) => {
+            format!("pS|{}|lvl:{:?}", world_addr_key(a.ancestor(Level::System)), Level::System)
+        }
+        ParentAddr::Sector(a) => {
+            format!("pK|{}|lvl:{:?}", world_addr_key(a.ancestor(Level::Sector)), Level::Sector)
+        }
     }
 }
 
@@ -178,8 +202,7 @@ impl WorldPersistence {
         }
         let highest = self.journal.highest_sequence_nr(&pid, 0).await?;
         if highest >= start_from {
-            let events =
-                self.journal.replay_messages(&pid, start_from, highest, u64::MAX).await?;
+            let events = self.journal.replay_messages(&pid, start_from, highest, u64::MAX).await?;
             for repr in events {
                 let ev = decode_event(&repr.payload)?;
                 apply_event_to_overlay(&mut state.writes, &ev);
@@ -343,10 +366,8 @@ mod tests {
     fn persistence_id_world_and_vehicle_are_distinct() {
         use atomr_worlds_core::vehicle::{ParentAddr, VehicleAddr, VehicleSlot};
         let w = Address::World(WorldAddr::ROOT);
-        let v = Address::Vehicle(VehicleAddr::new(
-            ParentAddr::World(WorldAddr::ROOT),
-            VehicleSlot::new(42, 0),
-        ));
+        let v =
+            Address::Vehicle(VehicleAddr::new(ParentAddr::World(WorldAddr::ROOT), VehicleSlot::new(42, 0)));
         assert_ne!(persistence_id_for(w), persistence_id_for(v));
         // Discriminator prefixes.
         assert!(persistence_id_for(w).starts_with("W|"));

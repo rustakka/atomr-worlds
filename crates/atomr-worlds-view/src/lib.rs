@@ -24,6 +24,7 @@ pub mod raster2d;
 pub mod render;
 pub mod scene;
 pub mod skybox;
+pub mod view_cache;
 pub mod world_query;
 
 pub use camera::{Camera, Projection};
@@ -42,6 +43,7 @@ pub use scene::{
 pub use skybox::{
     render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT,
 };
+pub use view_cache::{CacheAabb, DerivedKey, Revision, ViewCache};
 pub use world_query::WorldQuery;
 
 #[derive(Debug, thiserror::Error)]
