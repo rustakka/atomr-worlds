@@ -9,11 +9,16 @@ homepage.workspace = true
 authors.workspace = true
 description = "Hosting backends (local + atomr-cluster-sharding) for atomr-worlds."
 
+[features]
+default = []
+sql = ["atomr-worlds-persist/sql"]
+
 [dependencies]
 atomr-worlds-core     = { workspace = true }
 atomr-worlds-voxel    = { workspace = true }
 atomr-worlds-proto    = { workspace = true }
 atomr-worlds-generate = { workspace = true }
+atomr-worlds-persist  = { workspace = true }
 
 atomr                  = { workspace = true }
 atomr-config           = { workspace = true }

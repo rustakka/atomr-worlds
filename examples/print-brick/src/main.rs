@@ -1,6 +1,6 @@
 //! Smoke binary: ask `LocalHost` for a brick and ASCII-dump a YZ slice.
 
-use atomr_worlds_core::addr::WorldAddr;
+use atomr_worlds_core::addr::{Address, WorldAddr};
 use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_core::lod::Lod;
 use atomr_worlds_host::{LocalHost, WorldHost};
@@ -10,7 +10,7 @@ use atomr_worlds_voxel::{Brick, BRICK_EDGE};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = LocalHost::with_seed(0xDEAD_BEEF_CAFE_F00D).await?;
-    let addr = WorldAddr::ROOT;
+    let addr = Address::World(WorldAddr::ROOT);
 
     // Pick a brick that straddles the terrain surface (y around base_height/16 ≈ 2).
     let brick_coord = IVec3::new(0, 1, 0);

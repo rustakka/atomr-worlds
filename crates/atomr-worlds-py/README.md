@@ -4,7 +4,10 @@ Python interface for [`atomr-worlds`](../../README.md) via PyO3 + maturin.
 
 Exposes the determinism-critical primitives (`WorldAddr`, `LevelKey`, `Lod`,
 `MetricScale`, `Voxel`, `Brick`, `splitmix64`, `child_seed`) and a
-`LocalHost`-backed `WorldClient` for queries.
+`LocalHost`-backed `WorldClient` with `get_voxel`, `get_brick` (LOD-aware),
+`write_voxel`, and `shutdown`. The client owns its own Tokio runtime and
+in-process `LocalHost`; writes go through the host's persistence overlay when
+the Rust side was constructed with one.
 
 ## Build
 
@@ -27,9 +30,13 @@ import atomrworlds as aw
 chain = aw.WorldAddr.root().seed_chain(0xDEAD_BEEF)
 print(chain)  # [u_seed, g_seed, s_seed, sy_seed, w_seed]
 
+# Metric scales (per-tier root size + default depth)
+world_scale = aw.MetricScale.default_world()
+print(world_scale.leaf_size_m())  # ~0.6 m per voxel at max depth
+
 # Query a generated world
 client = aw.WorldClient(root_seed=0xDEAD_BEEF_CAFE_F00D)
-brick = client.get_brick(aw.WorldAddr.root(), 0, -2, 0)
+brick = client.get_brick(aw.WorldAddr.root(), 0, -2, 0)  # lod_depth=0 by default
 print(f"brick has {brick.nonempty_count()} non-air voxels")
 
 # Reshape into a NumPy array (16x16x16 uint16)

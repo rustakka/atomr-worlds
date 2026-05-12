@@ -15,5 +15,6 @@ atomr-worlds-core  = { workspace = true }
 atomr-worlds-voxel = { workspace = true }
 atomr-worlds-proto = { workspace = true }
 atomr-worlds-host  = { workspace = true }
+atomr-worlds-view  = { workspace = true }
 tokio = { workspace = true }
 png   = { workspace = true }

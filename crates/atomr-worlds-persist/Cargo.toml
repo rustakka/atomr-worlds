@@ -7,11 +7,21 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Persistence trait surface + in-memory journal (Phase 3 scaffold; full atomr-persistence binding deferred)."
+description = "Persistence binding for atomr-worlds — wraps atomr-persistence's Journal + SnapshotStore with voxel-write events and overlay snapshots."
+
+[features]
+default = []
+sql = ["dep:atomr-persistence-sql"]
 
 [dependencies]
 atomr-worlds-core  = { workspace = true }
 atomr-worlds-voxel = { workspace = true }
-async-trait = { workspace = true }
+atomr-persistence  = { workspace = true }
+atomr-persistence-sql = { workspace = true, optional = true }
+serde       = { workspace = true }
+bincode     = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

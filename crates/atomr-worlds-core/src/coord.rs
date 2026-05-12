@@ -101,6 +101,93 @@ level_coord!(
     VoxelCoord
 );
 
+/// Continuous (f64) position in meters within some containing frame.
+///
+/// Used for vehicle frame positions, observer poses, and brush centers. Kept
+/// as plain data so [`atomr_worlds_core`](crate) stays zero-dep — no `glam`
+/// or similar.
+#[derive(Copy, Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct DVec3 {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+impl DVec3 {
+    pub const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
+
+    #[inline]
+    pub const fn new(x: f64, y: f64, z: f64) -> Self {
+        Self { x, y, z }
+    }
+
+    #[inline]
+    pub fn length(self) -> f64 {
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+    }
+
+    #[inline]
+    pub fn distance(self, other: Self) -> f64 {
+        (self - other).length()
+    }
+}
+
+impl core::ops::Sub for DVec3 {
+    type Output = Self;
+    #[inline]
+    fn sub(self, rhs: Self) -> Self {
+        Self { x: self.x - rhs.x, y: self.y - rhs.y, z: self.z - rhs.z }
+    }
+}
+
+impl core::ops::Add for DVec3 {
+    type Output = Self;
+    #[inline]
+    fn add(self, rhs: Self) -> Self {
+        Self { x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z }
+    }
+}
+
+/// Unit quaternion representing orientation. Stored as `(x, y, z, w)` with
+/// `w` the scalar component. Identity is `(0, 0, 0, 1)`.
+#[derive(Copy, Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Quat {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub w: f64,
+}
+
+impl Quat {
+    pub const IDENTITY: Self = Self { x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
+
+    #[inline]
+    pub const fn new(x: f64, y: f64, z: f64, w: f64) -> Self {
+        Self { x, y, z, w }
+    }
+}
+
+impl Default for Quat {
+    #[inline]
+    fn default() -> Self { Self::IDENTITY }
+}
+
+/// A scalar quantity in SI meters. Newtype over `f64` to keep the unit
+/// explicit at API boundaries where distance fields might otherwise be
+/// confused with voxel-count or pixel quantities.
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug, Default, Serialize, Deserialize)]
+pub struct Meters(pub f64);
+
+impl Meters {
+    pub const ZERO: Self = Self(0.0);
+
+    #[inline]
+    pub const fn new(v: f64) -> Self { Self(v) }
+
+    #[inline]
+    pub fn value(self) -> f64 { self.0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

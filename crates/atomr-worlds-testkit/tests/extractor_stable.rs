@@ -1,13 +1,14 @@
-//! `MessageExtractor` stability — same `WorldAddr` → same shard id and entity id.
+//! `MessageExtractor` stability — same `Address` → same shard id and entity id.
 
-use atomr_worlds_core::addr::{LevelKey, WorldAddr};
+use atomr_worlds_core::addr::{Address, LevelKey, WorldAddr};
 use atomr_worlds_core::coord::IVec3;
+use atomr_worlds_core::vehicle::{ParentAddr, VehicleAddr, VehicleSlot};
 
 // Pull the extractor through `atomr-worlds-host`; cluster sharding behavior is
 // not exercised here, just the pure-formatting impl.
 use atomr_worlds_host::extractor::WorldExtractor;
 
-fn sample_addr() -> WorldAddr {
+fn sample_world_addr() -> WorldAddr {
     WorldAddr {
         universe: LevelKey { coord: IVec3::ZERO, dim: 0 },
         galaxy: LevelKey { coord: IVec3::new(3, -2, 1), dim: 0 },
@@ -15,6 +16,10 @@ fn sample_addr() -> WorldAddr {
         system: LevelKey { coord: IVec3::new(5, 5, 5), dim: 0 },
         world: LevelKey { coord: IVec3::ZERO, dim: 1 },
     }
+}
+
+fn sample_addr() -> Address {
+    Address::World(sample_world_addr())
 }
 
 #[test]
@@ -34,17 +39,47 @@ fn entity_id_is_stable() {
 
 #[test]
 fn distinct_addrs_have_distinct_entity_ids() {
-    let a = sample_addr();
+    let a = sample_world_addr();
     let mut b = a;
     b.world.coord = IVec3::new(1, 1, 1);
-    assert_ne!(WorldExtractor::entity_id_for(&a), WorldExtractor::entity_id_for(&b));
+    assert_ne!(
+        WorldExtractor::entity_id_for(&Address::World(a)),
+        WorldExtractor::entity_id_for(&Address::World(b))
+    );
 }
 
 #[test]
 fn shard_id_co_locates_sibling_systems() {
     // Two systems in the same sector should share a shard id.
-    let a = sample_addr();
+    let a = sample_world_addr();
     let mut b = a;
     b.system.coord = IVec3::new(9, 9, 9);
-    assert_eq!(WorldExtractor::shard_id_for(&a), WorldExtractor::shard_id_for(&b));
+    assert_eq!(
+        WorldExtractor::shard_id_for(&Address::World(a)),
+        WorldExtractor::shard_id_for(&Address::World(b))
+    );
+}
+
+#[test]
+fn vehicles_co_shard_with_parent_system() {
+    // A vehicle in a parent world should share the parent's sector shard id.
+    let parent = sample_world_addr();
+    let v = Address::Vehicle(VehicleAddr::new(
+        ParentAddr::World(parent),
+        VehicleSlot::new(0xCAFE, 0),
+    ));
+    assert_eq!(
+        WorldExtractor::shard_id_for(&v),
+        WorldExtractor::shard_id_for(&Address::World(parent))
+    );
+}
+
+#[test]
+fn vehicle_entity_id_has_v_prefix() {
+    let v = Address::Vehicle(VehicleAddr::new(
+        ParentAddr::Sector(sample_world_addr()),
+        VehicleSlot::new(7, 0),
+    ));
+    assert!(WorldExtractor::entity_id_for(&v).starts_with("V:"));
+    assert!(WorldExtractor::entity_id_for(&sample_addr()).starts_with("W:"));
 }

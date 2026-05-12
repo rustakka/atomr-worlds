@@ -1,38 +1,36 @@
-//! Phase 2 scaffold: ask `LocalHost` for a vertical slab of bricks and write a
-//! PNG showing the surface profile (top-down "depth-of-first-solid" view).
+//! Phase 2 example: pull a slab of bricks from `LocalHost`, mesh them with
+//! greedy meshing, and render an isometric perspective view to PNG via the
+//! `atomr-worlds-view` software rasterizer.
 //!
-//! Headless; no display server required. Useful as a CI smoke test.
+//! Headless — no display server required.
 
-use std::fs::File;
-use std::io::BufWriter;
-
-use atomr_worlds_core::addr::WorldAddr;
+use atomr_worlds_core::addr::{Address, WorldAddr};
 use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_core::lod::Lod;
 use atomr_worlds_host::{LocalHost, WorldHost};
 use atomr_worlds_proto::{Envelope, WorldEvent, WorldRequest};
+use atomr_worlds_view::mesh::{greedy_mesh, Mesh, Vertex};
+use atomr_worlds_view::{render_mesh, Camera, RenderConfig};
 use atomr_worlds_voxel::{Brick, BRICK_EDGE};
 
-const TILES_X: i64 = 8;
-const TILES_Z: i64 = 8;
-const Y_TILES_TOP: i64 = 6;
-const Y_TILES_BOT: i64 = 0;
+const TILES_X: i64 = 4;
+const TILES_Z: i64 = 4;
+const Y_TILES_TOP: i64 = 3;
+const Y_TILES_BOT: i64 = -2;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = LocalHost::with_seed(0xDEAD_BEEF_CAFE_F00D).await?;
-    let addr = WorldAddr::ROOT;
-    let edge = BRICK_EDGE as i64;
+    let addr = Address::World(WorldAddr::ROOT);
+    let edge = BRICK_EDGE as f32;
 
-    let width = (TILES_X * edge) as u32;
-    let height = (TILES_Z * edge) as u32;
-    let mut pixels = vec![0u8; (width * height * 3) as usize];
-
-    // Walk each column (x, z); find topmost non-empty voxel within the y-tile range.
-    for tz in 0..TILES_Z {
-        for tx in 0..TILES_X {
-            // Pull bricks at (tx, ty, tz) for each ty in the vertical range.
-            for ty in (Y_TILES_BOT..=Y_TILES_TOP).rev() {
+    // Pull bricks across the slab, greedily mesh each, and stitch into one
+    // big mesh in world-local coordinates (brick (bx, by, bz) origin at
+    // (bx*16, by*16, bz*16)).
+    let mut combined = Mesh::default();
+    for ty in Y_TILES_BOT..=Y_TILES_TOP {
+        for tz in 0..TILES_Z {
+            for tx in 0..TILES_X {
                 let req = WorldRequest::GetBrick {
                     addr,
                     brick: IVec3::new(tx, ty, tz),
@@ -45,44 +43,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if brick.is_empty() {
                     continue;
                 }
-                // Project: for each (lx, lz), find the topmost non-empty ly.
-                for lz in 0..edge {
-                    for lx in 0..edge {
-                        let mut h_local = None;
-                        for ly in (0..edge).rev() {
-                            if !brick.get(IVec3::new(lx, ly, lz)).is_empty() {
-                                h_local = Some(ly);
-                                break;
-                            }
-                        }
-                        if let Some(_ly) = h_local {
-                            let px = (tx * edge + lx) as u32;
-                            let py = (tz * edge + lz) as u32;
-                            let i = ((py * width + px) * 3) as usize;
-                            if pixels[i] == 0 && pixels[i + 1] == 0 && pixels[i + 2] == 0 {
-                                // Colour by height tile.
-                                let intensity = ((ty as f32) / (Y_TILES_TOP as f32 + 1.0)).clamp(0.0, 1.0);
-                                pixels[i] = (60.0 + 195.0 * intensity) as u8;
-                                pixels[i + 1] = (90.0 + 130.0 * (1.0 - intensity)) as u8;
-                                pixels[i + 2] = 70;
-                            }
-                        }
-                    }
+                let mesh = greedy_mesh(&brick);
+                let origin = [tx as f32 * edge, ty as f32 * edge, tz as f32 * edge];
+                let base = combined.vertices.len() as u32;
+                for v in &mesh.vertices {
+                    combined.vertices.push(Vertex {
+                        pos: [v.pos[0] + origin[0], v.pos[1] + origin[1], v.pos[2] + origin[2]],
+                        normal: v.normal,
+                        material: v.material,
+                    });
                 }
+                combined.indices.extend(mesh.indices.iter().map(|i| i + base));
             }
         }
     }
 
-    // Write PNG.
-    let out = File::create("view-png-output.png")?;
-    let mut w = BufWriter::new(out);
-    let mut enc = png::Encoder::new(&mut w, width, height);
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    let mut writer = enc.write_header()?;
-    writer.write_image_data(&pixels)?;
+    let half = (TILES_X as f32 * edge) * 0.5;
+    let camera = Camera {
+        eye: [TILES_X as f32 * edge * 1.5, Y_TILES_TOP as f32 * edge * 2.0 + 24.0, TILES_Z as f32 * edge * 1.5],
+        target: [half, 0.0, half],
+        up: [0.0, 1.0, 0.0],
+        fov_y_rad: std::f32::consts::FRAC_PI_4,
+        aspect: 1.0,
+        near: 0.5,
+        far: 1024.0,
+    };
+    let cfg = RenderConfig { width: 512, height: 512, ..Default::default() };
+    let fb = render_mesh(&combined, &camera, &cfg);
+    fb.write_png("view-png-output.png")?;
 
-    println!("wrote view-png-output.png  {}x{}", width, height);
+    println!(
+        "wrote view-png-output.png  {}x{}  ({} tris)",
+        cfg.width,
+        cfg.height,
+        combined.triangle_count()
+    );
     host.shutdown().await?;
     Ok(())
 }

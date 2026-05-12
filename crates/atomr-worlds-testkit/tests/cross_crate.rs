@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use atomr_worlds_core::addr::WorldAddr;
+use atomr_worlds_core::addr::{Address, WorldAddr};
 use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_voxel::Voxel;
 use atomr_worlds_proto::{decode, encode, AABB, Envelope, WorldEvent, WorldRequest};
@@ -53,10 +53,11 @@ proptest! {
 
 #[test]
 fn protocol_round_trip_get_voxel() {
+    let a = Address::World(WorldAddr::ROOT);
     let env = Envelope::new(
         7,
-        WorldAddr::ROOT,
-        WorldRequest::GetVoxel { addr: WorldAddr::ROOT, pos: IVec3::new(1, 2, 3) },
+        a,
+        WorldRequest::GetVoxel { addr: a, pos: IVec3::new(1, 2, 3) },
     );
     let bytes = encode(&env).unwrap();
     let back: Envelope<WorldRequest> = decode(&bytes).unwrap();
@@ -71,11 +72,12 @@ fn protocol_round_trip_get_voxel() {
 fn protocol_round_trip_brick_snapshot() {
     use atomr_worlds_core::lod::Lod;
     let payload = bytes::Bytes::from_static(&[0u8; 32]);
+    let a = Address::World(WorldAddr::ROOT);
     let env = Envelope::new(
         9,
-        WorldAddr::ROOT,
+        a,
         WorldEvent::BrickSnapshot {
-            addr: WorldAddr::ROOT,
+            addr: a,
             brick: IVec3::new(0, 0, 0),
             lod: Lod::new(3),
             payload: payload.clone(),
@@ -95,11 +97,12 @@ fn protocol_round_trip_brick_snapshot() {
 #[test]
 fn subscribe_envelope_round_trip() {
     use atomr_worlds_core::lod::Lod;
+    let a = Address::World(WorldAddr::ROOT);
     let env = Envelope::new(
         1,
-        WorldAddr::ROOT,
+        a,
         WorldRequest::Subscribe {
-            addr: WorldAddr::ROOT,
+            addr: a,
             region: AABB::new(IVec3::new(-1, -1, -1), IVec3::new(1, 1, 1)),
             lod: Lod::new(0),
             sub_id: 42,

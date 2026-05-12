@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use atomr_worlds_core::addr::WorldAddr;
+use atomr_worlds_core::addr::{Address, WorldAddr};
 use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_core::lod::Lod;
 use atomr_worlds_host::{LocalHost, WorldHost};
@@ -19,7 +19,7 @@ async fn fresh_host() -> LocalHost {
 #[tokio::test]
 async fn brick_round_trip() {
     let host = fresh_host().await;
-    let addr = WorldAddr::ROOT;
+    let addr = Address::World(WorldAddr::ROOT);
     let req = WorldRequest::GetBrick { addr, brick: IVec3::new(0, 0, 0), lod: Lod::new(0) };
     let env = Envelope::new(1, addr, req);
     let resp = host.request(env).await.expect("request");
@@ -36,7 +36,7 @@ async fn two_hosts_same_seed_produce_identical_bricks() {
     let h1 = fresh_host().await;
     let h2 = fresh_host().await;
 
-    let addr = WorldAddr::ROOT;
+    let addr = Address::World(WorldAddr::ROOT);
     let bc = IVec3::new(0, 1, 0);
     let mk = || Envelope::new(0, addr, WorldRequest::GetBrick { addr, brick: bc, lod: Lod::new(0) });
 
@@ -54,7 +54,7 @@ async fn two_hosts_same_seed_produce_identical_bricks() {
 #[tokio::test]
 async fn write_then_read_returns_written_voxel() {
     let host = fresh_host().await;
-    let addr = WorldAddr::ROOT;
+    let addr = Address::World(WorldAddr::ROOT);
     let pos = IVec3::new(2, 2, 2);
 
     // Write.
@@ -74,7 +74,7 @@ async fn write_then_read_returns_written_voxel() {
 #[tokio::test]
 async fn subscribe_receives_initial_snapshots() {
     let host = fresh_host().await;
-    let addr = WorldAddr::ROOT;
+    let addr = Address::World(WorldAddr::ROOT);
     let env = Envelope::new(
         1,
         addr,
@@ -99,7 +99,7 @@ async fn subscribe_receives_initial_snapshots() {
 #[tokio::test]
 async fn subscribe_receives_delta_on_write() {
     let host = fresh_host().await;
-    let addr = WorldAddr::ROOT;
+    let addr = Address::World(WorldAddr::ROOT);
     let env = Envelope::new(
         1,
         addr,
@@ -145,7 +145,7 @@ async fn subscribe_receives_delta_on_write() {
 #[tokio::test]
 async fn write_outside_region_does_not_emit_delta() {
     let host = fresh_host().await;
-    let addr = WorldAddr::ROOT;
+    let addr = Address::World(WorldAddr::ROOT);
     let env = Envelope::new(
         1,
         addr,

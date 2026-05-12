@@ -13,10 +13,12 @@ pub mod aabb;
 pub mod envelope;
 pub mod error;
 pub mod messages;
+pub mod streaming;
 pub mod wire;
 
 pub use aabb::AABB;
 pub use envelope::Envelope;
 pub use error::ProtoError;
-pub use messages::{WorldEvent, WorldRequest};
+pub use messages::{Portal, WorldEvent, WorldRequest};
+pub use streaming::{RingPlan, StreamingPolicy};
 pub use wire::{decode, encode};

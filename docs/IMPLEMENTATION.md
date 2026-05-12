@@ -1,22 +1,24 @@
 # Implementation
 
-Module-by-module map of phase 0. For the high-level model and design rationale, see
-[ARCHITECTURE.md](ARCHITECTURE.md).
+Module-by-module map of the workspace. For the high-level model and design rationale, see
+[ARCHITECTURE.md](ARCHITECTURE.md). For phase-specific landing notes, see
+[PHASES.md](PHASES.md) and the per-phase sections at the bottom of this document.
 
 ## Workspace shape
 
-| crate                          | purpose                                         | atomr deps              |
-| ------------------------------ | ----------------------------------------------- | ----------------------- |
-| `atomr-worlds-core`            | Coordinates, addressing, seeds, LOD             | none                    |
-| `atomr-worlds-voxel`           | Sparse voxel storage (brick + octree hybrid)    | none                    |
-| `atomr-worlds-noise`           | Deterministic seeded noise (value/grad/Worley + FBM) | none               |
-| `atomr-worlds-generate`        | Per-tier `Generator` impls; CPU `TerrainGenerator` | none                 |
-| `atomr-worlds-accel`           | Brick acceleration trait + CPU backend (Phase 5 scaffold) | none          |
-| `atomr-worlds-persist`         | World-actor journal trait + in-memory backend (Phase 3 scaffold) | none   |
-| `atomr-worlds-proto`           | Wire-format messages and envelopes              | none                    |
-| `atomr-worlds-host`            | `WorldHost` trait, `LocalHost` (real), `ClusterHost` (shell) | atomr, cluster, sharding |
-| `atomr-worlds-testkit`         | proptest strategies, cross-crate verification   | none (dev-dep on host)  |
-| `atomr-worlds-py`              | PyO3 bindings: `atomrworlds` Python package     | none                    |
+| crate                          | purpose                                                                | atomr deps                            |
+| ------------------------------ | ---------------------------------------------------------------------- | ------------------------------------- |
+| `atomr-worlds-core`            | Coordinates, addressing, seeds, LOD                                    | none                                  |
+| `atomr-worlds-voxel`           | Sparse voxel storage (brick + octree hybrid)                           | none                                  |
+| `atomr-worlds-noise`           | Deterministic seeded noise (value/grad/Worley + FBM)                   | none                                  |
+| `atomr-worlds-generate`        | Per-tier `Generator` impls; CPU `TerrainGenerator`; `BrickGenerator`   | none                                  |
+| `atomr-worlds-accel`           | `Accelerator` trait + CPU backend; CUDA backend behind `cuda` feature  | atomr-accel-cuda (cuda feature only)  |
+| `atomr-worlds-persist`         | `WorldPersistence` over `atomr-persistence` Journal + SnapshotStore    | atomr-persistence (+ -sql, optional)  |
+| `atomr-worlds-proto`           | Wire-format messages and envelopes                                     | none                                  |
+| `atomr-worlds-host`            | `WorldHost` trait, `LocalHost` (real, with persistence), `ClusterHost` (shell) | atomr, cluster, sharding, persistence |
+| `atomr-worlds-view`            | Greedy meshing, MetricScale-driven camera, software rasterizer → PNG   | none                                  |
+| `atomr-worlds-testkit`         | proptest strategies, cross-crate verification                          | none (dev-dep on host)                |
+| `atomr-worlds-py`              | PyO3 bindings: `atomrworlds` Python package                            | none (transitive through host)        |
 
 `core` exports re-export their submodules; consumers can use the flat path or the module path
 interchangeably. Each crate has a `thiserror` error enum named after the crate.
@@ -254,11 +256,24 @@ pub trait WorldHost: Send + Sync + 'static {
 [`crates/atomr-worlds-host/src/local.rs`](../crates/atomr-worlds-host/src/local.rs),
 [`crates/atomr-worlds-host/src/cluster.rs`](../crates/atomr-worlds-host/src/cluster.rs)
 
-Both are placeholder structs in phase 0. Their `request` / `subscribe` impls return
-`HostError::NotYetImplemented`; `shutdown` is a no-op `Ok(())`. The phase 1 work is to populate
-`LocalHost` with an `atomr_core::ActorSystem` handle and `ClusterHost` with an
-`atomr_cluster_sharding::ShardRegion<WorldExtractor>` handle, then wire the per-world actor
-behind both.
+`LocalHost` is fully implemented (Phase 1). It owns an `atomr::ActorSystem` and spawns one
+`WorldActor` per `WorldAddr` on first access (lazy, cached in an `Arc<Mutex<HashMap<…>>>`).
+Each actor owns its brick cache, a user-write overlay, the subscriber registry, and — when
+`LocalHostConfig::persistence` is set — an `Arc<WorldPersistence>` handle (Phase 3). Recovery
+runs before the actor spawns: the persisted overlay and `last_seq` are passed into
+`WorldActor::new`, and the first cache miss for any brick reapplies the overlay on top of the
+procedural baseline.
+
+`LocalHostConfig` carries:
+
+- `root_seed: u64` — base seed for the address-derived chain.
+- `world_gen: WorldGen` — produces the per-world `TerrainGenerator`.
+- `subscriber_capacity: usize` — bound for the per-subscription `mpsc` channel.
+- `request_timeout: Duration` — `ask_with` timeout for `request`.
+- `persistence: Option<Arc<WorldPersistence>>` — optional Phase 3 binding.
+
+`ClusterHost` remains a placeholder pending the upstream sharding wire-up; the `WorldExtractor`
+that routes `Envelope<WorldRequest>` into a `ShardRegion` is implemented and tested.
 
 ### `WorldExtractor`
 
@@ -289,6 +304,9 @@ pub enum HostError {
     Voxel(VoxelError),
     Proto(ProtoError),
     Core(WorldsCoreError),
+    Sys(String),         // atomr ActorSystem / persistence errors
+    Ask(String),         // ask_with timeout / receiver-dropped failures
+    SubscribeFailed,     // the sink dropped before initial snapshot finished
     Shutdown,
     NotYetImplemented(&'static str),
 }
@@ -302,7 +320,7 @@ proptest strategies: `arb_ivec3`, `arb_level_key`, `arb_world_addr`, `arb_lod(ma
 `arb_voxel`, `arb_brick`. `arb_brick` produces sparse-ish bricks (0–64 writes from a 4096-cell
 space) so the HashMap-oracle test exercises both empty and populated regions.
 
-### Test surface (phase 0)
+### Test surface
 
 | location                                                       | what it checks                                                              |
 | -------------------------------------------------------------- | --------------------------------------------------------------------------- |
@@ -312,6 +330,12 @@ space) so the HashMap-oracle test exercises both empty and populated regions.
 | `atomr-worlds-testkit/tests/cross_crate.rs`                    | `WorldAddr` bincode + JSON round-trips; brick proptest oracle; protocol round-trips |
 | `atomr-worlds-testkit/tests/hash_quality.rs`                   | Avalanche ratio ≥ 0.40 across 5 perturbation sites; low-byte uniformity within ±12% (5σ) |
 | `atomr-worlds-testkit/tests/extractor_stable.rs`               | Shard id and entity id stable; sibling systems share shard id              |
+| `atomr-worlds-host/tests/local_e2e.rs`                         | LocalHost request/write/subscribe-snapshot/subscribe-delta; out-of-region filtering |
+| `atomr-worlds-host/tests/persistence_e2e.rs`                   | Writes survive host restart; snapshot fires every N writes; journal tail replays |
+| `atomr-worlds-persist` unit tests                              | Snapshot+tail recovery; empty-voxel clears overlay; persistence id stability |
+| `atomr-worlds-accel` unit tests                                | `CpuAccelerator` matches direct `BrickGenerator`; batched-fill default impl  |
+| `atomr-worlds-accel/tests/cuda_determinism.rs` (`--ignored`)   | CUDA bricks match CPU bricks byte-for-byte; GPU runs are idempotent          |
+| `atomr-worlds-view/tests/deterministic_screenshot.rs`          | FNV-1a hash of pixels equal across runs; non-background pixels present       |
 
 ## Example binary
 
@@ -367,17 +391,70 @@ cover read, write, subscribe-snapshot, subscribe-delta, and out-of-region filter
 `maturin develop -m crates/atomr-worlds-py/Cargo.toml` inside a venv. Smoke tests
 at `crates/atomr-worlds-py/python/tests/test_smoke.py`.
 
-## Phases 2, 3, 5 (scaffolds)
+## Phase 3 (landed) — Persistence
 
-- **Phase 2 scaffold**: [`examples/view-png`](../examples/view-png) renders a
-  top-down PNG of generated terrain via `LocalHost`. No wgpu yet.
-- **Phase 3 scaffold**:
-  [`atomr-worlds-persist`](../crates/atomr-worlds-persist/) defines a
-  `WorldJournal` trait + `InMemoryJournal`. Binding to `atomr-persistence`'s
-  `PersistentActor` is the next step.
-- **Phase 5 scaffold**:
-  [`atomr-worlds-accel`](../crates/atomr-worlds-accel/) defines an `Accelerator`
-  trait with `fill_brick` + `fill_bricks_batch`. CPU impl wraps any
-  `BrickGenerator`; a CUDA backend will plug in behind the same trait.
+[`atomr-worlds-persist`](../crates/atomr-worlds-persist/) wraps
+`atomr_persistence::{Journal, SnapshotStore}` with world-specific encoding:
+`VoxelWriteEvent`s are bincode-encoded and journalled, `WorldSnapshot`s capture
+the per-world write overlay. `WorldPersistence` is the consumer-facing handle;
+`InMemoryJournal` + `InMemorySnapshotStore` are re-exported from
+atomr-persistence for the default in-memory backend, and the `sql` feature
+pulls in `atomr-persistence-sql`'s `SqlJournal` + `SqlSnapshotStore` (SQLite by
+default; Postgres / MySQL / MSSQL via sqlx feature flags).
+
+`LocalHostConfig` grows a `persistence: Option<Arc<WorldPersistence>>` field.
+When set, `LocalHost::world_actor_for` runs recovery before spawning the actor;
+the `WorldActor` appends each `WriteVoxel` to the journal before applying it
+locally and triggers `save_snapshot` every `snapshot_every` writes (default 64).
+End-to-end coverage in
+[`atomr-worlds-host/tests/persistence_e2e.rs`](../crates/atomr-worlds-host/tests/persistence_e2e.rs):
+write voxels through one host, drop it, recover state through a fresh host,
+verify reads match.
+
+## Phase 5 (landed) — GPU acceleration
+
+[`atomr-worlds-accel`](../crates/atomr-worlds-accel/) gains a `cuda` feature
+that pulls in `atomr-accel-cuda` (with `nvrtc`) and `cudarc`. The `CudaAccelerator`
+spins up a `DeviceActor` with `EnabledLibraries::NVRTC`, compiles
+[`cuda_kernel.cu`](../crates/atomr-worlds-accel/src/cuda_kernel.cu) — a faithful
+port of the CPU `TerrainGenerator` math — at construction, and dispatches one
+NVRTC launch per `fill_bricks_batch`. The host compiles with `--fmad=false`
+so FMA fusion does not drift last-bit results; the kernel and the CPU path
+produce byte-identical bricks.
+
+Determinism gate:
+[`tests/cuda_determinism.rs`](../crates/atomr-worlds-accel/tests/cuda_determinism.rs)
+compares CPU and GPU brick payloads byte-for-byte across a representative coord
+mix. Gated `#[ignore]` so CUDA-less hosts still pass; run with
+`cargo test -p atomr-worlds-accel --features cuda -- --ignored`.
+
+Bench:
+[`benches/cpu_vs_gpu.rs`](../crates/atomr-worlds-accel/benches/cpu_vs_gpu.rs)
+(Criterion) compares CPU vs GPU on 1, 8, 64, 256-brick batches. Run with
+`cargo bench -p atomr-worlds-accel --features cuda --bench cpu_vs_gpu`.
+
+## Phase 2 (landed) — Renderer integration
+
+[`atomr-worlds-view`](../crates/atomr-worlds-view/) ships a CPU renderer with
+three modules: [`mesh`](../crates/atomr-worlds-view/src/mesh.rs) (greedy
+meshing of a `Brick` into axis-aligned face quads), [`camera`](../crates/atomr-worlds-view/src/camera.rs)
+(perspective `Camera` with `MetricScale::lod_for_screen` integration via
+`Camera::pick_lod`), and [`render`](../crates/atomr-worlds-view/src/render.rs)
+(half-space triangle rasterizer with a z-buffer, deterministic by
+construction). [`render_brick_png`] is the convenience entry point.
+
+Deterministic screenshot gate at
+[`tests/deterministic_screenshot.rs`](../crates/atomr-worlds-view/tests/deterministic_screenshot.rs):
+rendering the same brick from the same seed twice produces byte-identical
+pixel buffers (FNV-1a hash). The [`examples/view-png`](../examples/view-png)
+demo wires it to `LocalHost`, fetches a 4×4 slab of bricks across six vertical
+tiles (`Y_TILES_BOT = -2` through `Y_TILES_TOP = 3`), greedy-meshes them in
+world-local coordinates, and writes a 512×512 isometric perspective PNG.
+
+The upstream-bridge piece of Phase 2 — handing meshes off to `atomr-view`'s
+scene API — is blocked: `atomr-view`'s `SceneDescription` is UI-only (no
+`Mesh`/`Camera`/`Renderer`/headless path), and the `winit+wgpu` backend in
+`atomr-view-backends` is stubbed. Once the upstream scene API grows 3D
+primitives, `mesh::greedy_mesh`'s output drops straight into them.
 
 See [`PHASES.md`](PHASES.md) for the full roadmap.

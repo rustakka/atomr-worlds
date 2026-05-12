@@ -1,12 +1,18 @@
 //! Brick-generation acceleration surface.
 //!
-//! **Phase 5 scaffold.** The trait is GPU-friendly: a kernel can be dispatched
-//! per-brick with `(seed, brick_coord)` as input and an output buffer to fill.
-//! Phase 1 ships a single CPU implementation that defers to
-//! [`atomr_worlds_generate::BrickGenerator`]. A CUDA backend will arrive in
-//! Phase 5 proper, behind the same trait.
+//! The trait is GPU-friendly: a kernel can be dispatched per-brick with
+//! `(seed, brick_coord)` as input and an output buffer to fill. The CPU
+//! implementation defers to [`atomr_worlds_generate::BrickGenerator`]; a
+//! CUDA implementation backed by `atomr-accel-cuda`'s NVRTC dispatch lives
+//! in [`cuda`] behind the `cuda` feature flag.
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
+
+#[cfg(feature = "cuda")]
+pub mod cuda;
+
+#[cfg(feature = "cuda")]
+pub use cuda::{CudaAccelerator, CudaError};
 
 use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_generate::BrickGenerator;
@@ -47,7 +53,10 @@ impl<G: BrickGenerator + Send + Sync> Accelerator for CpuAccelerator<G> {
         "cpu"
     }
     fn fill_brick(&self, world_seed: u64, brick_coord: IVec3) -> Brick {
-        self.generator.generate_brick(world_seed, brick_coord)
+        // Legacy two-arg path — preserved for CUDA byte-equality across
+        // CPU and GPU. Macro-state-aware generation only flows through
+        // `WorldActor::ensure_brick`, never through `Accelerator`.
+        self.generator.generate_brick_legacy(world_seed, brick_coord)
     }
 }
 
@@ -61,7 +70,7 @@ mod tests {
         let g = TerrainGenerator::new(TerrainConfig::default());
         let accel = CpuAccelerator::new(g.clone());
         let p = IVec3::new(0, -2, 0);
-        let direct = g.generate_brick(42, p);
+        let direct = g.generate_brick_legacy(42, p);
         let routed = accel.fill_brick(42, p);
         assert_eq!(direct.nonempty_count, routed.nonempty_count);
         for i in 0..16i64 {

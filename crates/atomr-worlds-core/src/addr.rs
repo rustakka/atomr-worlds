@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::coord::IVec3;
 use crate::dim::{DimensionId, PRIMARY};
-use crate::seed::child_seed;
+use crate::seed::{child_seed, HierarchicalIdentifier};
 
 /// One tier of a [`WorldAddr`]: a coordinate plus its dimension selector.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Default, Debug, Serialize, Deserialize)]
@@ -25,6 +25,13 @@ impl LevelKey {
     pub const fn at(coord: IVec3) -> Self {
         Self { coord, dim: PRIMARY }
     }
+}
+
+impl HierarchicalIdentifier for LevelKey {
+    #[inline]
+    fn dim(&self) -> DimensionId { self.dim }
+    #[inline]
+    fn coord(&self) -> IVec3 { self.coord }
 }
 
 /// Which tier of the hierarchy a value refers to. Ordered: deeper tiers have larger values.
@@ -102,6 +109,12 @@ impl WorldAddr {
 
     /// Derive the seed chain `[universe, galaxy, sector, system, world]` from
     /// the supplied root seed by repeatedly applying [`child_seed`].
+    ///
+    /// This is the `const fn` fast path. Each step `child_seed(parent, k.dim,
+    /// k.coord)` is equivalent to `derive_child(parent, &k)` via the
+    /// [`HierarchicalIdentifier`] impl on [`LevelKey`] — see the
+    /// `seed_chain_matches_derive_child_walk` test. New addressable tiers
+    /// follow the same rule via [`derive_child`].
     pub const fn seed_chain(&self, root: u64) -> [u64; 5] {
         let u = child_seed(root, self.universe.dim, self.universe.coord);
         let g = child_seed(u, self.galaxy.dim, self.galaxy.coord);
@@ -116,6 +129,104 @@ impl WorldAddr {
     pub const fn seed_at(&self, root: u64, l: Level) -> u64 {
         self.seed_chain(root)[l.depth()]
     }
+}
+
+use crate::vehicle::{ContainingFrame, VehicleAddr};
+
+/// The canonical addressable thing in atomr-worlds. Every host/proto/persist
+/// API takes `Address` so the substrate can host both static voxel worlds
+/// and mobile vehicle voxel spaces uniformly.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
+pub enum Address {
+    World(WorldAddr),
+    Vehicle(VehicleAddr),
+}
+
+impl Address {
+    /// Derive the seed of this address under the supplied root seed.
+    #[inline]
+    pub fn seed(&self, root: u64) -> u64 {
+        match self {
+            Address::World(a) => a.seed_at(root, Level::World),
+            Address::Vehicle(v) => v.seed(root),
+        }
+    }
+
+    /// Return a [`ContainingFrame`] viewpoint for this address.
+    #[inline]
+    pub fn containing_frame(&self) -> ContainingFrame {
+        match *self {
+            Address::World(a) => ContainingFrame::World(a),
+            Address::Vehicle(v) => ContainingFrame::Vehicle(v),
+        }
+    }
+}
+
+impl Default for Address {
+    fn default() -> Self { Address::World(WorldAddr::ROOT) }
+}
+
+impl From<WorldAddr> for Address {
+    #[inline]
+    fn from(a: WorldAddr) -> Self { Address::World(a) }
+}
+
+impl From<VehicleAddr> for Address {
+    #[inline]
+    fn from(v: VehicleAddr) -> Self { Address::Vehicle(v) }
+}
+
+/// Open-ended addressing wrapper. The standard `Address` is the fixed
+/// closed-five-tier shape; `AddrEither::Open` is the future-proof variant
+/// that accepts an arbitrary-length [`LevelKey`] vector for variable-depth
+/// hierarchies. Walking [`AddrEither::seed_chain`] applies the same
+/// hierarchical-hash invariant via [`crate::seed::derive_child`] over each
+/// `LevelKey` in order, length-prefixing the chain so different depths can
+/// never seed-collide.
+///
+/// Phase 12 ships the type and its seed-chain method. Host/persist/proto
+/// integration is deferred — callers continue using [`Address`] until the
+/// open-ended path is exercised.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AddrEither {
+    Closed(Address),
+    Open(Vec<LevelKey>),
+}
+
+impl AddrEither {
+    /// Compute the seed chain via repeated [`crate::seed::derive_child`]
+    /// calls. The chain begins with `splitmix64(root ^ len)` so depths can't
+    /// collide.
+    pub fn seed_chain(&self, root: u64) -> Vec<u64> {
+        match self {
+            AddrEither::Closed(Address::World(a)) => a.seed_chain(root).to_vec(),
+            AddrEither::Closed(Address::Vehicle(v)) => {
+                // World seed-chain followed by vehicle seed as the trailing element.
+                let parent_world = match v.parent {
+                    crate::vehicle::ParentAddr::World(a)
+                    | crate::vehicle::ParentAddr::System(a)
+                    | crate::vehicle::ParentAddr::Sector(a) => a,
+                };
+                let mut chain = parent_world.seed_chain(root).to_vec();
+                chain.push(v.seed(root));
+                chain
+            }
+            AddrEither::Open(keys) => {
+                let mut chain = Vec::with_capacity(keys.len());
+                let mut parent = crate::seed::splitmix64(root ^ keys.len() as u64);
+                for k in keys {
+                    let s = crate::seed::derive_child(parent, k);
+                    chain.push(s);
+                    parent = s;
+                }
+                chain
+            }
+        }
+    }
+}
+
+impl From<Address> for AddrEither {
+    fn from(a: Address) -> Self { AddrEither::Closed(a) }
 }
 
 #[cfg(test)]
@@ -164,5 +275,30 @@ mod tests {
         let mut b = a;
         b.galaxy.dim = 1;
         assert_ne!(a.seed_chain(42), b.seed_chain(42));
+    }
+
+    #[test]
+    fn seed_chain_matches_derive_child_walk() {
+        // The const-fn `seed_chain` must produce bytes identical to walking
+        // each `LevelKey` through `derive_child` (the trait-based extensible
+        // path). This is the load-bearing invariant — if it ever drifts,
+        // every future tier using `derive_child` would seed-collide with
+        // the const path.
+        use crate::seed::derive_child;
+        let addr = WorldAddr {
+            universe: LevelKey::new(IVec3::new(0, -1, 2), 3),
+            galaxy: LevelKey::new(IVec3::new(7, -3, 2), 0),
+            sector: LevelKey::new(IVec3::new(0, 1, 0), 1),
+            system: LevelKey::new(IVec3::new(-2, -2, -2), 0),
+            world: LevelKey::new(IVec3::new(4, 5, 6), 2),
+        };
+        let root = 0xCAFE_BABE_F00D_DEAD;
+        let chain = addr.seed_chain(root);
+        let u = derive_child(root, &addr.universe);
+        let g = derive_child(u, &addr.galaxy);
+        let s = derive_child(g, &addr.sector);
+        let sy = derive_child(s, &addr.system);
+        let w = derive_child(sy, &addr.world);
+        assert_eq!(chain, [u, g, s, sy, w]);
     }
 }

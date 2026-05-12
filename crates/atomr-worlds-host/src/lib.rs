@@ -17,9 +17,18 @@ pub mod error;
 pub mod extractor;
 pub mod host;
 pub mod local;
+pub mod policy;
+pub mod shape;
 
 pub use cluster::ClusterHost;
 pub use error::HostError;
 pub use extractor::WorldExtractor;
 pub use host::WorldHost;
 pub use local::{LocalHost, LocalHostConfig};
+pub use policy::{DefaultPolicy, GenerationPolicy, PolicyResolver, PrefixPolicy};
+pub use shape::{DefaultShape, PrefixShape, ShapeResolver};
+
+pub use atomr_worlds_persist::{
+    persistence_id_for, InMemoryJournal, InMemorySnapshotStore, RecoveredState, VoxelWriteEvent,
+    WorldPersistence, WorldSnapshot,
+};

@@ -7,10 +7,38 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Brick-generation acceleration trait + CPU impl (Phase 5 scaffold; GPU backend deferred)."
+description = "Brick-generation acceleration trait + CPU impl (Phase 5); CUDA backend behind the `cuda` feature."
+
+[features]
+default = []
+cuda = [
+    "dep:atomr-accel-cuda",
+    "atomr-accel-cuda/nvrtc",
+    "dep:atomr",
+    "dep:atomr-core",
+    "dep:atomr-config",
+    "dep:cudarc",
+    "dep:tokio",
+]
 
 [dependencies]
 atomr-worlds-core     = { workspace = true }
 atomr-worlds-voxel    = { workspace = true }
 atomr-worlds-generate = { workspace = true }
 thiserror = { workspace = true }
+
+atomr-accel-cuda      = { workspace = true, optional = true }
+atomr                 = { workspace = true, optional = true }
+atomr-core            = { workspace = true, optional = true }
+atomr-config          = { workspace = true, optional = true }
+cudarc                = { workspace = true, optional = true }
+tokio                 = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "cpu_vs_gpu"
+harness = false
+required-features = ["cuda"]

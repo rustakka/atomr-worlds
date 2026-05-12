@@ -1,0 +1,19 @@
+[package]
+name = "atomr-worlds-view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Phase 2: greedy meshing, MetricScale-driven camera, deterministic CPU rasterizer to PNG. Bridges to atomr-view will follow once the upstream scene API supports 3D geometry."
+
+[dependencies]
+atomr-worlds-core    = { workspace = true }
+atomr-worlds-voxel   = { workspace = true }
+thiserror = { workspace = true }
+png       = { workspace = true }
+
+[dev-dependencies]
+atomr-worlds-generate = { workspace = true }

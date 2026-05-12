@@ -4,7 +4,11 @@
 //! meters and the maximum octree depth. A [`Lod`] selects a depth in the
 //! pyramid; `meters_per_voxel(lod) = root_size_m / 2^lod.depth`.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+use crate::addr::{Address, Level, LevelKey, WorldAddr};
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Serialize, Deserialize)]
 pub struct Lod {
@@ -65,7 +69,99 @@ impl MetricScale {
         let depth = ratio.log2().ceil().clamp(0.0, self.max_depth as f64) as u8;
         Lod { depth }
     }
+
+    /// As [`Self::lod_for_screen`] but clamps the effective distance to
+    /// `max_distance_m` (typically the horizon distance for a spherical
+    /// world). Beyond the horizon there's nothing to draw, so we pick the
+    /// LOD as if the geometry sat at the horizon. `f64::INFINITY` produces
+    /// the unclamped result.
+    pub fn lod_for_screen_curved(
+        &self,
+        distance_m: f64,
+        focal_px: f64,
+        target_px_per_voxel: f64,
+        max_distance_m: f64,
+    ) -> Lod {
+        let d = distance_m.min(max_distance_m);
+        self.lod_for_screen(d, focal_px, target_px_per_voxel)
+    }
+
+    /// Pick the coarsest tier whose root cube fully contains `distance_m`.
+    /// Used to demote streaming to a parent tier when the observer leaves a
+    /// body's atmosphere.
+    pub fn tier_for_distance(distance_m: f64) -> Level {
+        // Walk from World up to Universe; the first tier whose root_size_m
+        // is >= distance_m is the one that contains the observer.
+        if distance_m <= MetricScale::DEFAULT_WORLD.root_size_m { Level::World }
+        else if distance_m <= MetricScale::DEFAULT_SYSTEM.root_size_m { Level::System }
+        else if distance_m <= MetricScale::DEFAULT_SECTOR.root_size_m { Level::Sector }
+        else if distance_m <= MetricScale::DEFAULT_GALAXY.root_size_m { Level::Galaxy }
+        else { Level::Universe }
+    }
 }
+
+/// Per-address override of the default per-tier [`MetricScale`].
+///
+/// `LocalHostConfig` holds an `Arc<MetricScaleRegistry>`. Generation
+/// strategies and per-body overrides feed into this registry before actor
+/// spawn so the actor sees a stable scale for its lifetime.
+#[derive(Clone, Default, Debug)]
+pub struct MetricScaleRegistry {
+    overrides: HashMap<(Level, LevelKey), MetricScale>,
+}
+
+impl MetricScaleRegistry {
+    /// Empty registry — every address falls back to the per-tier defaults.
+    pub fn new() -> Self { Self::default() }
+
+    /// Identity registry — explicit "use standard defaults" constructor used
+    /// by `LocalHostConfig::default()`.
+    pub fn standard() -> Self { Self::default() }
+
+    pub fn override_scale(&mut self, level: Level, key: LevelKey, scale: MetricScale) {
+        self.overrides.insert((level, key), scale);
+    }
+
+    /// Resolve the [`MetricScale`] for a particular tier of an address.
+    pub fn scale_for(&self, addr: &Address, level: Level) -> MetricScale {
+        let key = match addr {
+            Address::World(w) => w.level_key(level),
+            Address::Vehicle(v) => {
+                // Vehicles inherit their parent's tier scale.
+                let parent_world = match v.parent {
+                    crate::vehicle::ParentAddr::World(a)
+                    | crate::vehicle::ParentAddr::System(a)
+                    | crate::vehicle::ParentAddr::Sector(a) => a,
+                };
+                parent_world.level_key(level)
+            }
+        };
+        if let Some(s) = self.overrides.get(&(level, key)) {
+            return *s;
+        }
+        match level {
+            Level::Universe => MetricScale::DEFAULT_UNIVERSE,
+            Level::Galaxy => MetricScale::DEFAULT_GALAXY,
+            Level::Sector => MetricScale::DEFAULT_SECTOR,
+            Level::System => MetricScale::DEFAULT_SYSTEM,
+            Level::World => MetricScale::DEFAULT_WORLD,
+        }
+    }
+
+    /// Resolve the scale of the deepest tier present in the address — for
+    /// worlds this is World; for vehicles this is the parent's deepest tier.
+    pub fn scale_of(&self, addr: &Address) -> MetricScale {
+        match addr {
+            Address::World(_) => self.scale_for(addr, Level::World),
+            Address::Vehicle(v) => self.scale_for(addr, v.parent.level()),
+        }
+    }
+}
+
+// `WorldAddr` is re-imported above for the registry; suppress an unused-import
+// lint that surfaces when the registry isn't exercised in this crate's tests.
+#[allow(dead_code)]
+fn _unused_addr_imports(_: WorldAddr) {}
 
 #[cfg(test)]
 mod tests {

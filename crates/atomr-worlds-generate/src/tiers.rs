@@ -9,6 +9,7 @@ use atomr_worlds_core::addr::{Level, WorldAddr};
 use atomr_worlds_core::dim::DimensionId;
 use atomr_worlds_core::hierarchy::{Galaxy, Generator, Sector, System, Universe, World};
 use atomr_worlds_core::lod::MetricScale;
+use atomr_worlds_core::shape::WorldShape;
 
 use crate::error::GenerateError;
 use crate::terrain::{TerrainConfig, TerrainGenerator};
@@ -93,11 +94,16 @@ impl Generator for SystemGen {
 pub struct WorldGen {
     pub scale: MetricScale,
     pub terrain: TerrainConfig,
+    pub shape: WorldShape,
 }
 
 impl Default for WorldGen {
     fn default() -> Self {
-        Self { scale: MetricScale::DEFAULT_WORLD, terrain: TerrainConfig::default() }
+        Self {
+            scale: MetricScale::DEFAULT_WORLD,
+            terrain: TerrainConfig::default(),
+            shape: WorldShape::default_world(),
+        }
     }
 }
 
@@ -111,7 +117,7 @@ impl Generator for WorldGen {
     type Output = World;
     type Err = GenerateError;
     fn generate(&self, seed: u64, addr: WorldAddr) -> Result<World, GenerateError> {
-        Ok(World { addr, seed, scale: self.scale })
+        Ok(World { addr, seed, scale: self.scale, shape: self.shape })
     }
 }
 

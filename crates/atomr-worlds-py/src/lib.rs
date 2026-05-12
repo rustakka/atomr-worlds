@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use atomr_worlds_core::addr::{Level, LevelKey, WorldAddr};
+use atomr_worlds_core::addr::{Address, Level, LevelKey, WorldAddr};
 use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_core::lod::{Lod, MetricScale};
 use atomr_worlds_core::seed as seed_core;
@@ -241,6 +241,16 @@ impl PyBrick {
     fn materials(&self) -> Vec<u16> {
         self.inner.voxels.iter().map(|v| v.0).collect()
     }
+    /// Return the raw little-endian voxel bytes as a Python `bytes` object —
+    /// suitable for `numpy.frombuffer(bytes, dtype=numpy.uint16).reshape(16,
+    /// 16, 16)`. Single allocation, no per-voxel copy. Full zero-copy via
+    /// the Python buffer protocol requires `Arc<Brick>` storage + a separate
+    /// view type (planned follow-up; the buffer-protocol API surface in
+    /// PyO3 changed between 0.21 and 0.22 — pin the version before wiring).
+    fn buffer_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+        let bytes = bytemuck::cast_slice::<RustVoxel, u8>(self.inner.voxels.as_ref());
+        pyo3::types::PyBytes::new_bound(py, bytes)
+    }
     fn __repr__(&self) -> String {
         format!("Brick(nonempty={})", self.inner.nonempty_count)
     }
@@ -271,8 +281,9 @@ impl PyWorldClient {
     }
 
     fn get_voxel(&self, addr: PyWorldAddr, x: i64, y: i64, z: i64) -> PyResult<PyVoxel> {
-        let req = WorldRequest::GetVoxel { addr: addr.0, pos: IVec3::new(x, y, z) };
-        let env = Envelope::new(0, addr.0, req);
+        let a = Address::World(addr.0);
+        let req = WorldRequest::GetVoxel { addr: a, pos: IVec3::new(x, y, z) };
+        let env = Envelope::new(0, a, req);
         let resp = self
             .rt
             .block_on(self.host.request(env))
@@ -285,12 +296,13 @@ impl PyWorldClient {
 
     #[pyo3(signature = (addr, bx, by, bz, lod_depth=0))]
     fn get_brick(&self, addr: PyWorldAddr, bx: i64, by: i64, bz: i64, lod_depth: u8) -> PyResult<PyBrick> {
+        let a = Address::World(addr.0);
         let req = WorldRequest::GetBrick {
-            addr: addr.0,
+            addr: a,
             brick: IVec3::new(bx, by, bz),
             lod: Lod::new(lod_depth),
         };
-        let env = Envelope::new(0, addr.0, req);
+        let env = Envelope::new(0, a, req);
         let resp = self
             .rt
             .block_on(self.host.request(env))
@@ -306,8 +318,9 @@ impl PyWorldClient {
     }
 
     fn write_voxel(&self, addr: PyWorldAddr, x: i64, y: i64, z: i64, voxel: PyVoxel) -> PyResult<()> {
-        let req = WorldRequest::WriteVoxel { addr: addr.0, pos: IVec3::new(x, y, z), voxel: voxel.0 };
-        let env = Envelope::new(0, addr.0, req);
+        let a = Address::World(addr.0);
+        let req = WorldRequest::WriteVoxel { addr: a, pos: IVec3::new(x, y, z), voxel: voxel.0 };
+        let env = Envelope::new(0, a, req);
         let _ = self
             .rt
             .block_on(self.host.request(env))

@@ -57,6 +57,27 @@ impl Brick {
         }
     }
 
+    /// Set every voxel where the predicate returns `true` to `v`. `mask` is
+    /// called once per local coordinate in `[0, BRICK_EDGE)³`. Returns the
+    /// number of voxels that changed value. Updates `nonempty_count` along
+    /// the way. Used by the host's `WriteRegion` flow to apply a brush.
+    pub fn set_region<F>(&mut self, mask: F, v: Voxel) -> u32
+    where F: Fn(IVec3) -> bool
+    {
+        let mut changed = 0u32;
+        for z in 0..BRICK_EDGE as i64 {
+            for y in 0..BRICK_EDGE as i64 {
+                for x in 0..BRICK_EDGE as i64 {
+                    let p = IVec3::new(x, y, z);
+                    if mask(p) && self.set(p, v) {
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
     /// Set a voxel; updates `nonempty_count`. Returns `true` if the cell changed.
     pub fn set(&mut self, local: IVec3, v: Voxel) -> bool {
         let Some(i) = Self::local_index(local) else { return false };

@@ -26,3 +26,4 @@ atomr-worlds-generate = { workspace = true }
 pyo3  = { workspace = true, features = ["macros"] }
 tokio = { workspace = true }
 bytes = { workspace = true }
+bytemuck = { workspace = true }

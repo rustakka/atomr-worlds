@@ -9,6 +9,7 @@ members = [
     "crates/atomr-worlds-generate",
     "crates/atomr-worlds-accel",
     "crates/atomr-worlds-persist",
+    "crates/atomr-worlds-view",
     "crates/atomr-worlds-testkit",
     "crates/atomr-worlds-py",
     "examples/print-seed-chain",
@@ -47,6 +48,7 @@ bytemuck = { version = "1", features = ["derive"] }
 
 # Testing
 proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # Internal — atomr-worlds crates
 atomr-worlds-core     = { path = "crates/atomr-worlds-core",     version = "0.1.0" }
@@ -57,6 +59,7 @@ atomr-worlds-noise    = { path = "crates/atomr-worlds-noise",    version = "0.1.
 atomr-worlds-generate = { path = "crates/atomr-worlds-generate", version = "0.1.0" }
 atomr-worlds-accel    = { path = "crates/atomr-worlds-accel",    version = "0.1.0" }
 atomr-worlds-persist  = { path = "crates/atomr-worlds-persist",  version = "0.1.0" }
+atomr-worlds-view     = { path = "crates/atomr-worlds-view",     version = "0.1.0" }
 atomr-worlds-testkit  = { path = "crates/atomr-worlds-testkit",  version = "0.1.0" }
 
 # External — atomr (sibling repo, path deps)
@@ -65,6 +68,13 @@ atomr-core             = { path = "../atomr/crates/atomr-core",             vers
 atomr-config           = { path = "../atomr/crates/atomr-config",           version = "0.9.2" }
 atomr-cluster          = { path = "../atomr/crates/atomr-cluster",          version = "0.9.2" }
 atomr-cluster-sharding = { path = "../atomr/crates/atomr-cluster-sharding", version = "0.9.2" }
+atomr-persistence      = { path = "../atomr/crates/atomr-persistence",      version = "0.9.2" }
+atomr-persistence-sql  = { path = "../atomr/crates/atomr-persistence-sql",  version = "0.9.2" }
+
+# External — atomr-accel (sibling repo, path deps; phase 5 full)
+atomr-accel            = { path = "../atomr-accel/crates/atomr-accel",      version = "0.10.0" }
+atomr-accel-cuda       = { path = "../atomr-accel/crates/atomr-accel-cuda", version = "0.10.0" }
+cudarc                 = { version = "0.19.4", features = ["cuda-version-from-build-system", "fallback-latest"] }
 
 # PNG output (Phase 2 scaffold)
 png = "0.17"

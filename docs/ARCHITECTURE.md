@@ -143,23 +143,110 @@ This means: load-balance across the cluster at sector granularity; cache-friendl
 a sector; deterministic routing (same address always lands on the same shard, regardless of
 which client made the request).
 
-## Out of scope (phase 0)
+## In scope today
 
-Hooks exist for the next phases; bodies do not. Explicitly deferred:
+Phases 0–6 have all landed. What's wired up:
 
-- **Generator bodies.** `Generator` trait stubs exist for each tier; noise functions, terrain
-  shapers, star/planet generators belong in a later phase.
-- **Streaming logic.** `Subscribe`/`Unsubscribe` envelope types exist; backpressure, diff
-  computation, and chunk eviction are not implemented.
-- **Persistence binding.** atomr-persistence is available; phase 0 does not snapshot or replay
-  generated bricks.
-- **GPU acceleration.** atomr-accel exists for CUDA compute; phase 0 does no GPU work. Noise
-  evaluation and brick upload are natural fits later.
-- **Renderer integration.** atomr-view (wgpu/Bevy) is the rendering substrate; bridging it is a
-  separate workstream.
+- **Generator bodies.** Per-tier `Generator` impls plus the CPU `TerrainGenerator` (FBM
+  heightfield + Worley caves + dirt layer). CUDA acceleration via `atomr-accel-cuda` NVRTC
+  produces byte-identical bricks.
+- **Streaming.** `LocalHost::subscribe` returns an `mpsc::Receiver<Envelope<WorldEvent>>`;
+  initial `BrickSnapshot`s for each brick overlapping the AABB, then `VoxelDelta`s as writes
+  land. Drop-subscriber backpressure.
+- **Persistence.** `atomr-worlds-persist` wraps `atomr-persistence`'s `Journal` +
+  `SnapshotStore`. Writes are journalled before applying, snapshots fire every N writes, state
+  recovers on host restart. SQLite/Postgres/MySQL/MSSQL via the `sql` feature.
+- **Renderer.** CPU greedy meshing, perspective camera with `MetricScale::lod_for_screen`
+  integration, and a deterministic software rasterizer. Bridging to `atomr-view`'s scene API
+  remains blocked on upstream 3D primitives.
+- **Python bindings.** `atomrworlds` PyO3 + maturin extension exposes the determinism
+  primitives and a `LocalHost`-backed `WorldClient`.
+
+## Out of scope (today)
+
+Still deferred:
+
 - **Multi-dimension routing policy.** Dimensions are addressable, but cross-dimension portals or
   passivation rules are not modeled.
-- **PyO3 bindings.** atomr ships a `py-bindings/` family; phase 0 ships none.
+- **Variable-depth hierarchies.** The five-tier closed shape is fixed; nothing wraps it yet.
+- **Multi-galaxy / multi-shard load-balancing policy** beyond the sector-granularity sharding
+  function. Cluster routing through `WorldExtractor` is wired; the `ClusterHost` body that
+  owns a `ShardRegion` is still a placeholder.
+- **PyPI release tooling**, async / streaming Python API, and zero-copy NumPy brick views (the
+  first cut copies into a NumPy `uint16` array).
+- **atomr-view bridge.** Mesh output is ready; the upstream scene API has to grow 3D
+  primitives or a headless wgpu path before it can be wired up.
+
+## Phase 7+ additions (landed)
+
+### `Address` and `HierarchicalIdentifier`
+
+The canonical addressable thing is now [`Address::World(WorldAddr) |
+Vehicle(VehicleAddr)`](../crates/atomr-worlds-core/src/addr.rs). Single-world
+callers migrate via `impl From<WorldAddr> for Address`. The trait
+[`HierarchicalIdentifier`](../crates/atomr-worlds-core/src/seed.rs) +
+helper `derive_child` document the parent-id-plus-identifier hash invariant:
+every parent → child seed transition routes through one function over
+`(dim: u32, coord: IVec3)`. `LevelKey` and `VehicleSlot` are the two
+identifier types today; future sub-world tiers add their own without
+introducing new hash bodies.
+
+### Vehicles and entity space
+
+[`VehicleAddr`](../crates/atomr-worlds-core/src/vehicle.rs) = parent frame
+(world / system / sector) + slot id. Vehicles own their own voxel space — a
+write to a vehicle address does *not* leak into its parent world. The
+[`AffineFrame`] type carries the vehicle's pose in its parent's coordinates;
+[`ContainingFrame`] is the rendering-side answer to "what is the observer
+currently inside?". `WorldRequest::{GetVehicleFrame, SetVehicleFrame}` and
+`WorldEvent::{VehicleFrame, VehicleFrameDelta}` complete the protocol.
+
+### Generation policy and strategies
+
+[`GenerationPolicy::{Seeded, Empty, Custom(StrategyId)}`](../crates/atomr-worlds-generate/src/registry.rs)
++ a [`PolicyResolver`](../crates/atomr-worlds-host/src/policy.rs) attached to
+`LocalHostConfig.policy`. `PrefixPolicy` walks world → system → sector →
+galaxy → universe and applies the most-specific match. The
+[`GeneratorRegistry`](../crates/atomr-worlds-generate/src/registry.rs)
+holds [`BrickGenerator`] impls keyed by [`StrategyId`] (const FNV-1a
+hashes of names) and a [`StrategySelector`] that picks one
+deterministically from the world seed.
+
+### Metric scale registry + atmosphere
+
+[`MetricScaleRegistry`](../crates/atomr-worlds-core/src/lod.rs) lets
+per-body overrides shift the standard per-tier defaults. Atmosphere
+boundary (`AtmosphereRadius`, default 1.25 × body radius) demarcates the
+distance within which the host streams a body's voxel grid; the
+`SubscribeMetric` protocol + `ContainingFrameChange` event support the
+atmospheric tier-demotion when an observer leaves.
+
+### Interaction unit + region writes
+
+[`InteractionUnit { kind, radius_m, precision_scale }`](../crates/atomr-worlds-core/src/interaction.rs)
+parametrizes a brush. `WorldRequest::WriteRegion` applies it; the host
+journals per-voxel changes for replay correctness and emits one
+aggregated `WorldEvent::RegionDelta` per affected subscriber. The
+`precision_scale: Lod` field is the hook for the isosurface mesher to
+treat coarse-precision block-writes as a coarser implicit surface.
+
+### Isosurface meshing (Naive Surface Nets)
+
+[`MeshMode::{Flat, Smooth(SmoothConfig)}`](../crates/atomr-worlds-view/src/iso.rs)
++ `surface_mesh()`. `Flat` dispatches to greedy meshing (existing
+behavior); `Smooth` uses Naive Surface Nets — one vertex per
+sign-change cell, deterministic, naturally smooth. Algorithm choice
+documented inline (vs marching cubes, dual contouring, transvoxel).
+
+### Scene description, portals, variable-depth
+
+[`SceneDescription`](../crates/atomr-worlds-view/src/scene.rs) is the
+engine-shaped neutral exchange format for the future atomr-view bridge.
+[`Portal`](../crates/atomr-worlds-proto/src/messages.rs) +
+`TraversePortal` / `PortalArrival` envelope the cross-dim / cross-world
+hop. [`AddrEither::Closed(Address) | Open(Vec<LevelKey>)`](../crates/atomr-worlds-core/src/addr.rs)
+is the variable-depth wrapper — same `derive_child` invariant applies,
+length-prefixed so different depths can't collide.
 
 ## Design principles
 
