@@ -48,10 +48,19 @@ fn slice_input(
     if *mode != ViewMode::Slice {
         return;
     }
-    if keys.just_pressed(KeyCode::PageUp) || keys.just_pressed(KeyCode::Equal) {
+    // Space/Ctrl mirror the FP vertical controls so the same fingers that
+    // move the player up/down in 3D shift the visible slice up/down here.
+    if keys.just_pressed(KeyCode::PageUp)
+        || keys.just_pressed(KeyCode::Equal)
+        || keys.just_pressed(KeyCode::Space)
+    {
         state.z_band_top += 1;
     }
-    if keys.just_pressed(KeyCode::PageDown) || keys.just_pressed(KeyCode::Minus) {
+    if keys.just_pressed(KeyCode::PageDown)
+        || keys.just_pressed(KeyCode::Minus)
+        || keys.just_pressed(KeyCode::ControlLeft)
+        || keys.just_pressed(KeyCode::ControlRight)
+    {
         state.z_band_top -= 1;
     }
 }

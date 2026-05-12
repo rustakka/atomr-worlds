@@ -90,10 +90,15 @@ fn default_prefix() -> String {
 pub struct ScenarioEvent {
     pub frame: u64,
     /// One of: `"key_press" | "key_release" | "key_tap" | "screenshot" |
-    /// "mouse_move" | "exit"`.
+    /// "mouse_move" | "mouse_button_press" | "mouse_button_release" |
+    /// "exit"`.
     pub kind: String,
     #[serde(default)]
     pub key: Option<String>,
+    /// Mouse button name for `mouse_button_*` events: "Left" | "Right" |
+    /// "Middle".
+    #[serde(default)]
+    pub button: Option<String>,
     #[serde(default)]
     pub dx: Option<f32>,
     #[serde(default)]
@@ -141,6 +146,7 @@ impl Scenario {
                         frame: ev.frame,
                         kind: "key_press".into(),
                         key: ev.key.clone(),
+                        button: None,
                         dx: None,
                         dy: None,
                         note: ev.note.clone(),
@@ -149,6 +155,7 @@ impl Scenario {
                         frame: ev.frame.saturating_add(1),
                         kind: "key_release".into(),
                         key: ev.key.clone(),
+                        button: None,
                         dx: None,
                         dy: None,
                         note: None,
@@ -158,6 +165,19 @@ impl Scenario {
                     if ev.dx.is_none() && ev.dy.is_none() {
                         return Err(format!(
                             "event #{idx} (mouse_move): at least one of `dx`/`dy` required"
+                        )
+                        .into());
+                    }
+                    expanded.push(ev.clone());
+                }
+                "mouse_button_press" | "mouse_button_release" => {
+                    let button_name = ev.button.as_deref().ok_or_else(|| {
+                        format!("event #{idx} ({}): missing `button`", ev.kind)
+                    })?;
+                    if mouse_button_from_name(button_name).is_none() {
+                        return Err(format!(
+                            "event #{idx} ({}): unknown button `{}`",
+                            ev.kind, button_name
                         )
                         .into());
                     }
@@ -247,6 +267,15 @@ fn key_from_name(s: &str) -> Option<KeyCode> {
     })
 }
 
+fn mouse_button_from_name(s: &str) -> Option<MouseButton> {
+    Some(match s {
+        "Left" => MouseButton::Left,
+        "Right" => MouseButton::Right,
+        "Middle" => MouseButton::Middle,
+        _ => return None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -318,6 +347,7 @@ fn drive_input_events(
     clock: Res<HarnessClock>,
     cfg: Res<HarnessConfig>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse_buttons: ResMut<ButtonInput<MouseButton>>,
     mut mouse_writer: EventWriter<MouseMotion>,
 ) {
     let now = clock.frame;
@@ -339,6 +369,16 @@ fn drive_input_events(
                 mouse_writer.send(MouseMotion {
                     delta: Vec2::new(dx, dy),
                 });
+            }
+            "mouse_button_press" => {
+                if let Some(b) = ev.button.as_deref().and_then(mouse_button_from_name) {
+                    mouse_buttons.press(b);
+                }
+            }
+            "mouse_button_release" => {
+                if let Some(b) = ev.button.as_deref().and_then(mouse_button_from_name) {
+                    mouse_buttons.release(b);
+                }
             }
             // screenshot / exit handled in their own systems
             _ => {}

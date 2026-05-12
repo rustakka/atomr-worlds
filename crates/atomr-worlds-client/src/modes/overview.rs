@@ -10,6 +10,7 @@ use atomr_worlds_view::{
     bake_world_summary, render_overview, OverviewCamera, OverviewProjection, RenderConfig,
     WorldSummaryPyramid,
 };
+use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
 use crate::modes::blit::{copy_framebuffer_to_image, RasterTarget, RASTER_H, RASTER_W};
@@ -53,9 +54,12 @@ impl Default for OverviewState {
 fn overview_input(
     mode: Res<ViewMode>,
     keys: Res<ButtonInput<KeyCode>>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    mut motion: EventReader<MouseMotion>,
     mut state: ResMut<OverviewState>,
 ) {
     if *mode != ViewMode::Overview {
+        motion.clear();
         return;
     }
     if keys.just_pressed(KeyCode::KeyP) {
@@ -83,6 +87,26 @@ fn overview_input(
     }
     if keys.pressed(KeyCode::ArrowDown) {
         state.center[1] += pan;
+    }
+    // Drag-to-rotate the globe: hold left mouse and drag. We scale by
+    // 1/256 so a 256-pixel sweep maps to ~1 radian, which feels like a
+    // ~57° spin per full-screen drag — comparable to map-app feel.
+    if mouse_buttons.pressed(MouseButton::Left) {
+        let mut dx = 0.0f64;
+        let mut dy = 0.0f64;
+        for ev in motion.read() {
+            dx += ev.delta.x as f64;
+            dy += ev.delta.y as f64;
+        }
+        let sensitivity = 1.0 / 256.0;
+        state.center[0] += dx * sensitivity;
+        // Pitch: dragging down (positive dy) should tilt the globe to
+        // reveal the south pole — match the trackball feel users expect.
+        state.center[1] += dy * sensitivity;
+        let half_pi = core::f64::consts::FRAC_PI_2 - 1e-3;
+        state.center[1] = state.center[1].clamp(-half_pi, half_pi);
+    } else {
+        motion.clear();
     }
 }
 

@@ -1,0 +1,45 @@
+seed = "0xDEADBEEFCAFEF00D"
+mode = "overview"
+width = 1280
+height = 720
+warmup_frames = 60
+output_prefix = "overview_arrow"
+
+[[events]]
+frame = 1
+kind  = "key_tap"
+key   = "KeyP"
+
+[[events]]
+frame = 5
+kind  = "key_tap"
+key   = "KeyP"
+
+[[events]]
+frame = 20
+kind  = "screenshot"
+note  = "before arrow rotation"
+
+# Hold ArrowDown for ~1s; with pan=0.01/frame and ~60 fps that's ~36° pitch.
+# A yaw rotation (ArrowLeft/Right) is invisible here because the world's
+# pole is on +Z and we're looking at the +Z hemisphere — a Y-axis yaw
+# leaves the pole at the disc centre. Pitch tilts the disc away from
+# the pole and is the cleanest visual confirmation.
+[[events]]
+frame = 25
+kind  = "key_press"
+key   = "ArrowDown"
+
+[[events]]
+frame = 85
+kind  = "key_release"
+key   = "ArrowDown"
+
+[[events]]
+frame = 95
+kind  = "screenshot"
+note  = "after arrow rotation"
+
+[[events]]
+frame = 100
+kind  = "exit"

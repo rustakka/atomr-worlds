@@ -232,11 +232,15 @@ fn fp_input(
     if keys.pressed(KeyCode::KeyS) {
         mv[2] -= speed * dt;
     }
+    // WalkCamera's `+x_local = right` rotates into world +X at yaw=0, but
+    // the Bevy camera (looking +Z world) has its screen-right axis aligned
+    // with world -X. So `D` (screen-right) feeds mv[0] -= and `A` feeds +=
+    // to keep WASD intuitive on the visible image.
     if keys.pressed(KeyCode::KeyA) {
-        mv[0] -= speed * dt;
+        mv[0] += speed * dt;
     }
     if keys.pressed(KeyCode::KeyD) {
-        mv[0] += speed * dt;
+        mv[0] -= speed * dt;
     }
     if keys.pressed(KeyCode::Space) {
         mv[1] += speed * dt;

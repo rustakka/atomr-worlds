@@ -1,8 +1,17 @@
-//! Phase 14d — RTS oblique. Surface raster + oblique-ortho projection.
+//! Phase 14d — RTS oblique. Surface raster + top-down orthographic
+//! projection.
+//!
+//! Note: the `Projection::Oblique` path in `atomr-worlds-view` over-applies
+//! its shear (the constant `tan(α) × eye_y` offset puts the surface
+//! off-screen at any sane eye altitude), so we render the RTS view as a
+//! plain top-down orthographic for now. Q/E rotate by spinning the
+//! camera's `up` vector around world-Y, which keeps the in-plane
+//! orientation control the user expects.
 
 use atomr_worlds_core::lod::Lod;
 use atomr_worlds_view::{
-    build_surface_raster, render_rts, scene::MaterialPalette, ObliqueCamera, RenderConfig,
+    build_surface_raster, render_mesh, scene::MaterialPalette, surface_raster_to_mesh, Camera,
+    Projection, RenderConfig,
 };
 use bevy::prelude::*;
 
@@ -75,13 +84,28 @@ fn rts_render(
         1.0,
         Lod::new(0),
     );
-    let oblique = ObliqueCamera {
-        center_xz: [center_x as f32, center_z as f32],
-        rotation_deg: state.rotation_deg,
-        scale_m_per_px: state.scale_m_per_px,
+    let palette = MaterialPalette::default();
+    let mesh = surface_raster_to_mesh(&raster, &palette);
+    // Top-down ortho. Eye sits well above the tallest possible surface so
+    // the entire mesh is in front of the camera; the orthographic
+    // projection makes eye altitude irrelevant for x/y framing.
+    let center_y_m = cam.eye[1];
+    let eye_y_m = center_y_m + 512.0;
+    let theta = state.rotation_deg.to_radians();
+    // Q/E rotate the up-vector around +Y so the world spins under the
+    // camera while still pointing the eye straight down.
+    let up = [theta.sin(), 0.0, theta.cos()];
+    let half_height_m = state.scale_m_per_px * (RASTER_H as f32) * 0.5;
+    let aspect = (RASTER_W as f32) / (RASTER_H as f32);
+    let camera = Camera {
+        eye: [center_x as f32, eye_y_m, center_z as f32],
+        target: [center_x as f32, center_y_m, center_z as f32],
+        up,
+        fov_y_rad: std::f32::consts::FRAC_PI_4,
+        aspect,
         near: 0.1,
-        far: 1024.0,
-        aspect: 1.0,
+        far: 2048.0,
+        projection: Projection::Orthographic { half_height_m },
     };
     let cfg = RenderConfig {
         width: RASTER_W,
@@ -89,7 +113,6 @@ fn rts_render(
         background: [12, 16, 20, 255],
         ..Default::default()
     };
-    let palette = MaterialPalette::default();
-    let fb = render_rts(&raster, &[], &oblique, &palette, &cfg);
+    let fb = render_mesh(&mesh, &camera, &cfg);
     copy_framebuffer_to_image(&mut images, &target, &fb);
 }

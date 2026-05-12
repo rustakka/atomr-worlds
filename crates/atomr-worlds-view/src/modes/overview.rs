@@ -141,23 +141,35 @@ pub fn render_overview(
     let full_w = n * tile_size_px;
     let full_h = n * tile_size_px;
 
+    // `cam.center` is interpreted as a (yaw, pitch) offset (radians) for
+    // sphere projections and as a normalised pan for planar flat. At
+    // (0, 0) every branch reduces to the previous default — the golden
+    // tests rely on that.
+    let yaw = cam.center[0];
+    let pitch = cam.center[1];
     match cam.projection {
         OverviewProjection::Equirectangular => {
-            // Per output pixel, derive a global pixel inside the
-            // pyramid level (pure linear remap) and sample.
+            // Pan by shifting global pixel sampling: yaw maps to a
+            // longitude shift (`full_w` per 2π), pitch to a latitude
+            // shift (`full_h` per π).
+            let dx = (yaw / (2.0 * core::f64::consts::PI) * full_w as f64) as i64;
+            let dy = (pitch / core::f64::consts::PI * full_h as f64) as i64;
             for py in 0..h {
                 for px in 0..w {
-                    let gx = ((px as u64 * full_w as u64) / (w.max(1) as u64)) as u32;
-                    let gy = ((py as u64 * full_h as u64) / (h.max(1) as u64)) as u32;
+                    let base_x = (px as u64 * full_w as u64) / (w.max(1) as u64);
+                    let base_y = (py as u64 * full_h as u64) / (h.max(1) as u64);
+                    let gx = (base_x as i64 + dx).rem_euclid(full_w as i64) as u32;
+                    let gy = (base_y as i64 + dy).clamp(0, full_h as i64 - 1) as u32;
                     let color = sample_global(pyramid, level, tile_size_px, gx, gy, n);
                     write_pixel(&mut fb, px, py, color);
                 }
             }
         }
         OverviewProjection::OrthographicSphere => {
-            // Disc on background. View axis: -Z (looking at +Z
-            // hemisphere from the front).
-            let view_axis = DVec3::new(0.0, 0.0, -1.0);
+            // Disc on background. View axis starts at -Z (looking at
+            // the +Z hemisphere from the front) and rotates by
+            // (yaw, pitch) so dragging the mouse spins the globe.
+            let view_axis = rotate_view_axis(DVec3::new(0.0, 0.0, -1.0), yaw, pitch);
             for py in 0..h {
                 for px in 0..w {
                     let Some(dir) = orthographic_sphere_pixel_to_dir(px, py, w, h, view_axis) else {
@@ -178,7 +190,7 @@ pub fn render_overview(
             // still index it the same way.
             match pyramid.shape {
                 WorldShape::Sphere { .. } => {
-                    let view_axis = DVec3::new(0.0, -1.0, 0.0); // looking down +Y
+                    let view_axis = rotate_view_axis(DVec3::new(0.0, -1.0, 0.0), yaw, pitch);
                     for py in 0..h {
                         for px in 0..w {
                             let Some(dir) = orthographic_sphere_pixel_to_dir(px, py, w, h, view_axis) else {
@@ -191,10 +203,17 @@ pub fn render_overview(
                     }
                 }
                 _ => {
+                    // Planar flat: yaw/pitch pan in normalised tile-space
+                    // (full pyramid spans (-1, 1) in the same units used
+                    // by `extent`).
+                    let dx = (yaw * full_w as f64) as i64;
+                    let dy = (pitch * full_h as f64) as i64;
                     for py in 0..h {
                         for px in 0..w {
-                            let gx = ((px as u64 * full_w as u64) / (w.max(1) as u64)) as u32;
-                            let gy = ((py as u64 * full_h as u64) / (h.max(1) as u64)) as u32;
+                            let base_x = (px as u64 * full_w as u64) / (w.max(1) as u64);
+                            let base_y = (py as u64 * full_h as u64) / (h.max(1) as u64);
+                            let gx = (base_x as i64 + dx).clamp(0, full_w as i64 - 1) as u32;
+                            let gy = (base_y as i64 + dy).clamp(0, full_h as i64 - 1) as u32;
                             let color = sample_global(pyramid, level, tile_size_px, gx, gy, n);
                             write_pixel(&mut fb, px, py, color);
                         }
@@ -204,9 +223,49 @@ pub fn render_overview(
         }
     }
 
-    let _ = cam.center;
     let _ = cam.aspect;
     fb
+}
+
+/// Rotate `axis` by (`yaw`, `pitch`): yaw rotates around world-Y, then
+/// pitch tilts around the resulting right axis. At `(0, 0)` returns
+/// `axis` unchanged so callers that haven't wired any input through
+/// keep their previous output bit-for-bit (the overview golden tests
+/// depend on this).
+fn rotate_view_axis(axis: DVec3, yaw: f64, pitch: f64) -> DVec3 {
+    // Yaw around +Y world axis.
+    let (sin_y, cos_y) = yaw.sin_cos();
+    let after_yaw = DVec3::new(
+        cos_y * axis.x + sin_y * axis.z,
+        axis.y,
+        -sin_y * axis.x + cos_y * axis.z,
+    );
+    // Pitch around the right axis (= +Y × after_yaw, normalised). For
+    // axes parallel to +Y the right axis is ill-defined; in that case
+    // fall back to rotating around +X so a small pitch still moves the
+    // pole.
+    let up = DVec3::new(0.0, 1.0, 0.0);
+    let rx = up.y * after_yaw.z - up.z * after_yaw.y;
+    let ry = up.z * after_yaw.x - up.x * after_yaw.z;
+    let rz = up.x * after_yaw.y - up.y * after_yaw.x;
+    let rl = (rx * rx + ry * ry + rz * rz).sqrt();
+    let right = if rl > 1e-9 {
+        DVec3::new(rx / rl, ry / rl, rz / rl)
+    } else {
+        DVec3::new(1.0, 0.0, 0.0)
+    };
+    let (sin_p, cos_p) = pitch.sin_cos();
+    // Rodrigues' rotation around `right`.
+    let v = after_yaw;
+    let dot = right.x * v.x + right.y * v.y + right.z * v.z;
+    let cx = right.y * v.z - right.z * v.y;
+    let cy = right.z * v.x - right.x * v.z;
+    let cz = right.x * v.y - right.y * v.x;
+    DVec3::new(
+        v.x * cos_p + cx * sin_p + right.x * dot * (1.0 - cos_p),
+        v.y * cos_p + cy * sin_p + right.y * dot * (1.0 - cos_p),
+        v.z * cos_p + cz * sin_p + right.z * dot * (1.0 - cos_p),
+    )
 }
 
 #[inline]

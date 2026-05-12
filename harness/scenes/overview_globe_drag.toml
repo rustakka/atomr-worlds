@@ -1,0 +1,49 @@
+seed = "0xDEADBEEFCAFEF00D"
+mode = "overview"
+width = 1280
+height = 720
+warmup_frames = 60
+output_prefix = "overview_drag"
+
+# Switch to OrthographicSphere (default is OrthographicFlat). Tap P once
+# (Flat -> Equirect) then twice more to land on Sphere via Flat->Equirect->Sphere.
+[[events]]
+frame = 1
+kind  = "key_tap"
+key   = "KeyP"
+
+[[events]]
+frame = 5
+kind  = "key_tap"
+key   = "KeyP"
+
+[[events]]
+frame = 20
+kind  = "screenshot"
+note  = "globe centered, view_axis = -Z"
+
+# Hold left mouse and drag right by ~256 px → ~1 rad of yaw.
+[[events]]
+frame = 25
+kind  = "mouse_button_press"
+button = "Left"
+
+[[events]]
+frame = 30
+kind  = "mouse_move"
+dx = 0.0
+dy = 256.0
+
+[[events]]
+frame = 35
+kind  = "mouse_button_release"
+button = "Left"
+
+[[events]]
+frame = 45
+kind  = "screenshot"
+note  = "globe rotated ~1 rad in yaw"
+
+[[events]]
+frame = 50
+kind  = "exit"

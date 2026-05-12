@@ -1,0 +1,32 @@
+seed = "0xDEADBEEFCAFEF00D"
+mode = "rts"
+width = 1280
+height = 720
+warmup_frames = 90
+output_prefix = "rts_basic"
+
+# Baseline RTS view after warmup. Expectation: visible terrain, not black.
+[[events]]
+frame = 0
+kind  = "screenshot"
+note  = "baseline RTS top-down"
+
+# Q rotates the view; verify the camera spins (different framing).
+[[events]]
+frame = 1
+kind  = "key_press"
+key   = "KeyQ"
+
+[[events]]
+frame = 60
+kind  = "key_release"
+key   = "KeyQ"
+
+[[events]]
+frame = 65
+kind  = "screenshot"
+note  = "after ~1s of Q rotation — view should be rotated"
+
+[[events]]
+frame = 70
+kind  = "exit"
