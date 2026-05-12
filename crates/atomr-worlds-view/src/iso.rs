@@ -267,13 +267,138 @@ fn compute_normals(mesh: &mut Mesh) {
 
 /// Transvoxel-style transition cells between bricks at different LODs.
 ///
-/// Phase 9 ships a stub returning empty geometry; the full implementation
-/// lands in a follow-up (this file's docstring covers the algorithm choice).
-/// `axis`/`sign` encode which face of `coarse` faces the higher-resolution
-/// `fine` brick.
+/// Phase 9 shipped this as a stub. Phase 13h replaces it with a skirt-
+/// based crack hider (see [`boundary_skirt`]) — kept as a deprecated
+/// alias for legacy callers; new code should use `boundary_skirt`
+/// directly or the [`crate::CompositeScene`] crossfade-overlap pathway.
+#[deprecated(note = "use boundary_skirt or CompositeScene crossfade-overlap instead")]
 #[allow(dead_code)]
-pub(crate) fn transvoxel_seam(_coarse: &Brick, _fine: &Brick, _axis: u8, _sign: i8) -> Vec<u32> {
-    Vec::new()
+pub(crate) fn transvoxel_seam(coarse: &Brick, _fine: &Brick, axis: u8, sign: i8) -> Mesh {
+    boundary_skirt(coarse, axis, sign, BRICK_EDGE as f32)
+}
+
+/// Produce a "skirt" fin along the named face of `brick`: a band of
+/// triangles that extends `skirt_depth_voxels` below the surface so
+/// adjacent LODs can crossfade through it without leaving a hole.
+///
+/// `axis` ∈ {0, 1, 2} selects the world axis (X / Y / Z) of the face's
+/// normal; `sign` ∈ {-1, +1} chooses the negative/positive side. The
+/// returned mesh has its vertices in brick-local voxel coordinates, no
+/// material/normal smoothing — its only job is to hide cracks between
+/// LOD tiers. The renderer can apply `FragmentMode::DistanceFade` to it
+/// so the skirt only shows up exactly when the seam would gap.
+pub fn boundary_skirt(brick: &Brick, axis: u8, sign: i8, skirt_depth_voxels: f32) -> Mesh {
+    debug_assert!(axis < 3, "axis must be 0, 1, or 2");
+    debug_assert!(sign == -1 || sign == 1, "sign must be -1 or 1");
+    let edge = BRICK_EDGE as f32;
+    let mut mesh = Mesh::default();
+    if brick.is_empty() {
+        return mesh;
+    }
+
+    // Build a 2D mask over the chosen face's plane: for each (u, v) cell
+    // along the face, the cell is "solid" iff at least one voxel along
+    // the perpendicular axis is non-empty. We then emit two quads per
+    // solid edge cell: one outward-facing skirt going `skirt_depth`
+    // below the face, and a back-facing one so the skirt is solid from
+    // both sides.
+    let mut solid = vec![false; (BRICK_EDGE * BRICK_EDGE) as usize];
+    for u in 0..BRICK_EDGE as i64 {
+        for v in 0..BRICK_EDGE as i64 {
+            let mut any = false;
+            for w in 0..BRICK_EDGE as i64 {
+                let p = match axis {
+                    0 => IVec3::new(if sign > 0 { (BRICK_EDGE - 1) as i64 } else { 0 }, u, v),
+                    1 => IVec3::new(u, if sign > 0 { (BRICK_EDGE - 1) as i64 } else { 0 }, v),
+                    _ => IVec3::new(u, v, if sign > 0 { (BRICK_EDGE - 1) as i64 } else { 0 }),
+                };
+                // Walk inward from the face surface.
+                let walk = match axis {
+                    0 => IVec3::new(p.x - sign as i64 * w, p.y, p.z),
+                    1 => IVec3::new(p.x, p.y - sign as i64 * w, p.z),
+                    _ => IVec3::new(p.x, p.y, p.z - sign as i64 * w),
+                };
+                if walk.x < 0
+                    || walk.x >= BRICK_EDGE as i64
+                    || walk.y < 0
+                    || walk.y >= BRICK_EDGE as i64
+                    || walk.z < 0
+                    || walk.z >= BRICK_EDGE as i64
+                {
+                    continue;
+                }
+                if !brick.get(walk).is_empty() {
+                    any = true;
+                    break;
+                }
+            }
+            if any {
+                solid[(v * BRICK_EDGE as i64 + u) as usize] = true;
+            }
+        }
+    }
+
+    // Walk the mask edges; each transition emits a 1-cell-wide skirt quad.
+    let depth_offset = match (axis, sign) {
+        (_, s) => -(s as f32) * skirt_depth_voxels,
+    };
+    // Helper to make a face-plane vertex.
+    let make_v = |u: f32, v: f32, depth: f32, mat: u16| -> Vertex {
+        let pos = match axis {
+            0 => [if sign > 0 { edge } else { 0.0 } + depth, u, v],
+            1 => [u, if sign > 0 { edge } else { 0.0 } + depth, v],
+            _ => [u, v, if sign > 0 { edge } else { 0.0 } + depth],
+        };
+        let normal: [f32; 3] = match (axis, sign) {
+            (0, 1) => [1.0, 0.0, 0.0],
+            (0, _) => [-1.0, 0.0, 0.0],
+            (1, 1) => [0.0, 1.0, 0.0],
+            (1, _) => [0.0, -1.0, 0.0],
+            (2, 1) => [0.0, 0.0, 1.0],
+            (_, _) => [0.0, 0.0, -1.0],
+        };
+        Vertex { pos, normal, material: mat }
+    };
+    let edge_e = BRICK_EDGE as i64;
+    for u in 0..edge_e {
+        for v in 0..edge_e {
+            if !solid[(v * edge_e + u) as usize] {
+                continue;
+            }
+            // Emit one outward-facing skirt rectangle per solid cell.
+            // The rectangle's outer edge sits at the face plane; the
+            // inner edge sits `skirt_depth_voxels` below the surface.
+            let base = mesh.vertices.len() as u32;
+            mesh.vertices.push(make_v(u as f32, v as f32, 0.0, 1));
+            mesh.vertices.push(make_v((u + 1) as f32, v as f32, 0.0, 1));
+            mesh.vertices.push(make_v((u + 1) as f32, (v + 1) as f32, 0.0, 1));
+            mesh.vertices.push(make_v(u as f32, (v + 1) as f32, 0.0, 1));
+            mesh.vertices.push(make_v(u as f32, v as f32, depth_offset, 1));
+            mesh.vertices.push(make_v((u + 1) as f32, v as f32, depth_offset, 1));
+            mesh.vertices.push(make_v((u + 1) as f32, (v + 1) as f32, depth_offset, 1));
+            mesh.vertices.push(make_v(u as f32, (v + 1) as f32, depth_offset, 1));
+            // 4 side quads = 8 triangles.
+            let q = |a: u32, b: u32, c: u32, d: u32, out: &mut Vec<u32>| {
+                out.extend_from_slice(&[a, b, c, a, c, d]);
+            };
+            q(base, base + 1, base + 5, base + 4, &mut mesh.indices);
+            q(base + 1, base + 2, base + 6, base + 5, &mut mesh.indices);
+            q(base + 2, base + 3, base + 7, base + 6, &mut mesh.indices);
+            q(base + 3, base, base + 4, base + 7, &mut mesh.indices);
+        }
+    }
+    mesh
+}
+
+/// Crossfade-overlap helper for cross-LOD boundaries.
+///
+/// Pairs two meshes of the same brick at different LODs so a
+/// [`crate::CompositeScene`] can draw both and rely on the fragment
+/// blend to hide the seam. Returns `(near_mesh, far_mesh)` so the
+/// caller can wrap each in a [`crate::MeshNode`] and feed them into
+/// `near_meshes` / `far_meshes` respectively.
+pub fn crossfade_overlap(brick: &Brick, mode_near: MeshMode, mode_far: MeshMode) -> (Mesh, Mesh) {
+    (surface_mesh(brick, mode_near), surface_mesh(brick, mode_far))
 }
 
 #[cfg(test)]

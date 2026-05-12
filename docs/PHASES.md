@@ -461,3 +461,93 @@ basis is orthonormal right-handed, sampling lands on the right face
 and is scale-invariant, empty meshes produce a uniform-background
 skybox, the digest is deterministic and changes when the observer
 moves, and the reversed-z projection actually maps near→1 / far→0.
+
+## Phase 13g *(landed)* — Composite renderer
+
+[`crates/atomr-worlds-view/src/render.rs`](../crates/atomr-worlds-view/src/render.rs)
+adds `FragmentMode::{Opaque, DistanceFade { start_m, end_m, observer }}`
+and `render_composite(scene, camera, cfg)`. The composite pipeline:
+
+1. Clear depth to 0.0 (reversed-z "far").
+2. If `scene.skybox` is `Some`, paint the background by tracing each
+   pixel back to a camera-ray direction and sampling the cubemap. No
+   depth writes (depth stays at 0.0 so mesh passes always win).
+3. Rasterize `scene.far_meshes` with `DistanceFade` over the last
+   `fade_band_frac` of `[transition_radius_m..max_radius_m]`. Alpha
+   blends source-over with the destination; depth writes only when
+   `alpha > 0.5` so fade-out fragments don't occlude the near ring.
+4. Rasterize `scene.near_meshes` opaque.
+
+Tests: [`crates/atomr-worlds-view/tests/composite.rs`](../crates/atomr-worlds-view/tests/composite.rs)
+covers determinism, skybox-only path matching `Skybox::sample`, alpha-
+blend math at the band midpoint, `None`-skybox background fallback,
+near-ring opacity over the sky, and the `FragmentMode` distance-alpha
+math directly.
+
+## Phase 13h *(landed)* — Cross-LOD seam fix
+
+Two seam-bridge primitives in
+[`crates/atomr-worlds-view/src/iso.rs`](../crates/atomr-worlds-view/src/iso.rs):
+
+- `boundary_skirt(brick, axis, sign, depth)` — emits a band of
+  rectangular skirts along the named brick face. Each face cell with
+  at least one solid voxel along the perpendicular axis gets a quad
+  that extends `depth` voxels below the surface, hiding any LOD-
+  boundary crack between bricks of different mesh densities. The
+  output is brick-local; the caller transforms to world space.
+- `crossfade_overlap(brick, mode_near, mode_far)` — returns the same
+  brick meshed at two LODs, suitable for plugging straight into
+  `CompositeScene::{near_meshes, far_meshes}` so the
+  `FragmentMode::DistanceFade` band crossfades the two.
+
+The Phase-9 `transvoxel_seam` stub is `#[deprecated]`-aliased to
+`boundary_skirt` for legacy callers. Tests in
+[`crates/atomr-worlds-view/tests/seam.rs`](../crates/atomr-worlds-view/tests/seam.rs)
+cover the skirt non-empty / empty cases, the crossfade-overlap pair,
+and a composite-render "no holes inside visible brick" check.
+
+## Phase 13i *(landed)* — Transitive skybox + sphere-flyby demo
+
+[`crates/atomr-worlds-view/src/observer.rs`](../crates/atomr-worlds-view/src/observer.rs)
+adds `ObserverState` for the transitive-refresh logic:
+
+- Tracks current `position`, derived `velocity_mps`,
+  `containing_frame`, two skybox slots (`last_skybox`, `next_skybox`),
+  and `crossfade_t`.
+- `should_refresh(policy, body_center, body_radius, prev_frame)`
+  returns true when any of: position has drifted past
+  `position_delta_frac * outer_radius`; altitude has changed past
+  `altitude_delta_frac * body_radius`; capture age exceeds
+  `max_age_ticks`; or `containing_frame` differs from `prev_frame`
+  (when `refresh_on_tier_change`).
+- `accept_next(sky)` adopts the freshly-generated skybox: first
+  arrival becomes `last_skybox` directly; later arrivals start the
+  crossfade.
+- `tick(new_pos, new_frame, dt_s)` updates velocity, advances the
+  crossfade, and promotes `next` → `last` at `t = 1.0`.
+
+The companion demo binary
+[`examples/sphere-flyby`](../examples/sphere-flyby) configures an
+Earth-class sphere world, registers an authored "city" `LiteralRegion`,
+and simulates an observer flying from surface to ~1 Mm altitude in
+12 frames. Each frame is rendered via `render_composite` and written
+to `/tmp/sphere-flyby-{:02}.png`. Run with `cargo run -p sphere-flyby`.
+
+Tests: 6 `observer::tests::*` unit tests cover initial-refresh,
+position threshold, altitude threshold, age threshold, tier-change
+threshold, velocity derivation, and crossfade progression.
+
+## Phase 13 — End-state summary
+
+The full Phase 13 feature stack — definable world shape with horizon-
+driven streaming, layered geologic pre-sim, hand-authored stipulation
+(literal / heightmap / .vox), cubemap skybox with reversed-z
+composite, cross-LOD seam fix, and transitive skybox refresh — is
+now live. ~213 workspace tests pass; every output is a deterministic
+function of `(seed, shape, registered region set, observer pose,
+config)`. CUDA-aware brick generation continues to use the
+`generate_brick_legacy` shim, so the existing GPU determinism gate is
+unaffected. Optional follow-ups documented in the per-phase risk
+sections: GPU macro-state upload (13k), cubed-sphere coordinate
+research spike (13l), Bruneton-style atmospheric scattering post-pass
+(13j).

@@ -17,6 +17,8 @@ use atomr_worlds_voxel::Brick;
 
 use crate::camera::{transform_point, Camera};
 use crate::mesh::{greedy_mesh, Mesh, Vertex};
+use crate::scene::MeshNode;
+use crate::skybox::Skybox;
 use crate::ViewError;
 
 #[derive(Copy, Clone, Debug)]
@@ -257,4 +259,355 @@ fn norm3(v: [f32; 3]) -> [f32; 3] {
 
 fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 13g: composite renderer (skybox + far-ring fade + near ring).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fragment shading mode — controls per-pixel alpha + depth interaction.
+/// Used by [`render_composite`] to alpha-fade the outer edge of the far
+/// ring against the skybox without a hard pop.
+#[derive(Copy, Clone, Debug)]
+pub enum FragmentMode {
+    /// Source pixel replaces the destination unconditionally (the
+    /// pre-Phase-13g behavior of `render_mesh`).
+    Opaque,
+    /// Alpha-fade by world-space distance from `observer`. `alpha = 1`
+    /// when the fragment's distance is `<= start_m`; `alpha = 0` when
+    /// `>= end_m`; linearly interpolated between. Source-over blend with
+    /// the destination color; depth writes only when alpha > 0.5.
+    DistanceFade { start_m: f32, end_m: f32, observer: [f32; 3] },
+}
+
+/// Composite-rendering inputs: optional skybox + two ring mesh lists.
+#[derive(Debug)]
+pub struct CompositeScene<'a> {
+    /// Cubemap painted before any mesh; samples per-pixel by camera ray.
+    pub skybox: Option<&'a Skybox>,
+    /// Outer ring meshes. Rasterized with a `DistanceFade` band so the
+    /// last `fade_band_frac` of `[transition_radius_m..max_radius_m]`
+    /// crossfades into the skybox.
+    pub far_meshes: &'a [MeshNode],
+    /// Inner ring meshes. Drawn opaque.
+    pub near_meshes: &'a [MeshNode],
+    /// Observer position (world-space), used by the fade calculation.
+    pub observer: [f32; 3],
+    /// Inner / outer boundary of the far ring in world meters.
+    pub transition_radius_m: f32,
+    pub max_radius_m: f32,
+    /// Fraction of the band `[transition..max]` over which the fade is
+    /// active. Default 0.10 keeps the visible seam narrow.
+    pub fade_band_frac: f32,
+}
+
+impl<'a> CompositeScene<'a> {
+    pub fn new(
+        skybox: Option<&'a Skybox>,
+        far_meshes: &'a [MeshNode],
+        near_meshes: &'a [MeshNode],
+        observer: [f32; 3],
+        transition_radius_m: f32,
+        max_radius_m: f32,
+    ) -> Self {
+        Self {
+            skybox,
+            far_meshes,
+            near_meshes,
+            observer,
+            transition_radius_m,
+            max_radius_m,
+            fade_band_frac: 0.10,
+        }
+    }
+}
+
+/// Composite the three layers — skybox → far meshes (faded) → near
+/// meshes (opaque) — into a single framebuffer. Iteration order is
+/// fixed; the rasterizer state is a single z-buffer + a single pixel
+/// buffer, so output bytes are a pure function of the inputs.
+pub fn render_composite(
+    scene: &CompositeScene<'_>,
+    camera: &Camera,
+    cfg: &RenderConfig,
+) -> Framebuffer {
+    let mut fb = Framebuffer {
+        width: cfg.width,
+        height: cfg.height,
+        pixels: Vec::with_capacity((cfg.width * cfg.height * 4) as usize),
+        depth: vec![0.0f32; (cfg.width * cfg.height) as usize],
+    };
+
+    // Step 1: paint the background — skybox if present, otherwise solid.
+    if let Some(sky) = scene.skybox {
+        fb.pixels = paint_skybox_background(scene.observer, sky, camera, cfg);
+    } else {
+        let bg = cfg.background;
+        for _ in 0..(cfg.width * cfg.height) {
+            fb.pixels.extend_from_slice(&bg);
+        }
+    }
+
+    // Step 2: rasterize the far ring with distance fade. The fade band is
+    // the last `fade_band_frac` of `[transition..max]` — outer edge
+    // smoothly dissolves into the skybox below.
+    let band_width = (scene.max_radius_m - scene.transition_radius_m).max(0.0);
+    let fade_start_m = scene.max_radius_m - band_width * scene.fade_band_frac.max(0.0);
+    let fade_end_m = scene.max_radius_m;
+    for node in scene.far_meshes {
+        rasterize_node(
+            &mut fb,
+            node,
+            camera,
+            cfg,
+            FragmentMode::DistanceFade {
+                start_m: fade_start_m,
+                end_m: fade_end_m,
+                observer: scene.observer,
+            },
+        );
+    }
+
+    // Step 3: rasterize the near ring opaque (the canonical, pre-13g path).
+    for node in scene.near_meshes {
+        rasterize_node(&mut fb, node, camera, cfg, FragmentMode::Opaque);
+    }
+
+    fb
+}
+
+/// Paint a skybox into a fresh pixel buffer by tracing each pixel back
+/// to a world-space ray direction. The skybox lookup is the cubemap
+/// sampler; no depth writes (depth stays at 0.0 / "far" so the mesh
+/// passes always win).
+fn paint_skybox_background(
+    observer: [f32; 3],
+    sky: &Skybox,
+    camera: &Camera,
+    cfg: &RenderConfig,
+) -> Vec<u8> {
+    let w = cfg.width as i32;
+    let h = cfg.height as i32;
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    let inv_w = 1.0 / w as f32;
+    let inv_h = 1.0 / h as f32;
+    // Build a deterministic ray basis from the camera. We don't use the
+    // projection matrix — the cubemap is direction-only — we just rebuild
+    // the forward/right/up basis from `eye → target` and `up`.
+    let forward = norm3([
+        camera.target[0] - camera.eye[0],
+        camera.target[1] - camera.eye[1],
+        camera.target[2] - camera.eye[2],
+    ]);
+    let right = norm3([
+        forward[1] * camera.up[2] - forward[2] * camera.up[1],
+        forward[2] * camera.up[0] - forward[0] * camera.up[2],
+        forward[0] * camera.up[1] - forward[1] * camera.up[0],
+    ]);
+    let up = [
+        right[1] * forward[2] - right[2] * forward[1],
+        right[2] * forward[0] - right[0] * forward[2],
+        right[0] * forward[1] - right[1] * forward[0],
+    ];
+    let aspect = camera.aspect.max(1e-6);
+    let half_h = (camera.fov_y_rad * 0.5).tan();
+    let half_w = half_h * aspect;
+    let _ = observer; // skybox sample is direction-only; observer pose lives in `sky.origin`
+    for y in 0..h {
+        for x in 0..w {
+            // NDC in [-1, 1] with +y up.
+            let nx = ((x as f32 + 0.5) * inv_w) * 2.0 - 1.0;
+            let ny = 1.0 - ((y as f32 + 0.5) * inv_h) * 2.0;
+            let dx = right[0] * (nx * half_w) + up[0] * (ny * half_h) + forward[0];
+            let dy = right[1] * (nx * half_w) + up[1] * (ny * half_h) + forward[1];
+            let dz = right[2] * (nx * half_w) + up[2] * (ny * half_h) + forward[2];
+            let rgba = sky.sample([dx, dy, dz]);
+            out.extend_from_slice(&rgba);
+        }
+    }
+    out
+}
+
+/// Rasterize one mesh node into the framebuffer using the given fragment
+/// mode. Mirrors `render_mesh` but (a) accepts pre-allocated framebuffer,
+/// (b) applies the node's transform, (c) routes per-fragment shading
+/// through `mode`.
+fn rasterize_node(
+    fb: &mut Framebuffer,
+    node: &MeshNode,
+    camera: &Camera,
+    cfg: &RenderConfig,
+    mode: FragmentMode,
+) {
+    let mesh = &node.mesh;
+    if mesh.indices.is_empty() {
+        return;
+    }
+    let mvp = camera.view_proj();
+    let light = norm3(cfg.light_dir);
+    let t = node.transform;
+    let world_pos: Vec<[f32; 3]> =
+        mesh.vertices.iter().map(|v| transform_point_affine(t, v.pos)).collect();
+    let clip: Vec<[f32; 4]> = world_pos.iter().map(|p| transform_point(mvp, *p)).collect();
+
+    let w_f = cfg.width as f32;
+    let h_f = cfg.height as f32;
+    let mut tri = 0usize;
+    while tri < mesh.indices.len() {
+        let i0 = mesh.indices[tri] as usize;
+        let i1 = mesh.indices[tri + 1] as usize;
+        let i2 = mesh.indices[tri + 2] as usize;
+        tri += 3;
+        let c0 = clip[i0];
+        let c1 = clip[i1];
+        let c2 = clip[i2];
+        if c0[3] <= 0.0 || c1[3] <= 0.0 || c2[3] <= 0.0 {
+            continue;
+        }
+        let s0 = clip_to_screen(c0, w_f, h_f);
+        let s1 = clip_to_screen(c1, w_f, h_f);
+        let s2 = clip_to_screen(c2, w_f, h_f);
+        let area2 = edge_fn(s0, s1, s2);
+        if area2 <= 0.0 {
+            continue;
+        }
+        // Pre-compute per-vertex world distances for the fade band.
+        let v0 = &mesh.vertices[i0];
+        let n_world = transform_dir(t, v0.normal);
+        let d0 = world_distance(world_pos[i0], match mode {
+            FragmentMode::DistanceFade { observer, .. } => observer,
+            FragmentMode::Opaque => [0.0; 3],
+        });
+        let d1 = world_distance(world_pos[i1], match mode {
+            FragmentMode::DistanceFade { observer, .. } => observer,
+            FragmentMode::Opaque => [0.0; 3],
+        });
+        let d2 = world_distance(world_pos[i2], match mode {
+            FragmentMode::DistanceFade { observer, .. } => observer,
+            FragmentMode::Opaque => [0.0; 3],
+        });
+
+        rasterize_triangle_mode(
+            fb,
+            [s0, s1, s2],
+            [d0, d1, d2],
+            area2,
+            v0.material,
+            n_world,
+            light,
+            cfg.ambient,
+            mode,
+        );
+    }
+}
+
+#[inline]
+fn world_distance(p: [f32; 3], o: [f32; 3]) -> f32 {
+    let dx = p[0] - o[0];
+    let dy = p[1] - o[1];
+    let dz = p[2] - o[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+#[inline]
+fn transform_point_affine(m: [[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0],
+        m[0][1] * p[0] + m[1][1] * p[1] + m[2][1] * p[2] + m[3][1],
+        m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2],
+    ]
+}
+
+#[inline]
+fn transform_dir(m: [[f32; 4]; 4], v: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2],
+        m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2],
+        m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rasterize_triangle_mode(
+    fb: &mut Framebuffer,
+    s: [[f32; 3]; 3],
+    dists: [f32; 3],
+    area2: f32,
+    material: u16,
+    normal: [f32; 3],
+    light: [f32; 3],
+    ambient: f32,
+    mode: FragmentMode,
+) {
+    let w = fb.width as i32;
+    let h = fb.height as i32;
+    let xmin = s[0][0].min(s[1][0]).min(s[2][0]).floor().max(0.0) as i32;
+    let xmax = s[0][0].max(s[1][0]).max(s[2][0]).ceil().min(w as f32 - 1.0) as i32;
+    let ymin = s[0][1].min(s[1][1]).min(s[2][1]).floor().max(0.0) as i32;
+    let ymax = s[0][1].max(s[1][1]).max(s[2][1]).ceil().min(h as f32 - 1.0) as i32;
+    if xmin > xmax || ymin > ymax {
+        return;
+    }
+    let inv_area = 1.0 / area2;
+    let base = material_color(material);
+    let shade = ambient + (1.0 - ambient) * dot3(normal, light).max(0.0);
+    let sr = (base[0] as f32 * shade).clamp(0.0, 255.0);
+    let sg = (base[1] as f32 * shade).clamp(0.0, 255.0);
+    let sb = (base[2] as f32 * shade).clamp(0.0, 255.0);
+
+    for y in ymin..=ymax {
+        for x in xmin..=xmax {
+            let p = [x as f32 + 0.5, y as f32 + 0.5, 0.0];
+            let w0 = edge_fn(s[1], s[2], p);
+            let w1 = edge_fn(s[2], s[0], p);
+            let w2 = edge_fn(s[0], s[1], p);
+            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                continue;
+            }
+            let b0 = w0 * inv_area;
+            let b1 = w1 * inv_area;
+            let b2 = w2 * inv_area;
+            let z = b0 * s[0][2] + b1 * s[1][2] + b2 * s[2][2];
+            let idx = (y as u32 * fb.width + x as u32) as usize;
+            if !(0.0..=1.0).contains(&z) {
+                continue;
+            }
+            let alpha = match mode {
+                FragmentMode::Opaque => 1.0_f32,
+                FragmentMode::DistanceFade { start_m, end_m, .. } => {
+                    let d = b0 * dists[0] + b1 * dists[1] + b2 * dists[2];
+                    if d <= start_m {
+                        1.0
+                    } else if d >= end_m {
+                        0.0
+                    } else {
+                        1.0 - (d - start_m) / (end_m - start_m).max(1e-6)
+                    }
+                }
+            };
+            if alpha <= 0.0 {
+                continue;
+            }
+            // Z-test under reversed-z.
+            if z <= fb.depth[idx] {
+                continue;
+            }
+            let pi = idx * 4;
+            let dr = fb.pixels[pi] as f32;
+            let dg = fb.pixels[pi + 1] as f32;
+            let db = fb.pixels[pi + 2] as f32;
+            let or = dr * (1.0 - alpha) + sr * alpha;
+            let og = dg * (1.0 - alpha) + sg * alpha;
+            let ob = db * (1.0 - alpha) + sb * alpha;
+            fb.pixels[pi] = or.clamp(0.0, 255.0) as u8;
+            fb.pixels[pi + 1] = og.clamp(0.0, 255.0) as u8;
+            fb.pixels[pi + 2] = ob.clamp(0.0, 255.0) as u8;
+            fb.pixels[pi + 3] = 255;
+            // Z-write only for visually-solid fragments — fade-out
+            // fragments don't occlude near-ring pixels.
+            if alpha > 0.5 {
+                fb.depth[idx] = z;
+            }
+        }
+    }
 }

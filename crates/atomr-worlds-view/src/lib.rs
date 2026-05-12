@@ -19,18 +19,23 @@
 pub mod camera;
 pub mod iso;
 pub mod mesh;
+pub mod observer;
 pub mod render;
 pub mod scene;
 pub mod skybox;
 
 pub use camera::Camera;
-pub use iso::{surface_mesh, MeshMode, SmoothConfig};
+pub use iso::{boundary_skirt, crossfade_overlap, surface_mesh, MeshMode, SmoothConfig};
 pub use mesh::{greedy_mesh, Mesh, Quad, Vertex};
-pub use render::{material_color, render_brick_png, render_mesh, Framebuffer, RenderConfig};
+pub use render::{
+    material_color, render_brick_png, render_composite, render_mesh, CompositeScene,
+    Framebuffer, FragmentMode, RenderConfig,
+};
 pub use scene::{
     scene_from_bricks, CameraNode, FrameMetadata, LightKind, LightNode, MaterialEntry,
     MaterialPalette, MeshNode, SceneDescription, SceneId,
 };
+pub use observer::{ObserverState, SkyboxRefreshPolicy};
 pub use skybox::{
     render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT,
 };

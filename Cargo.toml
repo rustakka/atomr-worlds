@@ -15,6 +15,7 @@ members = [
     "examples/print-seed-chain",
     "examples/print-brick",
     "examples/view-png",
+    "examples/sphere-flyby",
 ]
 
 [workspace.package]

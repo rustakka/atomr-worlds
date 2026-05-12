@@ -675,3 +675,91 @@ End-to-end: [`tests/stipulation_e2e.rs`](../crates/atomr-worlds-host/tests/stipu
 Tests: in-module unit tests (3 + 4) and
 [`tests/region_loaders.rs`](../crates/atomr-worlds-generate/tests/region_loaders.rs)
 (4 cross-region e2e tests).
+
+## Phase 13f (landed) — Skybox + reversed-z
+
+[`crates/atomr-worlds-view/src/skybox.rs`](../crates/atomr-worlds-view/src/skybox.rs)
+adds `Skybox` (six RGBA8 `CubeFaceImage`s + observer pose + radii +
+captured seed + FNV-1a digest), `CubeFace::ALL` with right-handed
+orthonormal basis (`forward`/`up`/`right`), `SkyboxConfig`, and
+`render_skybox_from_meshes(meshes, observer, inner, outer, seed, cfg)`.
+The 6-face renderer combines all `MeshNode`s into one transform-baked
+mesh per face and calls `render_mesh` once per face — the rasterizer
+is stateless across calls so per-face output bytes are a pure function
+of the inputs.
+
+`Camera::for_cube_face(eye, face, near, far)` produces a 90° FOV /
+aspect 1.0 camera oriented along one cube-face axis. `Camera::perspective`
+switches to **reversed-z** (`near→1.0`, `far→0.0`) — the matrix has
+`[2][2] = -near*nf` and `[3][2] = -far*near*nf`. `Framebuffer.depth`
+clears to `0.0` and the rasterizer's depth compare flips from `<` to
+`>`. This is the precision regime the composite (13g) and far-LOD
+seams (13h) need at planetary scale.
+
+Tests: 7 unit tests in
+[`tests/skybox.rs`](../crates/atomr-worlds-view/tests/skybox.rs) +
+1 pinned-hash regression in `deterministic_screenshot.rs`.
+
+## Phase 13g (landed) — Composite renderer
+
+[`crates/atomr-worlds-view/src/render.rs`](../crates/atomr-worlds-view/src/render.rs)
+gains:
+
+- `FragmentMode::{Opaque, DistanceFade { start_m, end_m, observer }}`.
+- `CompositeScene<'a>` — references a `&Skybox`, a `&[MeshNode]` far
+  ring, and a `&[MeshNode]` near ring.
+- `render_composite(scene, camera, cfg) -> Framebuffer` — three-pass
+  composition: skybox background (per-pixel ray sampling, no z-write)
+  → far meshes with `DistanceFade` alpha band → near meshes opaque.
+
+A separate `rasterize_triangle_mode` carries the fragment mode through
+the inner loop. Per-fragment alpha is barycentric-interpolated from
+per-vertex world distance; `alpha > 0.5` is the gate for z-write so
+fade-out fragments don't occlude the near ring.
+
+Tests: 6 in
+[`tests/composite.rs`](../crates/atomr-worlds-view/tests/composite.rs).
+
+## Phase 13h (landed) — Cross-LOD seam fix
+
+[`crates/atomr-worlds-view/src/iso.rs`](../crates/atomr-worlds-view/src/iso.rs)
+adds:
+
+- `boundary_skirt(brick, axis, sign, depth)` — emits skirt quads along
+  the named brick face. For each face-plane cell with a non-empty
+  voxel along the perpendicular axis, four side quads (8 triangles)
+  extend `depth` voxels below the surface.
+- `crossfade_overlap(brick, mode_near, mode_far) -> (Mesh, Mesh)` —
+  two meshes of the same brick at different LODs, ready for
+  `CompositeScene::{near_meshes, far_meshes}` consumption.
+
+The Phase-9 `transvoxel_seam` stub now `#[deprecated]`-aliases to
+`boundary_skirt`. Tests: 4 in
+[`tests/seam.rs`](../crates/atomr-worlds-view/tests/seam.rs).
+
+## Phase 13i (landed) — Transitive skybox + sphere-flyby demo
+
+[`crates/atomr-worlds-view/src/observer.rs`](../crates/atomr-worlds-view/src/observer.rs)
+introduces:
+
+- `SkyboxRefreshPolicy { position_delta_frac, altitude_delta_frac,
+  max_age_ticks, refresh_on_tier_change }`. Default `{ 0.05, 0.10,
+  600, true }`.
+- `ObserverState { position, velocity_mps, containing_frame,
+  last_skybox, next_skybox, crossfade_t, crossfade_duration_s,
+  since_last_capture_ticks }`.
+- `ObserverState::should_refresh(policy, body_center, body_radius,
+  prev_frame)`, `accept_next(sky)`, `tick(new_pos, new_frame, dt_s)`.
+
+The crossfade is purely time-based: each `tick(dt_s)` advances
+`crossfade_t` by `dt_s / crossfade_duration_s`, and when it reaches
+`1.0` the `next` skybox promotes to `last` and the slot frees.
+
+Companion demo: [`examples/sphere-flyby`](../examples/sphere-flyby).
+Configures an Earth-class sphere via `PrefixShape`, registers a
+literal "city" region, and renders 12 composite PNG frames covering a
+surface→Mm-altitude trajectory. Output paths
+`/tmp/sphere-flyby-{:02}.png`; run with `cargo run -p sphere-flyby`.
+
+Tests: 6 in `observer::tests::*` covering all five refresh thresholds
+plus the velocity-derivation and crossfade-progression paths.

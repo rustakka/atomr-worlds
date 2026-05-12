@@ -2318,6 +2318,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sphere-flyby"
+version = "0.1.0"
+dependencies = [
+ "atomr-worlds-core",
+ "atomr-worlds-generate",
+ "atomr-worlds-host",
+ "atomr-worlds-proto",
+ "atomr-worlds-view",
+ "atomr-worlds-voxel",
+ "png",
+ "tokio",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
