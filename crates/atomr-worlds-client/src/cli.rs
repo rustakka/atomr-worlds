@@ -32,6 +32,15 @@ pub struct Cli {
     /// Root world seed (hex with `0x` prefix or decimal).
     #[arg(long, default_value = "0xDEADBEEFCAFEF00D", value_parser = parse_seed)]
     pub seed: u64,
+
+    /// Path to a harness scenario file (TOML). When set, the client runs
+    /// the scenario plugin and exits when it completes.
+    #[arg(long)]
+    pub harness: Option<std::path::PathBuf>,
+
+    /// Output directory for harness PNG screenshots. Required when --harness is set.
+    #[arg(long, requires = "harness")]
+    pub harness_out: Option<std::path::PathBuf>,
 }
 
 fn parse_seed(s: &str) -> Result<u64, String> {

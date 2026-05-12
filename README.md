@@ -108,6 +108,26 @@ Controls: `WASD` to move, mouse-look once the cursor is grabbed (`Esc` releases)
 cycles. Slice/RTS/overview have per-mode hotkeys — see
 [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md).
 
+### Screenshot test harness
+
+The client ships with a TOML-driven scenario harness for capturing PNGs of
+the live Bevy renderer (`crates/atomr-worlds-client/src/harness.rs`):
+
+```sh
+./scripts/run-harness.sh harness/scenes/fp_lookup.toml /tmp/shots/
+# or
+./target/release/atomr-worlds-client \
+    --harness harness/scenes/fp_lookup.toml \
+    --harness-out /tmp/shots/
+```
+
+The scenario can synthesise key presses, mouse motion, and screenshots at
+named frames; the binary prints `HARNESS_SHOT <path>` to stdout for each
+captured frame and exits cleanly. The capture path shells out to `xwd`
+(from `x11-apps`) and parses XWD in-process — it sidesteps a Bevy 0.13.2
+ScreenshotManager bug on hybrid-GPU Linux. See [`harness/README.md`](harness/README.md)
+for the schema and authoring guide.
+
 For the Python bindings:
 
 ```sh

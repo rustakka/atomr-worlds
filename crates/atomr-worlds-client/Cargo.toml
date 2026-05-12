@@ -27,6 +27,9 @@ tokio   = { workspace = true }
 clap    = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+image = { version = "0.24", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 atomr-worlds-server = { workspace = true }

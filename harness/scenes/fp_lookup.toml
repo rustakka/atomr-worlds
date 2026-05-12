@@ -1,0 +1,76 @@
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+# Generous warmup: window needs to fully open and brick streaming needs
+# time to fill at the current buggy budget. Bump if shots come out small.
+warmup_frames = 180
+output_prefix = "fp_lookup"
+
+# --- Shot 0: baseline horizontal view -----------------------------------
+[[events]]
+frame = 0
+kind  = "screenshot"
+note  = "baseline, looking forward after warmup"
+
+# --- Shot 1: look ~30 degrees up to expose top of brick volume ---------
+[[events]]
+frame = 1
+kind  = "key_press"
+key   = "ArrowUp"
+
+[[events]]
+frame = 20
+kind  = "key_release"
+key   = "ArrowUp"
+
+[[events]]
+frame = 30
+kind  = "screenshot"
+note  = "tilted up ~30deg — bug shows as sky between brick slabs"
+
+# --- Shot 2: look down ~30 degrees to expose bottom of brick volume ----
+[[events]]
+frame = 31
+kind  = "key_press"
+key   = "ArrowDown"
+
+[[events]]
+frame = 70
+kind  = "key_release"
+key   = "ArrowDown"
+
+[[events]]
+frame = 80
+kind  = "screenshot"
+note  = "tilted down ~30deg — bug shows as sky below bricks"
+
+# --- Shot 3: walk forward 1s while looking flat-ish ---------------------
+[[events]]
+frame = 81
+kind  = "key_press"
+key   = "ArrowUp"
+
+[[events]]
+frame = 101
+kind  = "key_release"
+key   = "ArrowUp"
+
+[[events]]
+frame = 102
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 162
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 170
+kind  = "screenshot"
+note  = "after walking forward — bug shows leading-edge brick gaps"
+
+[[events]]
+frame = 175
+kind  = "exit"

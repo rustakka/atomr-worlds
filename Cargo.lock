@@ -572,7 +572,10 @@ dependencies = [
  "atomr-worlds-voxel",
  "bevy",
  "clap",
+ "image",
+ "serde",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2977,6 +2980,7 @@ dependencies = [
  "byteorder",
  "color_quant",
  "num-traits",
+ "png",
 ]
 
 [[package]]

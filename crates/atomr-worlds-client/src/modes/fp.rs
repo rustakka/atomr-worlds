@@ -27,7 +27,7 @@ use crate::world_runtime::{ActiveWorld, WorldRuntime};
 /// Radius (in bricks) of the streaming cube around the camera.
 const STREAM_RADIUS_BRICKS: i64 = 3;
 /// How many bricks to fetch per frame, max — keeps frame time bounded.
-const STREAM_BUDGET_PER_FRAME: usize = 4;
+const STREAM_BUDGET_PER_FRAME: usize = 32;
 
 pub struct FpPlugin;
 
@@ -118,6 +118,11 @@ fn setup_fp_scene(
     fp_state.walk.pitch = -0.4;
     fp_state.ready = true;
 
+    commands.insert_resource(AmbientLight {
+        color: Color::rgb(0.85, 0.88, 1.0),
+        brightness: 0.35,
+    });
+
     let mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.8,
@@ -136,7 +141,7 @@ fn setup_fp_scene(
     commands.spawn((
         DirectionalLightBundle {
             directional_light: DirectionalLight {
-                illuminance: 12000.0,
+                illuminance: 32000.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -152,8 +157,18 @@ fn grab_cursor(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<ViewMode>,
+    harness: Option<Res<crate::harness::HarnessActive>>,
 ) {
     let Ok(mut window) = windows.get_single_mut() else { return };
+    if harness.is_some() {
+        // Keep cursor unlocked & visible in harness mode so synthetic
+        // MouseMotion events from the harness aren't ignored by fp_input.
+        if window.cursor.grab_mode != CursorGrabMode::None {
+            window.cursor.grab_mode = CursorGrabMode::None;
+            window.cursor.visible = true;
+        }
+        return;
+    }
     // Only grab the cursor in fp/tp modes; release for 2D overlay modes.
     let want_grab = matches!(*mode, ViewMode::Fp | ViewMode::Tp);
     if keys.just_pressed(KeyCode::Escape) {
@@ -182,6 +197,7 @@ fn fp_input(
     time: Res<Time>,
     mut state: ResMut<FpState>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    harness: Option<Res<crate::harness::HarnessActive>>,
 ) {
     if *mode != ViewMode::Fp {
         motion.clear();
@@ -218,10 +234,12 @@ fn fp_input(
 
     let mut yaw_delta = 0.0f32;
     let mut pitch_delta = 0.0f32;
-    let cursor_locked = windows
-        .get_single()
-        .map(|w| w.cursor.grab_mode != CursorGrabMode::None)
-        .unwrap_or(false);
+    let harness_active = harness.is_some();
+    let cursor_locked = harness_active
+        || windows
+            .get_single()
+            .map(|w| w.cursor.grab_mode != CursorGrabMode::None)
+            .unwrap_or(false);
     if cursor_locked {
         for ev in motion.read() {
             yaw_delta -= ev.delta.x * 0.0025;
@@ -296,12 +314,22 @@ fn fp_stream_bricks(
     // Build the desired set (cube around camera).
     let mut desired: Vec<IVec3> = Vec::new();
     for dx in -STREAM_RADIUS_BRICKS..=STREAM_RADIUS_BRICKS {
-        for dy in -1..=1 {
+        for dy in -STREAM_RADIUS_BRICKS..=STREAM_RADIUS_BRICKS {
             for dz in -STREAM_RADIUS_BRICKS..=STREAM_RADIUS_BRICKS {
                 desired.push(IVec3::new(cbx + dx, cby + dy, cbz + dz));
             }
         }
     }
+
+    // Load closest bricks first so visible gaps near the camera fill
+    // before far ones — matters most when walking, since the leading
+    // edge is closer than the trailing edge.
+    desired.sort_by_key(|v| {
+        let dx = v.x - cbx;
+        let dy = v.y - cby;
+        let dz = v.z - cbz;
+        dx * dx + dy * dy + dz * dz
+    });
 
     // Despawn bricks outside the desired set.
     let desired_set: std::collections::HashSet<IVec3> =
