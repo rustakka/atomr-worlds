@@ -621,9 +621,187 @@ delivered by an isolated worktree agent and merged into main:
   + `InMemoryDerivedStore` for later SQL backing. Phases 14c/d/e all
   sit on top of one or both.
 
-### Phase 14 mode implementations
+### Phase 14a *(landing)* — 1st-person walk
 
-Phase 14a (1st-person walk), 14b (3rd-person chase), 14c (slice), 14d
-(RTS oblique), and 14e (regional overview) each land as separate
-worktree commits on top of the foundation. Detailed sub-phase docs
-follow once each lands.
+`crates/atomr-worlds-view/src/modes/fp.rs`. `WalkCamera` wraps the
+Phase 13i `ObserverState` with yaw/pitch/eye-height controls;
+`WalkInput { move_local, yaw_delta, pitch_delta, crouch }` carries
+per-tick deltas. `WalkCamera::tick` rotates `move_local` by yaw,
+advances the observer, and routes through `ObserverState::tick` so the
+skybox-refresh policy still fires.
+
+`build_fp_scene(world: &dyn WorldQuery, addr, cam, lod, region_m,
+extra_meshes) -> CompositeScene` computes the cube AABB of half-size
+`region_m` around `cam.eye`, frustum-culls via the new
+`crates/atomr-worlds-view/src/frustum.rs` (Gribb–Hartmann plane
+extraction from view×proj — works for both Perspective and
+Orthographic), fetches each surviving brick via `WorldQuery::brick`,
+meshes through the existing `mesh::greedy_mesh`, partitions into
+far-fade vs near-opaque using a `region_m * 0.6` distance threshold,
+and returns a `CompositeScene` ready for `render_composite`. The
+`extra_meshes` parameter lets 14b inject the anchor mesh later.
+
+Per-session `MeshCache: ViewCache<MeshCacheKey, Mesh>` keyed by
+`(WorldAddr, brick_coord, Lod)`; subscribers to `VoxelDelta` /
+`RegionDelta` evict intersecting entries. Eye height is kept off the
+ground via `WorldQuery::ground_height_m`; full collision is out of
+scope.
+
+`crates/atomr-worlds-host/src/world_query_impl.rs` adds a
+`LocalHostQuery { host: Arc<LocalHost>, handle:
+tokio::runtime::Handle }` implementing the `WorldQuery` trait — uses
+`Handle::block_on` for the request/response paths and a small
+forwarder task to bridge tokio mpsc → std mpsc for
+`subscribe_region`.
+
+[`examples/view-fp`](../examples/view-fp) is the headless companion:
+runs a fixed five-frame trajectory against `LocalHost`, writes PNGs to
+`/tmp/view-fp-NN.png`, prints FNV-1a digests.
+
+#### Gates
+
+- `tests/walk_determinism.rs` — scripted `WalkCamera::tick` against a
+  stub `WorldQuery` → byte-identical pixel hashes across two runs.
+- `frustum.rs#[cfg(test)] mod tests` — AABB inside / outside /
+  straddling for Perspective and Orthographic.
+- Phase 13 goldens still byte-identical.
+
+### Phase 14b *(landing)* — 3rd-person chase
+
+`crates/atomr-worlds-view/src/modes/tp.rs`. `ChaseCamera { anchor,
+yaw, pitch, distance_m, height_m, fov_y_rad, aspect, smoothing_hz }`
+orbits an external anchor. `ChaseCamera::tick(new_anchor, yaw_delta,
+pitch_delta, dt_s)` uses critical-damped exponential smoothing in
+closed form (`smoothed += (target - smoothed) * (1 - exp(-2π · hz ·
+dt))`) — no integration drift across long runs.
+
+`render_tp` reuses `build_fp_scene` with the anchor mesh threaded
+through `extra_meshes`. Eye clipping into terrain shares the
+`ground_height_m` probe.
+
+[`examples/view-tp`](../examples/view-tp) renders five chase frames.
+
+#### Gates
+
+- `tests/chase_smoothing.rs` — pose at t=10 s within 1 ULP of analytic.
+- Phase 13 goldens still byte-identical.
+
+### Phase 14c *(landing)* — Dwarf-Fortress horizontal slice
+
+`crates/atomr-worlds-view/src/modes/slice.rs` +
+`crates/atomr-worlds-view/src/derived/slice_index.rs`. Orthographic
+top-down tile renderer cycling one z-band at a time (default thickness
+3 voxels = 2 m open + 1 m roof). The +Y-up axis is treated as the
+"z-level"; the rule is documented in `slice_index.rs`'s module
+rustdoc: scan from `z_band_top` downward through `z_band_thickness`
+Y-levels, the first non-empty voxel for each (x, z) column becomes the
+column's `top_voxel`; empty columns render with alpha = `roof_alpha`.
+
+`SliceTable` (one `SliceColumn { top_voxel, top_z,
+thickness_above_floor }` per XZ position) is cached via `ViewCache<SliceKey, SliceTable>`;
+`VoxelDelta { brick }` translates the brick AABB into a `CacheAabb`
+and invalidates intersecting entries — writes outside the slice's XZ
+footprint produce no rebuild.
+
+`render_slice` deliberately bypasses the 3D triangle rasterizer.
+Slice frames are millions of axis-aligned unit quads at fixed depth;
+direct `raster2d::fill_rect` blits are ~10× cheaper than running
+them through triangle setup. Thin-feature stipple uses
+`StipplePattern::Dense75`. Material → colour resolves through the
+caller's `MaterialPalette` with `render::material_color` fallback.
+
+[`examples/view-slice`](../examples/view-slice) cycles three z-bands.
+
+#### Gates
+
+- `tests/slice_golden.rs` — fixed seed → fixed `pixels_fnv1a` hash.
+- `tests/slice_invalidation.rs` — write inside band rebuilds; write
+  outside does not.
+- `tests/slice_z_band_rule.rs` — column empty / column at exact top /
+  column with voxel below floor.
+
+### Phase 14d *(landing)* — RTS oblique-orthographic
+
+`crates/atomr-worlds-view/src/modes/rts.rs` +
+`crates/atomr-worlds-view/src/derived/surface_raster.rs` +
+`crates/atomr-worlds-view/src/decals.rs`. Renders only the *surface*
+under an oblique-orthographic projection — `ObliqueCamera::to_camera`
+builds a `Camera` with `Projection::Oblique { rotation_deg,
+scale_m_per_px }`.
+
+`SurfaceRaster { heightmap_m, biome_id, top_z, dims, origin_xz,
+voxel_size_m, world_rev }` is baked once per region tile via
+`build_surface_raster` and held in `ViewCache<SurfaceKey,
+SurfaceRaster>`. `surface_raster_to_mesh` emits one triangle pair per
+column with biome-coloured vertices; `render_mesh` runs that under the
+oblique projection. A 2D decal pass (`render_decals` →
+`raster2d::blend_rect` / `blit_rgba`) composites entity sprites on
+top. Caves and overhangs at the surface are an explicit known
+limitation — flagged in the module rustdoc.
+
+Invalidation keyed on `top_z`: writes strictly below `heightmap_m[x,
+z] - 1` produce no rebuild (covered by `rts_surface_invariance`).
+
+[`examples/view-rts`](../examples/view-rts) renders the oblique view
+with three decals.
+
+#### Gates
+
+- `tests/rts_golden.rs` — fixed seed → fixed `pixels_fnv1a`.
+- `tests/rts_surface_invariance.rs` — sub-surface writes produce no
+  invalidation; top-voxel writes do.
+- `tests/rts_decal_pass.rs` — decal rect lands at expected pixels;
+  surrounding pixels untouched.
+
+### Phase 14e *(landing)* — Regional / world overview
+
+`crates/atomr-worlds-view/src/modes/overview.rs` +
+`crates/atomr-worlds-view/src/derived/world_summary.rs` +
+`crates/atomr-worlds-view/src/projection_sphere.rs`.
+Tile-pyramid renderer driven by Phase 13c's `WorldMacroState`.
+`bake_world_summary(addr, macro_state, levels, tile_size_px)` walks a
+regular pyramid (level 0 = one tile covering the world; level L =
+`4^L` tiles), calling `macro_state.sample(dir)` per pyramid pixel to
+fill four parallel arrays per `WorldSummaryTile`: `elevation_m`,
+`biome_id`, `plate_id`, `ClimateSample { temperature_c, humidity }`.
+
+`OverviewCamera { center, extent, projection: OverviewProjection,
+aspect }` covers three projections: `OrthographicFlat` (pyramid-tile
+blit), `Equirectangular` (per-pixel inverse projection through
+`projection_sphere::equirectangular_pixel_to_dir`), `OrthographicSphere`
+(disk test + inverse). `pick_pyramid_level` picks detail by `(extent,
+viewport)`.
+
+Cache invalidation is keyed only by `(WorldAddr, macro_digest,
+levels)` — `WorldSummaryKey::intersects(_) -> false`. Voxel writes
+never invalidate the pyramid; only re-runs of Phase 13c's macro
+pre-sim change the digest. `atomr-worlds-view` adds
+`atomr-worlds-generate` as a regular dep (promoted from dev-dep) for
+the macro-state types.
+
+[`examples/view-overview`](../examples/view-overview) bakes a 4-level
+pyramid against an Earth-class sphere and writes one PNG per
+projection.
+
+#### Gates
+
+- `tests/overview_golden_{orthographic,equirectangular,orthographic_sphere}.rs`
+  — fixed seed → fixed `pixels_fnv1a` per projection.
+- `tests/overview_pyramid_level_pick.rs` — small extent → fine level;
+  huge extent → coarse level.
+- `tests/overview_sphere_projection_sanity.rs` —
+  `equirectangular_dir_to_pixel((1, 0, 0))` lands at the centre column
+  of a longitude-0 convention.
+
+### Phase 14 — End-state summary
+
+All five modes ship as headless `(camera, world_query, config) →
+Framebuffer` calls. Each mode caches its own derived structure
+(`MeshCache` in-session for 14a/b; `SliceTable`, `SurfaceRaster`,
+`WorldSummaryPyramid` in `ViewCache` for 14c/d/e), invalidated by the
+host's `VoxelDelta` / `RegionDelta` events through the new
+`WorldQuery::subscribe_region` plumbing. Every output is a
+deterministic function of `(seed, shape, registered region set,
+observer pose, camera, config)`. Phase 13's golden PNGs remain
+byte-identical. The interactive shell — winit + input + chosen mode
+dispatch — stays an external concern downstream of this repo.
