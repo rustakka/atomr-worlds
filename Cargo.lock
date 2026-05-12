@@ -2933,6 +2933,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "view-overview"
+version = "0.1.0"
+dependencies = [
+ "atomr-worlds-core",
+ "atomr-worlds-generate",
+ "atomr-worlds-view",
+]
+
+[[package]]
 name = "view-png"
 version = "0.1.0"
 dependencies = [
@@ -2943,6 +2952,26 @@ dependencies = [
  "atomr-worlds-voxel",
  "png",
  "tokio",
+]
+
+[[package]]
+name = "view-rts"
+version = "0.1.0"
+dependencies = [
+ "atomr-worlds-core",
+ "atomr-worlds-proto",
+ "atomr-worlds-view",
+ "atomr-worlds-voxel",
+]
+
+[[package]]
+name = "view-slice"
+version = "0.1.0"
+dependencies = [
+ "atomr-worlds-core",
+ "atomr-worlds-proto",
+ "atomr-worlds-view",
+ "atomr-worlds-voxel",
 ]
 
 [[package]]
