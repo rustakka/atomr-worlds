@@ -2933,6 +2933,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "view-slice"
+version = "0.1.0"
+dependencies = [
+ "atomr-worlds-core",
+ "atomr-worlds-proto",
+ "atomr-worlds-view",
+ "atomr-worlds-voxel",
+]
+
+[[package]]
 name = "virtue"
 version = "0.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
