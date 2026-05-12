@@ -763,3 +763,112 @@ surface→Mm-altitude trajectory. Output paths
 
 Tests: 6 in `observer::tests::*` covering all five refresh thresholds
 plus the velocity-derivation and crossfade-progression paths.
+
+## Phase 14 foundation (landed) — Wave 1 of multi-mode display
+
+Four parallel worktree pieces landed as separate merges and validated
+together (`cargo test --workspace` all-green after each merge).
+
+### `Projection` enum on `Camera`
+
+[`crates/atomr-worlds-view/src/camera.rs`](../crates/atomr-worlds-view/src/camera.rs)
+gains:
+
+- `pub enum Projection { Perspective { fov_y_rad: f32 },
+  Orthographic { half_height_m: f32 },
+  Oblique { rotation_deg: f32, scale_m_per_px: f32 } }`.
+- `Camera::projection: Projection` field. The legacy `fov_y_rad: f32`
+  field is retained because `render.rs` reads it as a field; standard
+  constructors keep both in sync.
+- `Camera::projection_matrix()` dispatches on `projection`.
+  Perspective math is unchanged (Phase 13f reversed-z derivation,
+  byte-identical output verified by
+  `pinned_hash_matches_current_render`). Orthographic and oblique
+  matrices follow the same reversed-z convention (`z_view = -near → 1,
+  -far → 0`); derivations are documented inline with the same rigor
+  as the perspective comment.
+
+Four new camera tests cover perspective parity, ortho depth mapping,
+ortho no-perspective-divide, and oblique shear monotonicity.
+
+### `WorldQuery` trait
+
+[`crates/atomr-worlds-view/src/world_query.rs`](../crates/atomr-worlds-view/src/world_query.rs):
+
+```rust
+pub trait WorldQuery: Send + Sync {
+    fn brick(&self, addr: &WorldAddr, brick_coord: IVec3, lod: Lod) -> Option<Arc<Brick>>;
+    fn ground_height_m(&self, addr: &WorldAddr, xz: [f64; 2]) -> Option<f32>;
+    fn subscribe_region(&self, addr: &WorldAddr, region: AABB, lod: Lod)
+        -> std::sync::mpsc::Receiver<WorldEvent>;
+}
+```
+
+`atomr-worlds-view` now depends on `atomr-worlds-proto` (workspace
+dep) to consume `AABB` and `WorldEvent` directly. Host-side
+implementation lives in `atomr-worlds-host` (added in Phase 14a),
+inverting the dep so the view crate does not pull in host. A stub
+impl in the module's test block exercises trait-object construction,
+the brick/ground-height fast paths, and the subscribe-channel
+roundtrip.
+
+### `raster2d` 2D blitter
+
+[`crates/atomr-worlds-view/src/raster2d.rs`](../crates/atomr-worlds-view/src/raster2d.rs):
+
+- `fill_rect(fb, x, y, w, h, color)` — clipped axis-aligned write.
+- `fill_rect_stipple(fb, x, y, w, h, color, pattern)` with
+  `StipplePattern::{Checker, Horizontal, Vertical, Dense25, Dense75}`
+  for thin-feature hints in slice/RTS modes.
+- `blend_rect(fb, x, y, w, h, color)` — integer src-over alpha using
+  the `(x * 257 + 255) >> 16` div-255 trick; alpha output is
+  `max(src.a, dst.a)`.
+- `blit_rgba(fb, x, y, src, src_w, src_h)` — byte-blit with clipping;
+  panics on size mismatch (programmer error).
+
+All four handle negative origins and overflowing extents by clipping;
+zero-size rects are no-ops. Twelve unit tests cover pixel layout,
+clipping, alpha blending, and the panic path. Pure 2D — no depth
+interaction.
+
+### `ViewCache` + `DerivedStore`
+
+[`crates/atomr-worlds-view/src/view_cache.rs`](../crates/atomr-worlds-view/src/view_cache.rs):
+
+- `CacheAabb { min: [f64; 3], max: [f64; 3] }` — local AABB type
+  structurally equivalent to the proto integer AABB; conversion is
+  trivial at the call site.
+- `DerivedKey: Hash + Eq + Clone + Debug + Send + Sync + 'static`
+  trait requiring `fn world_addr(&self) -> &WorldAddr` and `fn
+  intersects(&self, aabb: CacheAabb) -> bool`.
+- `ViewCache<K: DerivedKey, V: Send + Sync + 'static>` with
+  `get_or_build` (read-fast / write-slow double-check),
+  `invalidate_intersecting`, `invalidate_world`, `invalidate_key`,
+  `len`, `is_empty`. `RwLock<HashMap>` interior.
+- `Revision(pub u64)` — coarse cache-buster (e.g., Phase 13c
+  `macro_digest`).
+
+Five unit tests cover get/build, intersect-invalidation,
+world-invalidation, key-invalidation, and revision-distinct keys.
+
+[`crates/atomr-worlds-persist/src/derived.rs`](../crates/atomr-worlds-persist/src/derived.rs)
+(behind the new `derived` feature):
+
+- `DerivedStore` trait — `put`, `get`, `delete`, `delete_prefix`.
+- `InMemoryDerivedStore` — `RwLock<HashMap<String, Vec<u8>>>`.
+- `DerivedStoreError` — single `Io(String)` variant for now; SQL
+  backing slots in here later.
+
+Two feature-gated tests cover put/get roundtrip and prefix delete.
+
+### Scaffold: `modes/` and `derived/` submodule trees
+
+[`crates/atomr-worlds-view/src/modes/`](../crates/atomr-worlds-view/src/modes/)
+and
+[`crates/atomr-worlds-view/src/derived/`](../crates/atomr-worlds-view/src/derived/)
+were pre-created with stub files for each Wave 2 phase
+(`fp`, `tp`, `slice`, `rts`, `overview`, `view_mode` and
+`slice_index`, `surface_raster`, `world_summary`) so the four parallel
+worktree agents implementing Phases 14a–e do not collide on their
+parent `mod.rs` files. `modes/view_mode.rs` ships the `ViewMode`
+dispatch enum inline (no moving parts).

@@ -551,3 +551,79 @@ unaffected. Optional follow-ups documented in the per-phase risk
 sections: GPU macro-state upload (13k), cubed-sphere coordinate
 research spike (13l), Bruneton-style atmospheric scattering post-pass
 (13j).
+
+## Phase 14 — Multi-mode world display
+
+Phase 14 adds five world display modes — 1st-person walk, 3rd-person
+chase, Dwarf-Fortress-style horizontal slice cycling, RTS oblique
+strategy, and large-scale regional overview — each with its own
+rendering pipeline and (where the access pattern warrants) its own
+derived data structure rather than reusing a single pipeline with a
+different camera. Phase 13's renderer covered the immediate-experience
+slot; Phase 14 fills out the rest of the camera-and-viewing surface so
+the same world data can be reasoned about at every metric scale from
+eye-height to a whole world.
+
+The crate boundary stays put: `atomr-worlds-view` remains the headless,
+deterministic CPU rendering crate; nothing here adds a windowing
+backend, an event loop, or input handling. Each mode is exposed as a
+pure `(camera, world_query, config) → Framebuffer` call, the same
+shape Phase 13 settled on. Interactive shells stay an external
+concern downstream of this repo. The view crate gains a new read-only
+`WorldQuery` trait so it can pull bricks + deltas from a host without
+depending on `atomr-worlds-host` — host implements the trait,
+inverting the dep.
+
+### Phase 14 foundation *(landed)*
+
+Wave 1 of the multi-mode rollout. Four independent pieces, each
+delivered by an isolated worktree agent and merged into main:
+
+- **`Projection` enum on `Camera`**
+  ([`camera.rs`](../crates/atomr-worlds-view/src/camera.rs)).
+  Adds `Projection::{Perspective, Orthographic, Oblique}` with
+  reversed-z preserved across all three. Existing constructors
+  (`isometric_default`, `for_cube_face`) and all Phase 13f/g/h/i
+  golden PNGs unchanged byte-for-byte (regression gate in
+  [`tests/deterministic_screenshot.rs`](../crates/atomr-worlds-view/tests/deterministic_screenshot.rs)).
+  Orthographic and oblique derivations are documented in the file with
+  the same rigor as the existing perspective derivation comment.
+
+- **`WorldQuery` trait shim**
+  ([`world_query.rs`](../crates/atomr-worlds-view/src/world_query.rs)).
+  Three methods — `brick`, `ground_height_m`, `subscribe_region` — let
+  view code pull from a host without taking on a host dep. The proto
+  dep is added to view (`atomr-worlds-proto` for `AABB` /
+  `WorldEvent`). A `LocalHost` impl lands in Wave 2 (Phase 14a) under
+  `crates/atomr-worlds-host/src/world_query_impl.rs`, bridging tokio
+  mpsc → std mpsc for the subscribe path.
+
+- **`raster2d` 2D blitter**
+  ([`raster2d.rs`](../crates/atomr-worlds-view/src/raster2d.rs)).
+  Axis-aligned RGBA8 writes into `Framebuffer.pixels`: `fill_rect`,
+  `fill_rect_stipple` (Checker / Horizontal / Vertical / Dense25 /
+  Dense75), `blend_rect` (src-over with the `(x*257+255)>>16` div-255
+  trick), `blit_rgba`. Twelve unit tests cover clipping, zero-size,
+  alpha, byte layout. Used by phases 14c (slice tiles), 14d (RTS
+  decals), 14e (overview pyramid).
+
+- **`ViewCache<K, V>` + `DerivedStore`**
+  ([`view_cache.rs`](../crates/atomr-worlds-view/src/view_cache.rs)
+  and
+  [`derived.rs`](../crates/atomr-worlds-persist/src/derived.rs)).
+  `ViewCache` is an `RwLock<HashMap>` keyed by a `DerivedKey: Hash +
+  Eq` whose impls expose a `WorldAddr` and an AABB-intersection
+  predicate; subscribers to the host's `VoxelDelta` / `RegionDelta`
+  events drive `invalidate_intersecting`. A local-shape `CacheAabb`
+  (f64 min/max) keeps view's `view_cache` orthogonal to the integer-
+  coord proto `AABB`; conversion is trivial at the call site. The
+  persist side adds an optional `derived` feature with `DerivedStore`
+  + `InMemoryDerivedStore` for later SQL backing. Phases 14c/d/e all
+  sit on top of one or both.
+
+### Phase 14 mode implementations
+
+Phase 14a (1st-person walk), 14b (3rd-person chase), 14c (slice), 14d
+(RTS oblique), and 14e (regional overview) each land as separate
+worktree commits on top of the foundation. Detailed sub-phase docs
+follow once each lands.
