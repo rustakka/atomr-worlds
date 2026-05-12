@@ -14,6 +14,7 @@ use atomr_worlds_core::coord::{DVec3, IVec3};
 use atomr_worlds_core::lod::Lod;
 use atomr_worlds_core::vehicle::ContainingFrame;
 use atomr_worlds_view::{greedy_mesh, material_color, WalkCamera, WalkInput, WorldQuery};
+// (WorldQuery brings ground_height_m into scope.)
 use atomr_worlds_voxel::BRICK_EDGE;
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
@@ -103,24 +104,36 @@ fn setup_fp_scene(
     mut fp_mat: ResMut<FpMaterial>,
     mut fp_state: ResMut<FpState>,
     active: Option<Res<ActiveWorld>>,
+    runtime: Res<WorldRuntime>,
 ) {
-    // Pull start addr from ActiveWorld if it has been inserted; otherwise
-    // keep the default.
-    if let Some(active) = active.as_deref() {
-        fp_state.addr = active.addr;
-        fp_state.walk = WalkCamera::new(
-            DVec3::new(8.0, 24.0, 8.0),
-            ContainingFrame::World(active.addr),
-            16.0 / 9.0,
-        );
-    }
+    // Probe the host for the surface height at the spawn (x, z) so we
+    // land a few voxels above the ground instead of inside a hill or
+    // floating in mid-air. Fall back to the legacy y=24 if the column
+    // is empty / the host has nothing to say.
+    let spawn_xz = (8.0_f64, 8.0_f64);
+    let addr = active.as_deref().map(|a| a.addr).unwrap_or(WorldAddr::ROOT);
+    // Spawn well above ground so we have room to look around and don't
+    // immediately wall-of-voxels the view at pitch=-0.4. 10 voxels ≈ a
+    // two-storey perch above terrain.
+    let spawn_y = runtime
+        .query
+        .ground_height_m(&addr, [spawn_xz.0, spawn_xz.1])
+        .map(|h| h as f64 + 10.0)
+        .unwrap_or(34.0);
+
+    fp_state.addr = addr;
+    fp_state.walk = WalkCamera::new(
+        DVec3::new(spawn_xz.0, spawn_y, spawn_xz.1),
+        ContainingFrame::World(addr),
+        16.0 / 9.0,
+    );
     // Look slightly down so the ground is in frame.
     fp_state.walk.pitch = -0.4;
     fp_state.ready = true;
 
     commands.insert_resource(AmbientLight {
         color: Color::rgb(0.85, 0.88, 1.0),
-        brightness: 0.35,
+        brightness: 1.2,
     });
 
     let mat = materials.add(StandardMaterial {
@@ -141,7 +154,7 @@ fn setup_fp_scene(
     commands.spawn((
         DirectionalLightBundle {
             directional_light: DirectionalLight {
-                illuminance: 32000.0,
+                illuminance: 80000.0,
                 shadows_enabled: false,
                 ..default()
             },

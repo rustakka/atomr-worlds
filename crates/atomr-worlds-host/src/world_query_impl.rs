@@ -75,22 +75,28 @@ impl WorldQuery for LocalHostQuery {
     }
 
     fn ground_height_m(&self, addr: &WorldAddr, xz: [f64; 2]) -> Option<f32> {
-        // Best-effort probe. We don't have a streaming-column API yet, so
-        // sample one brick at LOD 0 covering the (x, z) column and scan its
-        // non-empty voxels top-down. The world's vertical extent is the
-        // brick edge (16 m) — callers that need a taller column should
-        // scan a stack of bricks; that's left to higher-level helpers.
+        // Best-effort probe. Scan a stack of bricks top-down at the (x, z)
+        // column and return the world-Y of the first non-empty voxel
+        // encountered. We scan brick_y ∈ [-1, GROUND_SCAN_MAX_BRICK_Y]; this
+        // covers terrain that extends well above the brick_y=0 floor — the
+        // default TerrainGenerator can reach voxel Y ≈ 56 (brick_y=3).
+        const GROUND_SCAN_MAX_BRICK_Y: i64 = 16;
         let edge = BRICK_EDGE as i64;
         let bx = (xz[0] / edge as f64).floor() as i64;
         let bz = (xz[1] / edge as f64).floor() as i64;
-        // Try at brick_y = 0 first — typical flat-column world.
-        let brick = self.brick(addr, IVec3::new(bx, 0, bz), Lod::new(0))?;
         let lx = ((xz[0] - (bx as f64) * edge as f64) as i64).clamp(0, edge - 1);
         let lz = ((xz[1] - (bz as f64) * edge as f64) as i64).clamp(0, edge - 1);
-        for y in (0..edge).rev() {
-            let v = brick.get(IVec3::new(lx, y, lz));
-            if !v.is_empty() {
-                return Some(y as f32);
+        for by in (-1..=GROUND_SCAN_MAX_BRICK_Y).rev() {
+            let Some(brick) = self.brick(addr, IVec3::new(bx, by, bz), Lod::new(0))
+            else {
+                continue;
+            };
+            for y in (0..edge).rev() {
+                let v = brick.get(IVec3::new(lx, y, lz));
+                if !v.is_empty() {
+                    let world_y = by * edge + y;
+                    return Some(world_y as f32);
+                }
             }
         }
         None
