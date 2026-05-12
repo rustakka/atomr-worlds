@@ -22,6 +22,7 @@ pub mod iso;
 pub mod mesh;
 pub mod modes;
 pub mod observer;
+pub mod projection_sphere;
 pub mod raster2d;
 pub mod render;
 pub mod scene;
@@ -39,14 +40,17 @@ pub use render::{
     Framebuffer, RenderConfig,
 };
 pub use scene::{
-    scene_from_bricks, CameraNode, FrameMetadata, LightKind, LightNode, MaterialEntry,
-    MaterialPalette, MeshNode, SceneDescription, SceneId,
+    scene_from_bricks, CameraNode, FrameMetadata, LightKind, LightNode, MaterialEntry, MaterialPalette,
+    MeshNode, SceneDescription, SceneId,
 };
-pub use skybox::{
-    render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT,
-};
+pub use skybox::{render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT};
 pub use view_cache::{CacheAabb, DerivedKey, Revision, ViewCache};
 pub use world_query::WorldQuery;
+
+pub use derived::world_summary::{
+    bake_world_summary, ClimateSample, WorldSummaryKey, WorldSummaryPyramid, WorldSummaryTile,
+};
+pub use modes::overview::{pick_pyramid_level, render_overview, OverviewCamera, OverviewProjection};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ViewError {
