@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/atomr-worlds-core",
+    "crates/atomr-worlds-voxel",
+    "crates/atomr-worlds-proto",
+    "crates/atomr-worlds-host",
+    "crates/atomr-worlds-testkit",
+    "examples/print-seed-chain",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "Apache-2.0"
+repository = "https://github.com/rustakka/atomr-worlds"
+homepage = "https://github.com/rustakka/atomr-worlds"
+authors = ["atomr contributors"]
+
+[workspace.dependencies]
+# Async / runtime
+tokio = { version = "1.39", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = { version = "2.0.0-rc.3", features = ["serde"] }
+bytes = { version = "1", features = ["serde"] }
+
+# Error / utility
+thiserror = "1"
+
+# Logging / tracing
+tracing = "0.1"
+
+# Numerics / layout
+bytemuck = { version = "1", features = ["derive"] }
+
+# Testing
+proptest = "1"
+
+# Internal — atomr-worlds crates
+atomr-worlds-core    = { path = "crates/atomr-worlds-core",    version = "0.1.0" }
+atomr-worlds-voxel   = { path = "crates/atomr-worlds-voxel",   version = "0.1.0" }
+atomr-worlds-proto   = { path = "crates/atomr-worlds-proto",   version = "0.1.0" }
+atomr-worlds-host    = { path = "crates/atomr-worlds-host",    version = "0.1.0" }
+atomr-worlds-testkit = { path = "crates/atomr-worlds-testkit", version = "0.1.0" }
+
+# External — atomr (sibling repo, path deps)
+atomr-core             = { path = "../atomr/crates/atomr-core",             version = "0.9.2" }
+atomr-cluster          = { path = "../atomr/crates/atomr-cluster",          version = "0.9.2" }
+atomr-cluster-sharding = { path = "../atomr/crates/atomr-cluster-sharding", version = "0.9.2" }

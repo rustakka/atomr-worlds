@@ -1,0 +1,18 @@
+[package]
+name = "atomr-worlds-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Pure-data primitives for atomr-worlds: coordinates, hierarchical addressing, seed derivation, dimensions, metric LOD."
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+bincode = { workspace = true }

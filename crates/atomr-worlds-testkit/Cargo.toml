@@ -1,0 +1,22 @@
+[package]
+name = "atomr-worlds-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "proptest strategies and determinism helpers for atomr-worlds."
+
+[dependencies]
+atomr-worlds-core  = { workspace = true }
+atomr-worlds-voxel = { workspace = true }
+atomr-worlds-proto = { workspace = true }
+proptest = { workspace = true }
+
+[dev-dependencies]
+bincode           = { workspace = true }
+serde_json        = { workspace = true }
+bytes             = { workspace = true }
+atomr-worlds-host = { workspace = true }

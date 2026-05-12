@@ -1,0 +1,24 @@
+[package]
+name = "atomr-worlds-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Hosting backends (local + atomr-cluster-sharding) for atomr-worlds."
+
+[dependencies]
+atomr-worlds-core  = { workspace = true }
+atomr-worlds-voxel = { workspace = true }
+atomr-worlds-proto = { workspace = true }
+
+atomr-core             = { workspace = true }
+atomr-cluster          = { workspace = true }
+atomr-cluster-sharding = { workspace = true }
+
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
