@@ -621,7 +621,7 @@ delivered by an isolated worktree agent and merged into main:
   + `InMemoryDerivedStore` for later SQL backing. Phases 14c/d/e all
   sit on top of one or both.
 
-### Phase 14a *(landing)* — 1st-person walk
+### Phase 14a *(landed)* — 1st-person walk
 
 `crates/atomr-worlds-view/src/modes/fp.rs`. `WalkCamera` wraps the
 Phase 13i `ObserverState` with yaw/pitch/eye-height controls;
@@ -666,7 +666,7 @@ runs a fixed five-frame trajectory against `LocalHost`, writes PNGs to
   straddling for Perspective and Orthographic.
 - Phase 13 goldens still byte-identical.
 
-### Phase 14b *(landing)* — 3rd-person chase
+### Phase 14b *(landed)* — 3rd-person chase
 
 `crates/atomr-worlds-view/src/modes/tp.rs`. `ChaseCamera { anchor,
 yaw, pitch, distance_m, height_m, fov_y_rad, aspect, smoothing_hz }`
@@ -686,7 +686,7 @@ through `extra_meshes`. Eye clipping into terrain shares the
 - `tests/chase_smoothing.rs` — pose at t=10 s within 1 ULP of analytic.
 - Phase 13 goldens still byte-identical.
 
-### Phase 14c *(landing)* — Dwarf-Fortress horizontal slice
+### Phase 14c *(landed)* — Dwarf-Fortress horizontal slice
 
 `crates/atomr-worlds-view/src/modes/slice.rs` +
 `crates/atomr-worlds-view/src/derived/slice_index.rs`. Orthographic
@@ -720,7 +720,7 @@ caller's `MaterialPalette` with `render::material_color` fallback.
 - `tests/slice_z_band_rule.rs` — column empty / column at exact top /
   column with voxel below floor.
 
-### Phase 14d *(landing)* — RTS oblique-orthographic
+### Phase 14d *(landed)* — RTS oblique-orthographic
 
 `crates/atomr-worlds-view/src/modes/rts.rs` +
 `crates/atomr-worlds-view/src/derived/surface_raster.rs` +
@@ -753,7 +753,7 @@ with three decals.
 - `tests/rts_decal_pass.rs` — decal rect lands at expected pixels;
   surrounding pixels untouched.
 
-### Phase 14e *(landing)* — Regional / world overview
+### Phase 14e *(landed)* — Regional / world overview
 
 `crates/atomr-worlds-view/src/modes/overview.rs` +
 `crates/atomr-worlds-view/src/derived/world_summary.rs` +

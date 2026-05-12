@@ -873,13 +873,13 @@ worktree agents implementing Phases 14a–e do not collide on their
 parent `mod.rs` files. `modes/view_mode.rs` ships the `ViewMode`
 dispatch enum inline (no moving parts).
 
-## Phase 14a–e (landing) — Multi-mode display
+## Phase 14a–e (landed) — Multi-mode display
 
 The five Phase 14 modes land on top of the foundation as separate
 worktree commits. Module-by-module pointers (full prose in
 [PHASES.md](PHASES.md)):
 
-### Phase 14a (landing) — 1st-person walk
+### Phase 14a (landed) — 1st-person walk
 
 - [`crates/atomr-worlds-view/src/modes/fp.rs`](../crates/atomr-worlds-view/src/modes/fp.rs)
   — `WalkCamera`, `WalkInput`, `MeshCacheKey`, `build_fp_scene`,
@@ -893,14 +893,14 @@ worktree commits. Module-by-module pointers (full prose in
   std mpsc for `subscribe_region`.
 - [`examples/view-fp`](../examples/view-fp) — five-frame headless demo.
 
-### Phase 14b (landing) — 3rd-person chase
+### Phase 14b (landed) — 3rd-person chase
 
 - [`crates/atomr-worlds-view/src/modes/tp.rs`](../crates/atomr-worlds-view/src/modes/tp.rs)
   — `ChaseCamera`, `render_tp`; reuses `build_fp_scene` with anchor
   mesh injected through `extra_meshes`.
 - [`examples/view-tp`](../examples/view-tp) — five-frame chase demo.
 
-### Phase 14c (landing) — Dwarf-Fortress slice
+### Phase 14c (landed) — Dwarf-Fortress slice
 
 - [`crates/atomr-worlds-view/src/modes/slice.rs`](../crates/atomr-worlds-view/src/modes/slice.rs)
   — `SliceCamera`, `SliceConfig`, `render_slice`, `render_slice_cached`;
@@ -913,7 +913,7 @@ worktree commits. Module-by-module pointers (full prose in
 - [`examples/view-slice`](../examples/view-slice) — three-band z-cycle
   demo.
 
-### Phase 14d (landing) — RTS oblique-orthographic
+### Phase 14d (landed) — RTS oblique-orthographic
 
 - [`crates/atomr-worlds-view/src/modes/rts.rs`](../crates/atomr-worlds-view/src/modes/rts.rs)
   — `ObliqueCamera::to_camera()` produces a `Camera` with
@@ -931,7 +931,7 @@ worktree commits. Module-by-module pointers (full prose in
 - [`examples/view-rts`](../examples/view-rts) — oblique view with
   decals.
 
-### Phase 14e (landing) — Regional / world overview
+### Phase 14e (landed) — Regional / world overview
 
 - [`crates/atomr-worlds-view/src/modes/overview.rs`](../crates/atomr-worlds-view/src/modes/overview.rs)
   — `OverviewCamera`, `OverviewProjection::{OrthographicFlat,
