@@ -10,3 +10,4 @@ __pycache__/
 
 # Example outputs
 /view-png-output.png
+.claude/
