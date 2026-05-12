@@ -25,7 +25,7 @@ pub mod render;
 pub mod scene;
 pub mod skybox;
 
-pub use camera::Camera;
+pub use camera::{Camera, Projection};
 pub use iso::{boundary_skirt, crossfade_overlap, surface_mesh, MeshMode, SmoothConfig};
 pub use mesh::{greedy_mesh, Mesh, Quad, Vertex};
 pub use render::{

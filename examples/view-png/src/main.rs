@@ -10,7 +10,7 @@ use atomr_worlds_core::lod::Lod;
 use atomr_worlds_host::{LocalHost, WorldHost};
 use atomr_worlds_proto::{Envelope, WorldEvent, WorldRequest};
 use atomr_worlds_view::mesh::{greedy_mesh, Mesh, Vertex};
-use atomr_worlds_view::{render_mesh, Camera, RenderConfig};
+use atomr_worlds_view::{render_mesh, Camera, Projection, RenderConfig};
 use atomr_worlds_voxel::{Brick, BRICK_EDGE};
 
 const TILES_X: i64 = 4;
@@ -67,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         aspect: 1.0,
         near: 0.5,
         far: 1024.0,
+        projection: Projection::Perspective { fov_y_rad: std::f32::consts::FRAC_PI_4 },
     };
     let cfg = RenderConfig { width: 512, height: 512, ..Default::default() };
     let fb = render_mesh(&combined, &camera, &cfg);
