@@ -19,6 +19,7 @@ pub mod host;
 pub mod local;
 pub mod policy;
 pub mod shape;
+pub mod world_query_impl;
 
 pub use cluster::ClusterHost;
 pub use error::HostError;
@@ -27,6 +28,7 @@ pub use host::WorldHost;
 pub use local::{LocalHost, LocalHostConfig};
 pub use policy::{DefaultPolicy, GenerationPolicy, PolicyResolver, PrefixPolicy};
 pub use shape::{DefaultShape, PrefixShape, ShapeResolver};
+pub use world_query_impl::LocalHostQuery;
 
 pub use atomr_worlds_generate::{
     region_id, AuthoredRegion, AuthoredRegionStore, LiteralRegion, RegionAabb, RegionId,

@@ -19,6 +19,7 @@ atomr-worlds-voxel    = { workspace = true }
 atomr-worlds-proto    = { workspace = true }
 atomr-worlds-generate = { workspace = true }
 atomr-worlds-persist  = { workspace = true }
+atomr-worlds-view     = { workspace = true }
 
 atomr                  = { workspace = true }
 atomr-config           = { workspace = true }
