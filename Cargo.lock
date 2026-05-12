@@ -401,7 +401,9 @@ version = "0.1.0"
 dependencies = [
  "atomr-worlds-core",
  "atomr-worlds-generate",
+ "atomr-worlds-proto",
  "atomr-worlds-voxel",
+ "bytes",
  "png",
  "thiserror 1.0.69",
 ]
