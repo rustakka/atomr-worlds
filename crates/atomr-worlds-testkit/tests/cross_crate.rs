@@ -12,7 +12,7 @@ use proptest::prelude::*;
 proptest! {
     #[test]
     fn world_addr_bincode_round_trip(addr in arb_world_addr()) {
-        let bytes = bincode::serde::encode_to_vec(&addr, bincode::config::standard()).unwrap();
+        let bytes = bincode::serde::encode_to_vec(addr, bincode::config::standard()).unwrap();
         let (back, _): (WorldAddr, _) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
         prop_assert_eq!(addr, back);

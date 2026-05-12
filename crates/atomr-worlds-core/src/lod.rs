@@ -40,7 +40,9 @@ impl MetricScale {
 
     #[inline]
     pub fn meters_per_voxel(&self, lod: Lod) -> f64 {
-        self.root_size_m / (1u64 << lod.depth) as f64
+        // f64 exp2 is overflow-free across the full u8 depth range (unlike
+        // `1u64 << depth`, which UB's at depth == 64).
+        self.root_size_m / (lod.depth as f64).exp2()
     }
 
     /// Edge of a voxel at the leaf depth.

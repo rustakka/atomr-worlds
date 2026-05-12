@@ -140,7 +140,7 @@ impl Octree {
                     if (node.child_mask & (1u8 << octant)) == 0 {
                         return None;
                     }
-                    let slot = (node.child_mask & ((1u8 << octant) - 1)).count_ones() as u32;
+                    let slot = (node.child_mask & ((1u8 << octant) - 1)).count_ones();
                     cur = node.children_base + slot;
                 }
             }
@@ -237,12 +237,12 @@ impl Octree {
         let already_present = (child_mask & octant_bit) != 0;
 
         if already_present {
-            let slot = (child_mask & (octant_bit - 1)).count_ones() as u32;
+            let slot = (child_mask & (octant_bit - 1)).count_ones();
             return children_base + slot;
         }
 
         // Need to insert. Append a new contiguous run for children, copy existing siblings + new node.
-        let popcount_old = child_mask.count_ones() as u32;
+        let popcount_old = child_mask.count_ones();
         let new_base = self.nodes.len() as u32;
         // Copy existing siblings (preserving popcount order) into the new contiguous range.
         for i in 0..popcount_old {
@@ -253,7 +253,7 @@ impl Octree {
         // Insert the new child at its sorted position.
         let new_child_id = make_empty_node(self, child_is_leaf);
         // The new child is at the end; we need it ordered by octant index.
-        let slot = (child_mask & (octant_bit - 1)).count_ones() as u32;
+        let slot = (child_mask & (octant_bit - 1)).count_ones();
         let dest_index = new_base + slot;
         let last_index = self.nodes.len() as u32 - 1;
         // Rotate the freshly-appended node into position.
