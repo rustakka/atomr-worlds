@@ -24,23 +24,25 @@ pub mod raster2d;
 pub mod render;
 pub mod scene;
 pub mod skybox;
+pub mod world_query;
 
 pub use camera::{Camera, Projection};
 pub use iso::{boundary_skirt, crossfade_overlap, surface_mesh, MeshMode, SmoothConfig};
 pub use mesh::{greedy_mesh, Mesh, Quad, Vertex};
+pub use observer::{ObserverState, SkyboxRefreshPolicy};
+pub use raster2d::{blend_rect, blit_rgba, fill_rect, fill_rect_stipple, StipplePattern};
 pub use render::{
-    material_color, render_brick_png, render_composite, render_mesh, CompositeScene,
-    Framebuffer, FragmentMode, RenderConfig,
+    material_color, render_brick_png, render_composite, render_mesh, CompositeScene, FragmentMode,
+    Framebuffer, RenderConfig,
 };
 pub use scene::{
     scene_from_bricks, CameraNode, FrameMetadata, LightKind, LightNode, MaterialEntry,
     MaterialPalette, MeshNode, SceneDescription, SceneId,
 };
-pub use observer::{ObserverState, SkyboxRefreshPolicy};
-pub use raster2d::{blend_rect, blit_rgba, fill_rect, fill_rect_stipple, StipplePattern};
 pub use skybox::{
     render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT,
 };
+pub use world_query::WorldQuery;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ViewError {

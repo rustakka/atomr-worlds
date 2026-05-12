@@ -11,9 +11,11 @@ description = "Phase 2: greedy meshing, MetricScale-driven camera, deterministic
 
 [dependencies]
 atomr-worlds-core    = { workspace = true }
+atomr-worlds-proto   = { workspace = true }
 atomr-worlds-voxel   = { workspace = true }
 thiserror = { workspace = true }
 png       = { workspace = true }
 
 [dev-dependencies]
 atomr-worlds-generate = { workspace = true }
+bytes                 = { workspace = true }
