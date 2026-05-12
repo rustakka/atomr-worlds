@@ -14,8 +14,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.78"
 license = "Apache-2.0"
-repository = "https://github.com/rustakka/atomr-worlds"
-homepage = "https://github.com/rustakka/atomr-worlds"
+repository = "https://github.com/cognect/atomr-worlds"
+homepage = "https://github.com/cognect/atomr-worlds"
 authors = ["atomr contributors"]
 
 [workspace.dependencies]
