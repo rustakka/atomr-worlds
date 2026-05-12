@@ -7,6 +7,8 @@
 
 use atomr_worlds_core::lod::{Lod, MetricScale};
 
+use crate::skybox::CubeFace;
+
 #[derive(Copy, Clone, Debug)]
 pub struct Camera {
     pub eye: [f32; 3],
@@ -29,6 +31,26 @@ impl Camera {
             aspect,
             near: 0.1,
             far: 200.0,
+        }
+    }
+
+    /// Camera oriented to capture one face of a cubemap.
+    ///
+    /// Sets `target = eye + face.forward()`, `up = face.up()`, `fov_y_rad =
+    /// π/2`, `aspect = 1.0`. The combination of 90° FOV and aspect 1.0 covers
+    /// exactly one of the six axis-aligned cube faces with no overlap and no
+    /// gap.
+    pub fn for_cube_face(eye: [f32; 3], face: CubeFace, near: f32, far: f32) -> Camera {
+        let fwd = face.forward();
+        let target = [eye[0] + fwd[0], eye[1] + fwd[1], eye[2] + fwd[2]];
+        Camera {
+            eye,
+            target,
+            up: face.up(),
+            fov_y_rad: std::f32::consts::FRAC_PI_2,
+            aspect: 1.0,
+            near,
+            far,
         }
     }
 
@@ -96,14 +118,30 @@ fn look_at(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
 }
 
 fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
-    // RH, depth in [0, 1] (Vulkan/wgpu convention).
+    // RH, **reversed-z**: near → 1.0, far → 0.0. Reversed-z spreads f32
+    // precision evenly across the depth range under perspective division
+    // (since `1/z` is roughly linear in depth-buffer space when the buffer is
+    // flipped), eliminating z-fighting at long range — exactly what the
+    // Phase 13f skybox needs to keep celestial bodies stable against
+    // near-field terrain.
+    //
+    // Derivation: the standard RH [0, 1] projection writes
+    //     clip.z = far*nf*z_view + far*near*nf  (with nf = 1/(near-far))
+    //     clip.w = -z_view
+    // depth = clip.z/clip.w maps `z_view = -near → 0`, `-far → 1`. Compose with
+    // `z' = 1 - z`, which is equivalent to `clip.z' = clip.w - clip.z`:
+    //     clip.z' = -z_view - (far*nf*z_view + far*near*nf)
+    //             = -z_view*(1 + far*nf) - far*near*nf
+    //             = -z_view*(near*nf)    - far*near*nf
+    // i.e. [2][2] = -near*nf and [3][2] = -far*near*nf — the two rows the
+    // standard form had `far*nf` and `far*near*nf` in.
     let f = 1.0 / (0.5 * fov_y).tan();
     let nf = 1.0 / (near - far);
     [
         [f / aspect, 0.0, 0.0, 0.0],
         [0.0, f, 0.0, 0.0],
-        [0.0, 0.0, far * nf, -1.0],
-        [0.0, 0.0, far * near * nf, 0.0],
+        [0.0, 0.0, -near * nf, -1.0],
+        [0.0, 0.0, -far * near * nf, 0.0],
     ]
 }
 

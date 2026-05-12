@@ -301,3 +301,43 @@ per-actor portal registry. Variable-depth addressing:
 seed-chain method that walks each level key through
 `derive_child` — proves the variable-depth contract without
 forcing the host / persist layers to migrate.
+
+## Phase 13f *(landed)* — Skybox + reversed-z
+
+The CPU renderer switches its perspective projection from `[0, 1]`
+forward-z to **reversed-z** (`near → 1.0`, `far → 0.0`). Reversed-z
+spreads f32 precision evenly across the depth-buffer range under
+perspective division, which is the prerequisite for stitching a
+skybox capture against near-field terrain without z-fighting at
+celestial-body distances. The change is local to
+[`crates/atomr-worlds-view/src/camera.rs`](../crates/atomr-worlds-view/src/camera.rs)
+(`perspective`) and
+[`crates/atomr-worlds-view/src/render.rs`](../crates/atomr-worlds-view/src/render.rs)
+(`Framebuffer.depth` cleared to `0.0`; z-buffer compare flipped from
+`<` to `>`). The pinned screenshot hash in
+[`tests/deterministic_screenshot.rs`](../crates/atomr-worlds-view/tests/deterministic_screenshot.rs)
+is updated to the new value; the run-to-run determinism assertion is
+unchanged.
+
+[`crates/atomr-worlds-view/src/skybox.rs`](../crates/atomr-worlds-view/src/skybox.rs)
+adds a `Skybox` type (six RGBA8 `CubeFaceImage`s plus observer pose,
+inner / outer radius, captured seed, face resolution, FNV-1a digest),
+the `CubeFace` enum with right-handed orthonormal basis
+(`forward`/`up`/`right`), `SkyboxConfig`, and a mesh-input renderer
+`render_skybox_from_meshes(meshes, observer, inner, outer, seed,
+cfg) -> Skybox`. `Camera::for_cube_face(eye, face, near, far)`
+produces a 90° FOV / aspect 1.0 camera oriented along one face axis.
+`Skybox::sample(dir)` is the standard largest-axis cubemap fetch and
+is scale-invariant by construction.
+
+Phase 13f intentionally **does not** add a `WorldHost`-pulling
+wrapper. That bridge — fetching a parent-tier mesh slab from a host
+and feeding it into `render_skybox_from_meshes` — lands in
+Phase 13g/13i, where the streaming proto changes for skybox bursts
+live. Keeping 13f mesh-input-only means the unit tests in
+[`tests/skybox.rs`](../crates/atomr-worlds-view/tests/skybox.rs)
+exercise the type end-to-end without an actor system: cube-face
+basis is orthonormal right-handed, sampling lands on the right face
+and is scale-invariant, empty meshes produce a uniform-background
+skybox, the digest is deterministic and changes when the observer
+moves, and the reversed-z projection actually maps near→1 / far→0.

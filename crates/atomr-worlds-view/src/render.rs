@@ -42,12 +42,18 @@ impl Default for RenderConfig {
 }
 
 /// Output buffer pair returned by [`render_mesh`].
+///
+/// **Depth convention (reversed-z, Phase 13f):** `depth[i] = 1.0` is the near
+/// plane and `depth[i] = 0.0` is the far plane. The buffer is initialised to
+/// `0.0` (everything is "infinitely far" until written) and the rasterizer
+/// keeps the largest seen z per pixel — closer fragments win because the
+/// reversed-z projection maps closer points to larger depth values.
 #[derive(Clone)]
 pub struct Framebuffer {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>, // RGBA8
-    pub depth: Vec<f32>, // 1.0 = far, 0.0 = near (already z/w)
+    pub depth: Vec<f32>, // reversed-z: 1.0 = near, 0.0 = far (already z/w)
 }
 
 impl std::fmt::Debug for Framebuffer {
@@ -119,7 +125,8 @@ pub fn render_mesh(mesh: &Mesh, camera: &Camera, cfg: &RenderConfig) -> Framebuf
         width: cfg.width,
         height: cfg.height,
         pixels: Vec::with_capacity((cfg.width * cfg.height * 4) as usize),
-        depth: vec![1.0f32; (cfg.width * cfg.height) as usize],
+        // Reversed-z: clear depth to 0.0 (far) so any drawn fragment wins.
+        depth: vec![0.0f32; (cfg.width * cfg.height) as usize],
     };
     let bg = cfg.background;
     for _ in 0..(cfg.width * cfg.height) {
@@ -230,7 +237,8 @@ fn rasterize_triangle(
             let b2 = w2 * inv_area;
             let z = b0 * s[0][2] + b1 * s[1][2] + b2 * s[2][2];
             let idx = (y as u32 * fb.width + x as u32) as usize;
-            if z < fb.depth[idx] && (0.0..=1.0).contains(&z) {
+            // Reversed-z: closer fragments have a *larger* z (1 = near, 0 = far).
+            if z > fb.depth[idx] && (0.0..=1.0).contains(&z) {
                 fb.depth[idx] = z;
                 let pi = idx * 4;
                 fb.pixels[pi] = r;
