@@ -803,5 +803,53 @@ host's `VoxelDelta` / `RegionDelta` events through the new
 `WorldQuery::subscribe_region` plumbing. Every output is a
 deterministic function of `(seed, shape, registered region set,
 observer pose, camera, config)`. Phase 13's golden PNGs remain
-byte-identical. The interactive shell — winit + input + chosen mode
-dispatch — stays an external concern downstream of this repo.
+byte-identical.
+
+## Phase 15 — Client / server
+
+The Phase-14 "interactive shell is external" caveat is closed by three
+new crates:
+
+- **`atomr-worlds-remote`** — wire envelopes (`WireRequest` /
+  `WireReply`), `RemoteHost` (a `WorldHost` impl that speaks bincode
+  over `atomr-remote`), `WorldGateway` server actor, and an
+  `install_cluster_remote_forwarder` helper that wires
+  `ShardRegion::set_remote_forwarder` to atomr-remote so `ClusterHost`
+  finally does cross-node forwarding.
+- **`atomr-worlds-server`** — headless server binary with
+  `--mode standalone|cluster`. Reusable `run_standalone` /
+  `run_cluster_with` library entry points so tests can drive the same
+  code path the binary uses.
+- **`atomr-worlds-client`** — Bevy 0.13 binary that picks
+  `LocalHost` / `RemoteHost` / cluster member via `--backend`, renders
+  all five view modes (fp/tp native Bevy 3D; slice/rts/overview blit
+  the CPU rasterizer's `Framebuffer` into a Bevy `Image`), and overlays
+  a bevy_ui debug HUD (FPS / coords / mode).
+
+`LocalHostQuery` was generalised from `Arc<LocalHost>` to
+`Arc<dyn WorldHost>` so the same render-thread sync bridge serves every
+backend; the legacy `new(Arc<LocalHost>, …)` constructor stays for
+backwards compatibility.
+
+### Gates
+
+- `atomr-worlds-remote/tests/loopback.rs` — request + subscribe
+  round-trip over loopback `RemoteSystem`s.
+- `atomr-worlds-remote/tests/cluster.rs` — two-node `ClusterHost`
+  forwarding: write + read targeting a shard pinned to a peer succeeds.
+- `atomr-worlds-server/tests/standalone.rs` — server binary entry
+  point round-trips a write/read for a remote client.
+- `atomr-worlds-server/tests/cluster.rs` — `run_cluster_with` boots
+  twice, peers wired post-boot, client sees the voxel a peer wrote.
+- `atomr-worlds-client/tests/headless_smoke.rs` — `WorldQuery` bridge
+  works against both `LocalHost` and `RemoteHost` (headless; no Bevy
+  app launched).
+
+### Out of scope (see `docs/CLIENT_SERVER.md`)
+
+- Cross-node subscription routing. The wire format carries `sub_id`
+  but the cluster reply inbox only handles one-shot `Reply` today.
+- `atomr-view` UI bridge — same upstream blockers as Phase 14.
+- Gossip / persistent membership for the cluster. `--peer` is a static
+  hand-rolled map.
+- TLS / auth on the wire.

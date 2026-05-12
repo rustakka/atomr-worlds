@@ -166,6 +166,13 @@ impl LocalHost {
         .await
     }
 
+    /// In-process actor system the host runs on. Exposed so cluster
+    /// wiring can spawn auxiliary actors (e.g. reply inboxes) on the
+    /// same system as the world entity actors.
+    pub fn actor_system(&self) -> &ActorSystem {
+        &self.sys
+    }
+
     async fn actor_for(&self, addr: Address) -> Result<ActorRef<WorldMsg>, HostError> {
         let mut map = self.actors.lock().await;
         if let Some(a) = map.get(&addr) {

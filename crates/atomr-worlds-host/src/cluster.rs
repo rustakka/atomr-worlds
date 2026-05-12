@@ -35,6 +35,10 @@ use crate::host::WorldHost;
 use crate::local::{LocalHost, LocalHostConfig};
 use crate::extractor::WorldExtractor;
 
+/// Per-corr-id reply registry. Exposed so `atomr-worlds-remote` can
+/// install a cross-node forwarder that feeds replies back through it.
+pub type PendingReplies = Arc<Mutex<HashMap<u64, oneshot::Sender<Envelope<WorldEvent>>>>>;
+
 /// Configuration for a cluster host. Caller pre-builds the [`ShardRegion`]
 /// and (in the cross-node case) installs a remote forwarder via
 /// [`ShardRegion::set_remote_forwarder`].
@@ -59,7 +63,7 @@ pub struct ClusterHost {
     config: ClusterHostConfig,
     local: Arc<LocalHost>,
     region: Arc<ShardRegion<WorldExtractor>>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Envelope<WorldEvent>>>>>,
+    pending: PendingReplies,
 }
 
 impl std::fmt::Debug for ClusterHost {
@@ -114,6 +118,21 @@ impl ClusterHost {
     /// call [`ShardRegion::set_remote_forwarder`]).
     pub fn region(&self) -> &Arc<ShardRegion<WorldExtractor>> {
         &self.region
+    }
+
+    /// Access the per-corr-id pending reply registry. External wiring
+    /// (e.g. an `atomr-worlds-remote` cluster forwarder) feeds replies
+    /// from cross-node forwarded requests directly into this map so
+    /// [`Self::request`] can unblock.
+    pub fn pending_map(&self) -> &PendingReplies {
+        &self.pending
+    }
+
+    /// In-process actor system the host runs on. Useful when external
+    /// wiring needs to spawn auxiliary actors (e.g. a reply inbox) on
+    /// the same system as the local entity actors.
+    pub fn actor_system(&self) -> &atomr::prelude::ActorSystem {
+        self.local.actor_system()
     }
 }
 

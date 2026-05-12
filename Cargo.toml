@@ -12,6 +12,9 @@ members = [
     "crates/atomr-worlds-view",
     "crates/atomr-worlds-testkit",
     "crates/atomr-worlds-py",
+    "crates/atomr-worlds-remote",
+    "crates/atomr-worlds-server",
+    "crates/atomr-worlds-client",
     "examples/print-seed-chain",
     "examples/print-brick",
     "examples/view-png",
@@ -67,6 +70,8 @@ atomr-worlds-accel    = { path = "crates/atomr-worlds-accel",    version = "0.1.
 atomr-worlds-persist  = { path = "crates/atomr-worlds-persist",  version = "0.1.0" }
 atomr-worlds-view     = { path = "crates/atomr-worlds-view",     version = "0.1.0" }
 atomr-worlds-testkit  = { path = "crates/atomr-worlds-testkit",  version = "0.1.0" }
+atomr-worlds-remote   = { path = "crates/atomr-worlds-remote",   version = "0.1.0" }
+atomr-worlds-server   = { path = "crates/atomr-worlds-server",   version = "0.1.0" }
 
 # External — atomr (sibling repo, path deps)
 atomr                  = { path = "../atomr/crates/atomr",                  version = "0.9.2" }
@@ -76,6 +81,7 @@ atomr-cluster          = { path = "../atomr/crates/atomr-cluster",          vers
 atomr-cluster-sharding = { path = "../atomr/crates/atomr-cluster-sharding", version = "0.9.2" }
 atomr-persistence      = { path = "../atomr/crates/atomr-persistence",      version = "0.9.2" }
 atomr-persistence-sql  = { path = "../atomr/crates/atomr-persistence-sql",  version = "0.9.2" }
+atomr-remote           = { path = "../atomr/crates/atomr-remote",           version = "0.9.2" }
 
 # External — atomr-accel (sibling repo, path deps; phase 5 full)
 atomr-accel            = { path = "../atomr-accel/crates/atomr-accel",      version = "0.10.0" }
@@ -87,3 +93,21 @@ png = "0.17"
 
 # Python bindings (Phase 6)
 pyo3 = { version = "0.22", features = ["abi3-py310"] }
+
+# Client/server CLI + Bevy (Phase 15)
+clap = { version = "4", features = ["derive"] }
+bevy = { version = "0.13", default-features = false, features = [
+    "bevy_winit",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_ui",
+    "bevy_text",
+    "bevy_sprite",
+    "bevy_asset",
+    "x11",
+    "default_font",
+    "tonemapping_luts",
+    "ktx2",
+    "zstd",
+] }

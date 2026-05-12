@@ -21,7 +21,7 @@ pub mod policy;
 pub mod shape;
 pub mod world_query_impl;
 
-pub use cluster::ClusterHost;
+pub use cluster::{ClusterHost, ClusterHostConfig};
 pub use error::HostError;
 pub use extractor::WorldExtractor;
 pub use host::WorldHost;

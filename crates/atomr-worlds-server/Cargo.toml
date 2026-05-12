@@ -1,0 +1,36 @@
+[package]
+name = "atomr-worlds-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Headless atomr-worlds server. Standalone or cluster member."
+
+[[bin]]
+name = "atomr-worlds-server"
+path = "src/main.rs"
+
+[dependencies]
+atomr-worlds-core   = { workspace = true }
+atomr-worlds-host   = { workspace = true }
+atomr-worlds-proto  = { workspace = true }
+atomr-worlds-remote = { workspace = true }
+
+atomr                  = { workspace = true }
+atomr-config           = { workspace = true }
+atomr-core             = { workspace = true }
+atomr-remote           = { workspace = true }
+atomr-cluster-sharding = { workspace = true }
+
+tokio       = { workspace = true }
+clap        = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+atomr-worlds-voxel  = { workspace = true }
+atomr-worlds-remote = { workspace = true }

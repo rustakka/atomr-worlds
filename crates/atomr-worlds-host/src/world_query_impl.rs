@@ -15,6 +15,10 @@
 //!   host's `mpsc::Receiver<Envelope<WorldEvent>>` and forwards bodies into
 //!   a `std::sync::mpsc::Sender<WorldEvent>`. The task exits when either
 //!   end of the channel closes.
+//!
+//! Generic over [`WorldHost`] so [`LocalHost`](crate::LocalHost),
+//! [`ClusterHost`](crate::ClusterHost), and `atomr-worlds-remote`'s
+//! `RemoteHost` all plug in unchanged.
 
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
@@ -31,15 +35,23 @@ use tokio::runtime::Handle;
 use crate::host::WorldHost;
 use crate::local::LocalHost;
 
-/// `WorldQuery` impl that talks to a [`LocalHost`] via stashed tokio
+/// `WorldQuery` impl that talks to any [`WorldHost`] via a stashed tokio
 /// [`Handle`]. See module docs.
 pub struct LocalHostQuery {
-    pub host: Arc<LocalHost>,
+    pub host: Arc<dyn WorldHost>,
     pub handle: Handle,
 }
 
 impl LocalHostQuery {
+    /// Construct from a concrete [`LocalHost`]. Backwards-compatible with
+    /// pre-Phase-15 callers (view-fp / view-tp examples).
     pub fn new(host: Arc<LocalHost>, handle: Handle) -> Self {
+        Self { host: host as Arc<dyn WorldHost>, handle }
+    }
+
+    /// Construct from any [`WorldHost`] impl (LocalHost, ClusterHost,
+    /// RemoteHost, …).
+    pub fn from_dyn(host: Arc<dyn WorldHost>, handle: Handle) -> Self {
         Self { host, handle }
     }
 }
