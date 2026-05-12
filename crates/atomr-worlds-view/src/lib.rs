@@ -23,22 +23,22 @@ pub mod observer;
 pub mod render;
 pub mod scene;
 pub mod skybox;
+pub mod view_cache;
 
 pub use camera::Camera;
 pub use iso::{boundary_skirt, crossfade_overlap, surface_mesh, MeshMode, SmoothConfig};
 pub use mesh::{greedy_mesh, Mesh, Quad, Vertex};
+pub use observer::{ObserverState, SkyboxRefreshPolicy};
 pub use render::{
-    material_color, render_brick_png, render_composite, render_mesh, CompositeScene,
-    Framebuffer, FragmentMode, RenderConfig,
+    material_color, render_brick_png, render_composite, render_mesh, CompositeScene, FragmentMode,
+    Framebuffer, RenderConfig,
 };
 pub use scene::{
-    scene_from_bricks, CameraNode, FrameMetadata, LightKind, LightNode, MaterialEntry,
-    MaterialPalette, MeshNode, SceneDescription, SceneId,
+    scene_from_bricks, CameraNode, FrameMetadata, LightKind, LightNode, MaterialEntry, MaterialPalette,
+    MeshNode, SceneDescription, SceneId,
 };
-pub use observer::{ObserverState, SkyboxRefreshPolicy};
-pub use skybox::{
-    render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT,
-};
+pub use skybox::{render_skybox_from_meshes, CubeFace, CubeFaceImage, Skybox, SkyboxConfig, CUBE_FACE_COUNT};
+pub use view_cache::{CacheAabb, DerivedKey, Revision, ViewCache};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ViewError {

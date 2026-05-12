@@ -11,6 +11,7 @@ description = "Persistence binding for atomr-worlds — wraps atomr-persistence'
 
 [features]
 default = []
+derived = []
 sql = ["dep:atomr-persistence-sql"]
 
 [dependencies]
