@@ -17,8 +17,10 @@
 #![warn(missing_debug_implementations)]
 
 pub mod camera;
+pub mod derived;
 pub mod iso;
 pub mod mesh;
+pub mod modes;
 pub mod observer;
 pub mod raster2d;
 pub mod render;
