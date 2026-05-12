@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use atomr_worlds_view::camera::{transform_point, Camera};
+use atomr_worlds_view::camera::{transform_point, Camera, Projection};
 use atomr_worlds_view::mesh::Mesh;
 use atomr_worlds_view::{
     render_skybox_from_meshes, CubeFace, MaterialPalette, MeshNode, SkyboxConfig,
@@ -217,6 +217,7 @@ fn reversed_z_maps_near_to_one_and_far_to_zero() {
         aspect: 1.0,
         near: 0.5,
         far: 50.0,
+        projection: Projection::Perspective { fov_y_rad: std::f32::consts::FRAC_PI_4 },
     };
     let mvp = cam.view_proj();
 
