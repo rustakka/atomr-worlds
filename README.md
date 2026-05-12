@@ -7,22 +7,20 @@ voxel storage, metric levels of detail, and a hosting model that runs either emb
 
 ## Status
 
-**Phases 0–13 and Phase 14 foundation landed.** Phase 0 (primitives), Phase 1 (procedural
-generators + real `LocalHost` on atomr's actor system), Phase 2 (CPU renderer: greedy meshing
-+ software rasterizer to PNG), Phase 3 (persistence: `atomr-persistence` Journal/SnapshotStore
-binding, in-memory + optional SQL backends, recovery on host restart), Phase 4 (streaming
+**Phases 0–14 landed.** Phase 0 (primitives), Phase 1 (procedural generators + real
+`LocalHost` on atomr's actor system), Phase 2 (CPU renderer: greedy meshing + software
+rasterizer to PNG), Phase 3 (persistence: `atomr-persistence` Journal/SnapshotStore binding,
+in-memory + optional SQL backends, recovery on host restart), Phase 4 (streaming
 subscriptions), Phase 5 (GPU acceleration: CUDA backend via `atomr-accel-cuda` NVRTC, gated on
 byte-for-byte determinism vs the CPU path), Phase 6 (Python bindings), Phases 7–12 (vehicles +
 policy + strategy registry, atmosphere + metric LOD, isosurface meshing, `ClusterHost`, Python
 release, persistence + observability hardening), Phase 13 (world shape + horizon streaming +
 geologic macro pre-sim + authored-region stipulation + skybox cubemap + composite renderer +
-cross-LOD seam fix + transitive skybox), and the Phase 14 foundation (`Projection` enum on
-`Camera`, `WorldQuery` trait, `raster2d` blitter, `ViewCache` + `DerivedStore`) are all
-implemented and tested end-to-end.
-
-Phase 14a–14e (1st-person walk, 3rd-person chase, Dwarf-Fortress slice, RTS oblique strategy,
-regional overview) are landing on top of the Phase 14 foundation; each ships its own
-rendering pipeline and (where the access pattern warrants) its own derived data structure.
+cross-LOD seam fix + transitive skybox), and Phase 14 (five world display modes — 1st-person
+walk, 3rd-person chase, Dwarf-Fortress horizontal slice, RTS oblique strategy, and large-scale
+regional overview — each with its own rendering pipeline and derived data structure on top of
+the new `Projection` enum, `WorldQuery` trait, `raster2d` blitter, and `ViewCache` foundation)
+are all implemented and tested end-to-end.
 
 The remaining piece on the original roadmap is the upstream bridge from `atomr-worlds-view`'s
 mesh output into `atomr-view`'s scene API — blocked on the latter growing 3D primitives / a
