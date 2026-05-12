@@ -35,7 +35,9 @@ pub enum MeshMode {
 }
 
 impl Default for MeshMode {
-    fn default() -> Self { MeshMode::Flat }
+    fn default() -> Self {
+        MeshMode::Flat
+    }
 }
 
 /// Tunables for the smooth (surface-nets) mesher.
@@ -48,7 +50,9 @@ pub struct SmoothConfig {
 }
 
 impl Default for SmoothConfig {
-    fn default() -> Self { Self { iso_value: 0.0, relax_iters: 0 } }
+    fn default() -> Self {
+        Self { iso_value: 0.0, relax_iters: 0 }
+    }
 }
 
 const EDGE: i32 = BRICK_EDGE as i32;
@@ -82,7 +86,9 @@ fn dominant_material(brick: &Brick, x: i32, y: i32, z: i32) -> u16 {
                     continue;
                 }
                 let v = brick.get(IVec3::new(cx as i64, cy as i64, cz as i64));
-                if v == Voxel::EMPTY { continue; }
+                if v == Voxel::EMPTY {
+                    continue;
+                }
                 let m = v.0;
                 let mut found = false;
                 for c in counts.iter_mut().take(n) {
@@ -118,9 +124,7 @@ fn naive_surface_nets(brick: &Brick, cfg: SmoothConfig) -> Mesh {
     let n = (EDGE + 1) as usize;
     let cell_count = n * n * n;
     let mut cell_vertex = vec![u32::MAX; cell_count];
-    let idx = |x: i32, y: i32, z: i32| -> usize {
-        ((z as usize) * n + (y as usize)) * n + x as usize
-    };
+    let idx = |x: i32, y: i32, z: i32| -> usize { ((z as usize) * n + (y as usize)) * n + x as usize };
 
     // For each cell with mixed corner signs, emit a vertex at the average of
     // the corner positions weighted by sign.
@@ -139,8 +143,10 @@ fn naive_surface_nets(brick: &Brick, cfg: SmoothConfig) -> Mesh {
                     any_in |= o;
                     any_out |= !o;
                 }
-                if !(any_in && any_out) { continue; } // pure inside or pure outside
-                // Vertex position: centroid of corners "in" (or fall back to cell center).
+                if !(any_in && any_out) {
+                    continue;
+                } // pure inside or pure outside
+                  // Vertex position: centroid of corners "in" (or fall back to cell center).
                 let (mut vx, mut vy, mut vz, mut count) = (0.0f32, 0.0f32, 0.0f32, 0);
                 for i in 0..8u8 {
                     if occ[i as usize] {
@@ -184,9 +190,7 @@ fn naive_surface_nets(brick: &Brick, cfg: SmoothConfig) -> Mesh {
 
 fn emit_quads(brick: &Brick, cell_vertex: &[u32], mesh: &mut Mesh) {
     let n = (EDGE + 1) as usize;
-    let idx = |x: i32, y: i32, z: i32| -> usize {
-        ((z as usize) * n + (y as usize)) * n + x as usize
-    };
+    let idx = |x: i32, y: i32, z: i32| -> usize { ((z as usize) * n + (y as usize)) * n + x as usize };
     // For each voxel-corner-aligned edge between two adjacent corners along
     // a positive axis, if those corners have different signs, emit a quad
     // through the 4 cells whose interiors share that edge.
@@ -228,7 +232,9 @@ fn emit_quads(brick: &Brick, cell_vertex: &[u32], mesh: &mut Mesh) {
 }
 
 fn push_quad_if_valid(mesh: &mut Mesh, q: [u32; 4], outward: bool) {
-    if q.iter().any(|i| *i == u32::MAX) { return; }
+    if q.iter().any(|i| *i == u32::MAX) {
+        return;
+    }
     // Wind so the triangle's normal points from `false` to `true` corner.
     if outward {
         mesh.indices.extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
@@ -239,7 +245,9 @@ fn push_quad_if_valid(mesh: &mut Mesh, q: [u32; 4], outward: bool) {
 
 fn compute_normals(mesh: &mut Mesh) {
     let n = mesh.vertices.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
     let mut accum = vec![[0.0f32; 3]; n];
     for tri in mesh.indices.chunks_exact(3) {
         let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
@@ -248,11 +256,8 @@ fn compute_normals(mesh: &mut Mesh) {
         let pc = mesh.vertices[c].pos;
         let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
         let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
-        let nrm = [
-            e1[1] * e2[2] - e1[2] * e2[1],
-            e1[2] * e2[0] - e1[0] * e2[2],
-            e1[0] * e2[1] - e1[1] * e2[0],
-        ];
+        let nrm =
+            [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
         for v in [a, b, c] {
             accum[v][0] += nrm[0];
             accum[v][1] += nrm[1];

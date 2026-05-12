@@ -326,11 +326,7 @@ impl<'a> CompositeScene<'a> {
 /// meshes (opaque) — into a single framebuffer. Iteration order is
 /// fixed; the rasterizer state is a single z-buffer + a single pixel
 /// buffer, so output bytes are a pure function of the inputs.
-pub fn render_composite(
-    scene: &CompositeScene<'_>,
-    camera: &Camera,
-    cfg: &RenderConfig,
-) -> Framebuffer {
+pub fn render_composite(scene: &CompositeScene<'_>, camera: &Camera, cfg: &RenderConfig) -> Framebuffer {
     let mut fb = Framebuffer {
         width: cfg.width,
         height: cfg.height,
@@ -360,11 +356,7 @@ pub fn render_composite(
             node,
             camera,
             cfg,
-            FragmentMode::DistanceFade {
-                start_m: fade_start_m,
-                end_m: fade_end_m,
-                observer: scene.observer,
-            },
+            FragmentMode::DistanceFade { start_m: fade_start_m, end_m: fade_end_m, observer: scene.observer },
         );
     }
 
@@ -380,12 +372,7 @@ pub fn render_composite(
 /// to a world-space ray direction. The skybox lookup is the cubemap
 /// sampler; no depth writes (depth stays at 0.0 / "far" so the mesh
 /// passes always win).
-fn paint_skybox_background(
-    observer: [f32; 3],
-    sky: &Skybox,
-    camera: &Camera,
-    cfg: &RenderConfig,
-) -> Vec<u8> {
+fn paint_skybox_background(observer: [f32; 3], sky: &Skybox, camera: &Camera, cfg: &RenderConfig) -> Vec<u8> {
     let w = cfg.width as i32;
     let h = cfg.height as i32;
     let mut out = Vec::with_capacity((w * h * 4) as usize);
@@ -446,8 +433,7 @@ fn rasterize_node(
     let mvp = camera.view_proj();
     let light = norm3(cfg.light_dir);
     let t = node.transform;
-    let world_pos: Vec<[f32; 3]> =
-        mesh.vertices.iter().map(|v| transform_point_affine(t, v.pos)).collect();
+    let world_pos: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| transform_point_affine(t, v.pos)).collect();
     let clip: Vec<[f32; 4]> = world_pos.iter().map(|p| transform_point(mvp, *p)).collect();
 
     let w_f = cfg.width as f32;
@@ -474,18 +460,27 @@ fn rasterize_node(
         // Pre-compute per-vertex world distances for the fade band.
         let v0 = &mesh.vertices[i0];
         let n_world = transform_dir(t, v0.normal);
-        let d0 = world_distance(world_pos[i0], match mode {
-            FragmentMode::DistanceFade { observer, .. } => observer,
-            FragmentMode::Opaque => [0.0; 3],
-        });
-        let d1 = world_distance(world_pos[i1], match mode {
-            FragmentMode::DistanceFade { observer, .. } => observer,
-            FragmentMode::Opaque => [0.0; 3],
-        });
-        let d2 = world_distance(world_pos[i2], match mode {
-            FragmentMode::DistanceFade { observer, .. } => observer,
-            FragmentMode::Opaque => [0.0; 3],
-        });
+        let d0 = world_distance(
+            world_pos[i0],
+            match mode {
+                FragmentMode::DistanceFade { observer, .. } => observer,
+                FragmentMode::Opaque => [0.0; 3],
+            },
+        );
+        let d1 = world_distance(
+            world_pos[i1],
+            match mode {
+                FragmentMode::DistanceFade { observer, .. } => observer,
+                FragmentMode::Opaque => [0.0; 3],
+            },
+        );
+        let d2 = world_distance(
+            world_pos[i2],
+            match mode {
+                FragmentMode::DistanceFade { observer, .. } => observer,
+                FragmentMode::Opaque => [0.0; 3],
+            },
+        );
 
         rasterize_triangle_mode(
             fb,

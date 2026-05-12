@@ -15,8 +15,8 @@
 
 use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_generate::{BrickGenerator, TerrainConfig, TerrainGenerator};
-use atomr_worlds_view::{render_mesh, Camera, RenderConfig};
 use atomr_worlds_view::mesh::greedy_mesh;
+use atomr_worlds_view::{render_mesh, Camera, RenderConfig};
 
 const SEED: u64 = 0xDEAD_BEEF_CAFE_F00D;
 
@@ -46,10 +46,7 @@ fn renders_are_deterministic_across_runs() {
 #[test]
 fn pinned_hash_matches_current_render() {
     let h = render_known_brick();
-    assert_eq!(
-        h, PINNED_HASH,
-        "render hash drifted: got {h:#018x}, expected {PINNED_HASH:#018x}"
-    );
+    assert_eq!(h, PINNED_HASH, "render hash drifted: got {h:#018x}, expected {PINNED_HASH:#018x}");
 }
 
 #[test]

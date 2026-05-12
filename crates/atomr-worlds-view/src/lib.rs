@@ -17,6 +17,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod camera;
+pub mod decals;
 pub mod derived;
 pub mod iso;
 pub mod mesh;
@@ -30,9 +31,14 @@ pub mod view_cache;
 pub mod world_query;
 
 pub use camera::{Camera, Projection};
+pub use decals::{render_decals, Decal};
 pub use derived::slice_index::{build_slice_table, SliceColumn, SliceKey, SliceTable};
+pub use derived::surface_raster::{
+    build_surface_raster, surface_raster_to_mesh, SurfaceKey, SurfaceRaster,
+};
 pub use iso::{boundary_skirt, crossfade_overlap, surface_mesh, MeshMode, SmoothConfig};
 pub use mesh::{greedy_mesh, Mesh, Quad, Vertex};
+pub use modes::rts::{render_rts, ObliqueCamera};
 pub use modes::slice::{render_slice, render_slice_cached, SliceCamera, SliceConfig};
 pub use observer::{ObserverState, SkyboxRefreshPolicy};
 pub use raster2d::{blend_rect, blit_rgba, fill_rect, fill_rect_stipple, StipplePattern};

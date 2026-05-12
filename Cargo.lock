@@ -2933,7 +2933,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "view-slice"
+name = "view-rts"
 version = "0.1.0"
 dependencies = [
  "atomr-worlds-core",

@@ -43,14 +43,8 @@ pub enum CubeFace {
 impl CubeFace {
     /// All six faces in a stable, documented order. Iteration over `ALL`
     /// matches the index used by [`Skybox::faces`].
-    pub const ALL: [CubeFace; 6] = [
-        CubeFace::PosX,
-        CubeFace::NegX,
-        CubeFace::PosY,
-        CubeFace::NegY,
-        CubeFace::PosZ,
-        CubeFace::NegZ,
-    ];
+    pub const ALL: [CubeFace; 6] =
+        [CubeFace::PosX, CubeFace::NegX, CubeFace::PosY, CubeFace::NegY, CubeFace::PosZ, CubeFace::NegZ];
 
     /// Outward face normal (the direction the camera looks).
     pub fn forward(self) -> [f32; 3] {
@@ -184,10 +178,8 @@ impl Skybox {
     pub fn sample(&self, dir_unit: [f32; 3]) -> [u8; 4] {
         let (face, u, v) = face_and_uv(dir_unit);
         let img = &self.faces[face.index()];
-        let x =
-            ((u * img.width as f32).floor().clamp(0.0, img.width as f32 - 1.0)) as u32;
-        let y =
-            ((v * img.height as f32).floor().clamp(0.0, img.height as f32 - 1.0)) as u32;
+        let x = ((u * img.width as f32).floor().clamp(0.0, img.width as f32 - 1.0)) as u32;
+        let y = ((v * img.height as f32).floor().clamp(0.0, img.height as f32 - 1.0)) as u32;
         img.texel(x, y)
     }
 
@@ -225,11 +217,7 @@ pub struct SkyboxConfig {
 
 impl Default for SkyboxConfig {
     fn default() -> Self {
-        Self {
-            face_resolution: 128,
-            background_color: [10, 12, 22, 255],
-            include_parent_tier: true,
-        }
+        Self { face_resolution: 128, background_color: [10, 12, 22, 255], include_parent_tier: true }
     }
 }
 
@@ -258,12 +246,8 @@ pub fn render_skybox_from_meshes(
     let near = (inner_radius_m as f32).max(0.01) * 0.1;
     let far = (outer_radius_m as f32).max(near * 4.0);
 
-    let render_cfg = RenderConfig {
-        width: res,
-        height: res,
-        background: cfg.background_color,
-        ..RenderConfig::default()
-    };
+    let render_cfg =
+        RenderConfig { width: res, height: res, background: cfg.background_color, ..RenderConfig::default() };
 
     // Build the six faces in a fixed order. Using `Option` lets us emit the
     // array literal at the end without any unsafe.
@@ -271,11 +255,7 @@ pub fn render_skybox_from_meshes(
     for face in CubeFace::ALL {
         let cam = Camera::for_cube_face(eye, face, near, far);
         let fb = render_meshes_into(meshes, &cam, &render_cfg);
-        slots[face.index()] = Some(CubeFaceImage {
-            width: fb.width,
-            height: fb.height,
-            pixels: fb.pixels,
-        });
+        slots[face.index()] = Some(CubeFaceImage { width: fb.width, height: fb.height, pixels: fb.pixels });
     }
     // The loop populated every slot; unwrap is infallible here. We extract
     // each Option in a deterministic order so the digest is stable.
@@ -306,11 +286,7 @@ pub fn render_skybox_from_meshes(
 /// allocate a temporary translated [`crate::mesh::Mesh`] for each node so the
 /// existing `render_mesh` entry point (which doesn't know about
 /// transformations) keeps its small surface.
-fn render_meshes_into(
-    meshes: &[MeshNode],
-    camera: &Camera,
-    cfg: &RenderConfig,
-) -> Framebuffer {
+fn render_meshes_into(meshes: &[MeshNode], camera: &Camera, cfg: &RenderConfig) -> Framebuffer {
     if meshes.is_empty() {
         return render_mesh(&crate::mesh::Mesh::default(), camera, cfg);
     }
