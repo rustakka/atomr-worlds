@@ -301,3 +301,123 @@ per-actor portal registry. Variable-depth addressing:
 seed-chain method that walks each level key through
 `derive_child` — proves the variable-depth contract without
 forcing the host / persist layers to migrate.
+
+## Phase 13a *(landed)* — World shape type + horizon math
+
+[`WorldShape::{Cube, Sphere, Cylinder}`](../crates/atomr-worlds-core/src/shape.rs)
+introduces the geometric envelope of a [`World`]. Methods include
+`contains(p)`, `horizon_distance_m(altitude)` (sphere uses
+`sqrt(2*R*h + h²)`; cube returns infinity), `surface_normal_at(p)`,
+`bounding_aabb()`, `surface_area_m2()`, and `wrap(p)` (identity for
+sphere/cube; angular wrap on cylinder). `Hash`/`Eq`/`PartialEq`
+implemented manually via `f64::to_bits()` so the type is usable as a
+HashMap key (macro-state cache) and platform-stable. `World` and
+`WorldGen` grow a `shape` field with `Default = Cube { edge_m: 1e7 }`
+so pre-Phase-13 code keeps its exact behavior.
+
+Tests: `crates/atomr-worlds-core/src/shape.rs` ships 15 unit tests
+covering containment, horizon at known altitudes (Earth-radius
+6.371e6 m at 1km altitude ≈ 112,884.897 m horizon), variant
+discrimination, and hash bit-stability.
+
+## Phase 13b *(landed)* — Horizon-driven streaming + brick filter
+
+[`ShapeResolver`](../crates/atomr-worlds-host/src/shape.rs) + `PrefixShape`
+parallel the policy resolver — hierarchical address → `WorldShape`
+lookup. `LocalHostConfig::shape_resolver` defaults to `DefaultShape`
+(cubic Earth-class) for back-compat. `WorldActor` resolves the shape
+on spawn; `ensure_brick` checks `brick_inside_shape(coord)` and
+short-circuits out-of-shape bricks to empty without ever invoking the
+generator. `StreamingPolicy::ring_for_curved(observer, edge_m,
+horizon)` (and `MetricScale::lod_for_screen_curved`) clamp the
+streaming radius to the horizon at the observer's altitude. The
+metric subscription state tracks per-subscriber observer pose and
+sent-bricks set; `UpdateObserverPos` recomputes the ring, emits a
+fresh `Tier` event, and snapshots newly-visible bricks.
+
+Tests: `crates/atomr-worlds-host/tests/sphere_horizon_e2e.rs` covers
+the horizon clamp, out-of-shape filter (with a `CountingBrick` test
+double), observer-tick delta emission, default-shape regression, and
+cross-host determinism of the initial ring.
+
+## Phase 13c *(landed)* — Geologic macro pre-sim
+
+[`atomr-worlds-generate/src/macro_state/`](../crates/atomr-worlds-generate/src/macro_state/)
+adds a three-layer pre-pass that runs once per non-cubic world:
+
+- `surface_grid.rs` — recursive-icosahedron tessellation with integer
+  `FaceId`s and O(1) neighbour lookups. Level 4 (~5k faces, ~150 KB)
+  is the default; level 6 (~82k faces, ~2 MB) is opt-in via
+  `MacroConfig::grid_level`.
+- `plates.rs` — Voronoi tectonic plates seeded from `world_seed`.
+  Multi-source BFS with sorted-id collision resolution gives true
+  distance-Voronoi labeling (no race in tie-break). Convergent-
+  boundary uplift produces mountain belts.
+- `climate.rs` — latitude (via `face_centroid.y`) + altitude lapse →
+  temperature. Humidity diffuses upwind from oceanic faces.
+- `biome.rs` — fixed classification table over `(elev, temp, humidity)`.
+
+[`BrickGenerator`](../crates/atomr-worlds-generate/src/brick.rs)
+migrates from `(world_seed, brick_coord)` to `&BrickGenContext`. A
+default `generate_brick_legacy(seed, coord)` shim preserves the
+two-arg signature for the CUDA accelerator (`crates/atomr-worlds-accel/src/{lib,cuda}.rs`)
+and any downstream callers. `TerrainGenerator` consumes macro state
+when present — surface = macro_elev + local FBM jitter, top-layer
+material chosen by biome — and falls back to the Phase-12 algorithm
+exactly when `macro_state: None`.
+
+`LocalHostConfig` grows `macro_generator: Option<Arc<dyn MacroGenerator>>`
++ `macro_cache: Arc<MacroStateCache>`. On actor spawn, the cache
+produces (or reuses) the per-world macro state — pure function of
+`(world_seed, shape)`. `WorldMacroState::digest` is a FNV-1a
+witness over plates / elevation / climate / biomes; same input →
+same digest, byte-stable across runs.
+
+Tests: 22 unit tests in `macro_state::*` modules plus a 6-test
+determinism gate at
+[`tests/macro_determinism.rs`](../crates/atomr-worlds-generate/tests/macro_determinism.rs).
+
+## Phase 13d *(landed)* — Stipulation v1: in-memory regions + Python API
+
+[`atomr-worlds-generate/src/authored/`](../crates/atomr-worlds-generate/src/authored/)
+introduces hand-authored region overlays:
+
+- `AuthoredRegion` trait — `id()`, `bounds()`, `apply_to_brick()`.
+  Implementors are pure: same state → same brick voxels.
+- `AuthoredRegionStore` — per-host registry. Iteration is sorted by
+  region id for determinism.
+- `LiteralRegion` — `HashMap<IVec3, Voxel>`-backed in-memory region.
+
+`LocalHostConfig::authored_regions: Arc<Mutex<AuthoredRegionStore>>`
+is consulted on every brick miss. `WorldActor::ensure_brick` applies
+matching regions in sorted-id order *after* procedural generation and
+*before* the user-write overlay. `LocalHost::register_authored_region`
+is the canonical entrypoint.
+
+`atomr-worlds-py` exposes `WorldClient.register_literal_region(name,
+bounds_min, bounds_max, voxels)`. Voxels are passed as a Python
+`dict[(x,y,z), int]`.
+
+Tests: `stipulation_e2e.rs` (5 tests) verifies authored overlay,
+outside-region purity, multi-region registration, the empty-world +
+authored stage pattern (storytelling), and cross-host determinism.
+
+## Phase 13e *(landed)* — Stipulation v2: heightmap + .vox file loaders
+
+Format-agnostic loaders sitting on top of the 13d trait:
+
+- [`HeightmapRegion`](../crates/atomr-worlds-generate/src/authored/heightmap.rs)
+  consumes a raw `Vec<u16>` height array — equivalent to grayscale
+  PNG / GeoTIFF rows — and projects each column as voxels of
+  `base_material`. PNG / DEM file format parsing is a one-crate-dep
+  wrapper that slots on top (documented inline).
+- [`VoxFileRegion`](../crates/atomr-worlds-generate/src/authored/voxfile.rs)
+  consumes a sparse `Vec<(IVec3, u16)>` + a `VoxelTransform`
+  (translation today; rotation is future). The internal storage is
+  sorted by `(z, y, x)` so iteration order is deterministic.
+  MagicaVoxel `.vox` and Minecraft `.schematic` parsers slot on top
+  via optional features.
+
+Determinism: same inputs → byte-identical brick output. Tests in
+`crates/atomr-worlds-generate/tests/region_loaders.rs` (4 tests) +
+in-module unit tests (3 heightmap, 4 voxfile).

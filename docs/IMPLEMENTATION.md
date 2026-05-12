@@ -458,3 +458,129 @@ scene API — is blocked: `atomr-view`'s `SceneDescription` is UI-only (no
 primitives, `mesh::greedy_mesh`'s output drops straight into them.
 
 See [`PHASES.md`](PHASES.md) for the full roadmap.
+
+## Phase 13a (landed) — `WorldShape` type
+
+[`atomr-worlds-core/src/shape.rs`](../crates/atomr-worlds-core/src/shape.rs)
+defines `WorldShape::{Cube { edge_m }, Sphere { radius_m }, Cylinder { radius_m, height_m }}`
+plus `ShapeAabb` (continuous-meter centered bounding box, distinct from
+the integer-voxel `proto::AABB`). Methods: `contains(p)`,
+`horizon_distance_m(altitude)`, `surface_normal_at(p)`,
+`bounding_aabb()`, `radius_m()`, `surface_area_m2()`, `wrap(p)`.
+Manual `Hash`/`Eq`/`PartialEq` via `f64::to_bits()` for cache-keyability.
+Embedded in `World` (`hierarchy.rs`) and `WorldGen` (`tiers.rs`) with
+`Default = Cube { edge_m: 1.0e7 }` for back-compat. The horizon formula
+is `sqrt(2*R*h + h²)` for sphere/cylinder; cube returns `f64::INFINITY`.
+
+## Phase 13b (landed) — Horizon-clamped streaming + brick filter
+
+- [`MetricScale::lod_for_screen_curved`](../crates/atomr-worlds-core/src/lod.rs)
+  and [`StreamingPolicy::ring_for_curved`](../crates/atomr-worlds-proto/src/streaming.rs)
+  add a `horizon_m` parameter that clamps the streaming radius.
+- [`crate::shape::{ShapeResolver, DefaultShape, PrefixShape}`](../crates/atomr-worlds-host/src/shape.rs)
+  mirror the policy resolver — hierarchical address → shape lookup,
+  default cubic Earth-class.
+- [`LocalHostConfig::shape_resolver: Arc<dyn ShapeResolver>`](../crates/atomr-worlds-host/src/local.rs)
+  resolves shape once per actor on spawn; `WorldActor::brick_inside_shape`
+  short-circuits out-of-shape bricks to empty without invoking the
+  generator. `handle_subscribe_begin` consults the observer's altitude
+  (`observer.length() - shape.radius()`), passes it to
+  `ring_for_curved`, and stores a `MetricSubState` per subscriber.
+- `UpdateObserverPos` recomputes the ring and emits a fresh `Tier` event
+  plus `BrickSnapshot`s for any newly-visible bricks.
+
+Tests: [`tests/sphere_horizon_e2e.rs`](../crates/atomr-worlds-host/tests/sphere_horizon_e2e.rs)
+covers the horizon clamp, out-of-shape filter, observer-tick deltas,
+and cross-host determinism.
+
+## Phase 13c (landed) — Geologic macro pre-sim + `BrickGenContext`
+
+[`atomr-worlds-generate/src/macro_state/`](../crates/atomr-worlds-generate/src/macro_state/)
+ships a three-layer pre-pass:
+
+- `surface_grid.rs` — `SurfaceGrid::new(level)` builds a recursive
+  icosahedron at `20 * 4^level` faces. Each face has 3 edge-neighbours
+  (table-driven, O(1)), and `face_for_direction(unit)` finds the
+  containing face by best-centroid dot product. Determinism: pure f64
+  arithmetic from a hard-coded golden-ratio icosahedron base.
+- `plates.rs` — `generate_plates(grid, seed, config)` picks
+  `plate_count` distinct face seeds via `splitmix64(seed ^ i)`,
+  flood-fills via multi-source BFS with sorted-id collision resolution
+  (true distance-Voronoi, no race), assigns per-plate velocities, and
+  computes elevation: continental/oceanic base + convergent-boundary
+  uplift.
+- `climate.rs` — `generate_climate(grid, elevation, config)` computes
+  temperature = `equator_temp + (pole_temp - equator_temp) * |y|`
+  minus altitude lapse; humidity diffuses upwind from oceanic faces
+  over `humidity_iters` rounds with `humidity_decay` attenuation.
+- `biome.rs` — `classify_biomes(elevation, climate)` lookup table
+  over `(elev, temp, humidity)`. 10 biome constants in `biome::*`.
+
+[`WorldMacroState`](../crates/atomr-worlds-generate/src/macro_state/mod.rs)
+bundles the four fields + a FNV-1a `digest` for determinism witnessing.
+`sample(dir)` returns the per-face tuple. `MacroStateCache` is a
+`Mutex<HashMap<MacroKey, Arc<state>>>` for per-host caching.
+
+[`BrickGenerator`](../crates/atomr-worlds-generate/src/brick.rs)
+migrates to `fn generate_brick(&self, ctx: &BrickGenContext) -> Brick`.
+`BrickGenContext { world_seed, brick_coord, shape, macro_state, scale }`.
+The default `generate_brick_legacy(seed, coord)` shim preserves the
+two-arg path for CUDA and downstream callers — neither the CUDA kernel
+nor the host's CPU accelerator changes.
+
+`TerrainGenerator` gains `material_at_macro(seed, p, macro_state, scale)`.
+Surface height = `macro_elev_at_face + local_fbm_jitter`. Top-layer
+material picks from biome (sand for desert/savanna; snow for ice/tundra;
+water for ocean; dirt otherwise). When `macro_state` is `None` the
+generator follows the Phase-12 path exactly — existing terrain tests
+keep their hashes.
+
+[`LocalHostConfig`](../crates/atomr-worlds-host/src/local.rs) grows
+`macro_generator: Option<Arc<dyn MacroGenerator>>` and
+`macro_cache: Arc<MacroStateCache>`. Cubic worlds skip macro pre-sim
+even when the generator is set (back-compat); spheres and cylinders
+compute macro state on first actor spawn.
+
+Determinism gate: [`tests/macro_determinism.rs`](../crates/atomr-worlds-generate/tests/macro_determinism.rs)
+pins `WorldMacroState::digest` against (seed, config) — runs on the CI
+matrix to catch cross-platform drift.
+
+## Phase 13d (landed) — Stipulation v1: in-memory authored regions
+
+[`atomr-worlds-generate/src/authored/`](../crates/atomr-worlds-generate/src/authored/):
+
+- `mod.rs` — `AuthoredRegion` trait (`id`, `bounds`, `apply_to_brick`),
+  `AuthoredRegionStore` (per-host registry, sorted-id deterministic
+  iteration), `RegionAabb` (inclusive-min, exclusive-max in voxel
+  coords), `region_id(name)` (FNV-1a 64).
+- `literal.rs` — `LiteralRegion(HashMap<IVec3, Voxel>)`. Constant-
+  time bounds check; O(brick_edge³) apply.
+
+[`LocalHostConfig::authored_regions: Arc<Mutex<AuthoredRegionStore>>`](../crates/atomr-worlds-host/src/local.rs)
+is shared across actors and the Python binding. `WorldActor::ensure_brick`
+applies overlapping regions in sorted-id order after procedural fill,
+before the user-write overlay.
+
+`LocalHost::register_authored_region(Arc<dyn AuthoredRegion>)` is the
+canonical entrypoint. The PyO3 binding exposes
+`WorldClient.register_literal_region(name, bounds_min, bounds_max, voxels)`.
+
+End-to-end: [`tests/stipulation_e2e.rs`](../crates/atomr-worlds-host/tests/stipulation_e2e.rs).
+
+## Phase 13e (landed) — Stipulation v2: heightmap + voxfile loaders
+
+- [`HeightmapRegion`](../crates/atomr-worlds-generate/src/authored/heightmap.rs):
+  takes a flat `Vec<u16>` height array indexed `z * width + x`. Each
+  column extends from `origin.y` to `origin.y + height` filled with
+  `base_material`. PNG / GeoTIFF parsing is a one-`image::crate`-dep
+  wrapper documented inline — kept out of core to preserve the
+  dep-light workspace.
+- [`VoxFileRegion`](../crates/atomr-worlds-generate/src/authored/voxfile.rs):
+  sparse `Vec<(IVec3, u16)>` + `VoxelTransform { translation }`.
+  Internal storage sorted by `(z, y, x)` for deterministic iteration.
+  MagicaVoxel `.vox` / `.schematic` parsing slot on top via optional
+  features (`dot_vox`, NBT crates).
+
+Tests: in-module unit tests (3 + 4) and
+[`tests/region_loaders.rs`](../crates/atomr-worlds-generate/tests/region_loaders.rs)
+(4 cross-region e2e tests).
