@@ -1,0 +1,17 @@
+[package]
+name = "view-slice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "view-slice"
+path = "src/main.rs"
+
+[dependencies]
+atomr-worlds-core  = { workspace = true }
+atomr-worlds-voxel = { workspace = true }
+atomr-worlds-proto = { workspace = true }
+atomr-worlds-view  = { workspace = true }
