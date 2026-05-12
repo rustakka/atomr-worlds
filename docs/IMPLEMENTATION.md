@@ -872,3 +872,89 @@ were pre-created with stub files for each Wave 2 phase
 worktree agents implementing Phases 14a–e do not collide on their
 parent `mod.rs` files. `modes/view_mode.rs` ships the `ViewMode`
 dispatch enum inline (no moving parts).
+
+## Phase 14a–e (landing) — Multi-mode display
+
+The five Phase 14 modes land on top of the foundation as separate
+worktree commits. Module-by-module pointers (full prose in
+[PHASES.md](PHASES.md)):
+
+### Phase 14a (landing) — 1st-person walk
+
+- [`crates/atomr-worlds-view/src/modes/fp.rs`](../crates/atomr-worlds-view/src/modes/fp.rs)
+  — `WalkCamera`, `WalkInput`, `MeshCacheKey`, `build_fp_scene`,
+  `render_fp`.
+- [`crates/atomr-worlds-view/src/frustum.rs`](../crates/atomr-worlds-view/src/frustum.rs)
+  — `Frustum` with Gribb–Hartmann plane extraction, AABB intersection /
+  containment tests; works under both Perspective and Orthographic
+  projections.
+- [`crates/atomr-worlds-host/src/world_query_impl.rs`](../crates/atomr-worlds-host/src/world_query_impl.rs)
+  — `LocalHostQuery: WorldQuery for LocalHost`; bridges tokio mpsc →
+  std mpsc for `subscribe_region`.
+- [`examples/view-fp`](../examples/view-fp) — five-frame headless demo.
+
+### Phase 14b (landing) — 3rd-person chase
+
+- [`crates/atomr-worlds-view/src/modes/tp.rs`](../crates/atomr-worlds-view/src/modes/tp.rs)
+  — `ChaseCamera`, `render_tp`; reuses `build_fp_scene` with anchor
+  mesh injected through `extra_meshes`.
+- [`examples/view-tp`](../examples/view-tp) — five-frame chase demo.
+
+### Phase 14c (landing) — Dwarf-Fortress slice
+
+- [`crates/atomr-worlds-view/src/modes/slice.rs`](../crates/atomr-worlds-view/src/modes/slice.rs)
+  — `SliceCamera`, `SliceConfig`, `render_slice`, `render_slice_cached`;
+  pure 2D blits through `raster2d` (deliberate non-use of the triangle
+  rasterizer).
+- [`crates/atomr-worlds-view/src/derived/slice_index.rs`](../crates/atomr-worlds-view/src/derived/slice_index.rs)
+  — `SliceColumn { top_voxel, top_z, thickness_above_floor }`,
+  `SliceTable`, `SliceKey: DerivedKey`, `build_slice_table`. Z-band
+  rule documented in module rustdoc (+Y up, scan downward).
+- [`examples/view-slice`](../examples/view-slice) — three-band z-cycle
+  demo.
+
+### Phase 14d (landing) — RTS oblique-orthographic
+
+- [`crates/atomr-worlds-view/src/modes/rts.rs`](../crates/atomr-worlds-view/src/modes/rts.rs)
+  — `ObliqueCamera::to_camera()` produces a `Camera` with
+  `Projection::Oblique`; `render_rts` builds the surface mesh, runs
+  `render_mesh`, then composites decals.
+- [`crates/atomr-worlds-view/src/derived/surface_raster.rs`](../crates/atomr-worlds-view/src/derived/surface_raster.rs)
+  — `SurfaceRaster { heightmap_m, biome_id, top_z, dims, origin_xz,
+  voxel_size_m, world_rev }`, `SurfaceKey: DerivedKey`,
+  `build_surface_raster`, `surface_raster_to_mesh`. Caves and
+  overhangs at the surface are an explicit known limitation.
+- [`crates/atomr-worlds-view/src/decals.rs`](../crates/atomr-worlds-view/src/decals.rs)
+  — `Decal { world_xz_m, size_px, color, sprite }`, `render_decals`;
+  projects through `cam.view_proj()`, composites via
+  `raster2d::{blend_rect, blit_rgba}`.
+- [`examples/view-rts`](../examples/view-rts) — oblique view with
+  decals.
+
+### Phase 14e (landing) — Regional / world overview
+
+- [`crates/atomr-worlds-view/src/modes/overview.rs`](../crates/atomr-worlds-view/src/modes/overview.rs)
+  — `OverviewCamera`, `OverviewProjection::{OrthographicFlat,
+  OrthographicSphere, Equirectangular}`, `pick_pyramid_level`,
+  `render_overview`.
+- [`crates/atomr-worlds-view/src/derived/world_summary.rs`](../crates/atomr-worlds-view/src/derived/world_summary.rs)
+  — `WorldSummaryTile`, `WorldSummaryPyramid`, `ClimateSample`,
+  `WorldSummaryKey: DerivedKey` (intersects always false — never
+  invalidated by voxel writes), `bake_world_summary`.
+- [`crates/atomr-worlds-view/src/projection_sphere.rs`](../crates/atomr-worlds-view/src/projection_sphere.rs)
+  — `equirectangular_{pixel_to_dir, dir_to_pixel}`,
+  `orthographic_sphere_pixel_to_dir` with derivation comment blocks
+  matching the existing perspective derivation rigor.
+- [`examples/view-overview`](../examples/view-overview) — bakes a
+  4-level pyramid and renders the three projections.
+- View crate Cargo.toml moves `atomr-worlds-generate` from
+  `[dev-dependencies]` to `[dependencies]` for the macro-state types.
+
+### Phase 14 cross-cutting
+
+- `ViewMode` enum at
+  [`crates/atomr-worlds-view/src/modes/view_mode.rs`](../crates/atomr-worlds-view/src/modes/view_mode.rs)
+  for runtime mode dispatch — convenience surface, not a forced trait.
+- Examples follow the existing `examples/sphere-flyby` pattern: spin up
+  a `LocalHost`, render N frames, write PNGs to `/tmp/view-<mode>-NN.png`,
+  print FNV-1a digests. No display server required.
