@@ -104,6 +104,17 @@ pub fn apply_strategy_by_name(cfg: &mut RenderConfig, slot: &str, name: &str) ->
             }
             _ => false,
         },
+        "coverage" => match name {
+            "MaskedShells" => {
+                cfg.coverage = Arc::new(MaskedShells);
+                true
+            }
+            "NestedSummary" => {
+                cfg.coverage = Arc::new(NestedSummary);
+                true
+            }
+            _ => false,
+        },
         _ => false,
     }
 }

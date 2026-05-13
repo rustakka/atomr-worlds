@@ -540,6 +540,45 @@ impl TonemapStrategy for AcesTonemap {
 }
 
 // ---------------------------------------------------------------------------
+// LOD coverage policy
+// ---------------------------------------------------------------------------
+
+/// Historical behaviour: each tier loads only its shell band; the
+/// inner-band mask in `desired_chunks` skips any brick whose volume
+/// is fully covered by a finer tier. Cheap memory, hard LOD pops.
+#[derive(Default)]
+pub struct MaskedShells;
+
+impl LodCoveragePolicy for MaskedShells {
+    fn name(&self) -> &'static str {
+        "MaskedShells"
+    }
+    fn mask_finer_covered(&self) -> bool {
+        true
+    }
+}
+
+/// Default: every tier loads its full inner sphere up to its outer
+/// radius, so each region has an immediately-resident coarse "summary"
+/// behind whatever finer LOD currently owns it. The visibility system
+/// in `modes/fp.rs` (`fp_update_lod_visibility`) keeps the finest
+/// loaded LOD visible per region and crossfades through transitions.
+/// Memory cost is bounded — each coarser tier covers 8× the volume
+/// per brick, so the inflation across the 4-tier default ladder is
+/// roughly +15 % bricks.
+#[derive(Default)]
+pub struct NestedSummary;
+
+impl LodCoveragePolicy for NestedSummary {
+    fn name(&self) -> &'static str {
+        "NestedSummary"
+    }
+    fn mask_finer_covered(&self) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

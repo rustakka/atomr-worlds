@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+mod brick_gen;
 mod cli;
 mod harness;
 mod host_backend;
@@ -114,6 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(ClearColor(Color::rgb(0.45, 0.65, 0.85)))
         .add_plugins(render::RenderPlugin)
         .add_plugins(world_stream::ChunkStreamerPlugin)
+        .add_plugins(brick_gen::BrickGenPlugin)
         .add_plugins(modes::fp::FpPlugin)
         .add_plugins(modes::tp::TpPlugin)
         .add_plugins(modes::blit::BlitPlugin)

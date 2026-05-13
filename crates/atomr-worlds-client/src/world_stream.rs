@@ -8,13 +8,25 @@
 //! you look toward the horizon.
 //!
 //! Each frame, [`desired_chunks`] walks the ladder and emits the brick
-//! coordinates that should be loaded at each tier's LOD. A brick is
-//! included in tier `i` only if its center lies inside that tier's
-//! shell (between the previous tier's outer radius and this tier's
-//! outer radius). The check is **spherical** — distance in 3D, not a
-//! cube — so loading and unloading are symmetric in all four cardinal
-//! directions and the diagonals. The previous 2-tier cube ring caused
-//! a visible asymmetry where only some directions appeared to populate.
+//! coordinates that should be loaded at each tier's LOD. The shape of
+//! the emitted set is controlled by a [`LodCoveragePolicy`] strategy
+//! (see [`crate::render::strategy`]):
+//!
+//! - `MaskedShells` — historical behaviour: each tier loads only its
+//!   shell band between the previous tier's outer radius and this
+//!   tier's outer radius. One brick per region; LOD transitions
+//!   require generating + meshing the next tier the moment the
+//!   current one becomes ineligible, which produces a visible pop.
+//! - `NestedSummary` (default) — every tier loads its full inner
+//!   sphere up to its outer radius. Each region has the immediate
+//!   coarser tier already resident as a "summary" backdrop, so when
+//!   the finer brick fades out the parent is in memory and just
+//!   becomes visible (the FP visibility system handles crossfade).
+//!
+//! Either way, the spherical (3D-distance) outer test makes loading
+//! and unloading symmetric in all four cardinal directions and the
+//! diagonals. The previous 2-tier cube ring caused a visible
+//! asymmetry where only some directions appeared to populate.
 //!
 //! The legacy 2-tier [`StreamingPolicy`] is preserved as a *derived
 //! view* on top of the ladder so the proto crate, host, and existing
@@ -37,6 +49,8 @@ use atomr_worlds_proto::streaming::StreamingPolicy;
 use atomr_worlds_voxel::BRICK_EDGE;
 use bevy::prelude::*;
 
+use crate::render::LodCoveragePolicy;
+
 /// Per-tick fetch budget. Sized so the 4-tier sphere (≈8 k brick keys)
 /// populates in ~1 s at 60 fps with the closest-first sort prioritising
 /// the high-fidelity inner tier. After the `brick_inside_shape` fix
@@ -57,6 +71,27 @@ pub const HYSTERESIS_TICKS: u64 = 2;
 pub const FOG_START_FRACTION: f64 = 0.55;
 /// Fraction of the outermost radius at which fog is fully opaque.
 pub const FOG_END_FRACTION: f64 = 0.98;
+
+/// How far the observer must drift before the cached desired-chunks plan
+/// is rebuilt. Sized to a quarter of the L0 brick edge (16 m) — small
+/// enough that newly-entered brick cells are picked up quickly, large
+/// enough that walking-pace motion only triggers a rebuild every few
+/// frames instead of every frame.
+pub const PLAN_REBUILD_DRIFT_M: f64 = 4.0;
+
+/// How far the camera forward direction must rotate before the cached
+/// plan is rebuilt for view-priority resorting. cos(15°) ≈ 0.9659.
+/// Until the forward drift exceeds this the existing closest-first
+/// order is reused.
+pub const PLAN_REBUILD_FWD_COS: f64 = 0.9659;
+
+/// View-priority weight: a brick directly in the forward hemisphere
+/// has its effective scoring distance multiplied by `(1 - WEIGHT)`,
+/// so it loads ahead of an equally-distant brick behind the camera.
+/// 0.4 means a front-cone brick scores 60 % of a behind-camera brick
+/// at the same true distance — strong bias without flat-out skipping
+/// behind-camera tiles.
+pub const VIEW_PRIORITY_WEIGHT: f64 = 0.4;
 
 /// One rung of the progressive LOD ladder.
 ///
@@ -295,19 +330,124 @@ impl LoadedChunks {
     }
 }
 
+/// Cached plan + the observer state it was computed for.
+///
+/// Recomputing the full 4-tier AABB sweep + sort costs measurable CPU
+/// every frame (8 k+ keys at the default ladder). Most frames the
+/// observer hasn't moved enough to change the plan in any way that
+/// matters. This resource memoizes the last plan and only rebuilds
+/// when either the camera position drifts more than
+/// [`PLAN_REBUILD_DRIFT_M`] or the camera forward direction rotates
+/// past [`PLAN_REBUILD_FWD_COS`] (so the view-priority ordering can
+/// be re-applied when the player turns).
+#[derive(Resource, Default, Debug)]
+pub struct DesiredChunksCache {
+    /// `(observer, forward)` pair the cached plan was built for.
+    /// `None` ⇒ first frame, force a rebuild.
+    pub built_for: Option<(DVec3, DVec3)>,
+    /// Sorted brick keys, closest-first with view-priority bias if a
+    /// forward direction was supplied at rebuild time.
+    pub plan: Vec<(IVec3, Lod)>,
+}
+
+impl DesiredChunksCache {
+    /// Whether the cache should be invalidated and the plan rebuilt
+    /// given the current observer pose. Returns `true` on first frame
+    /// or if either the position-drift or yaw-drift threshold is
+    /// exceeded.
+    pub fn should_rebuild(&self, observer: DVec3, forward: DVec3) -> bool {
+        match self.built_for {
+            None => true,
+            Some((last_obs, last_fwd)) => {
+                let dx = observer.x - last_obs.x;
+                let dy = observer.y - last_obs.y;
+                let dz = observer.z - last_obs.z;
+                let drift = (dx * dx + dy * dy + dz * dz).sqrt();
+                if drift > PLAN_REBUILD_DRIFT_M {
+                    return true;
+                }
+                let dot = forward.x * last_fwd.x
+                    + forward.y * last_fwd.y
+                    + forward.z * last_fwd.z;
+                // forward dirs are unit-length; dot < threshold ⇒ angle
+                // grew past the rebuild cone.
+                dot < PLAN_REBUILD_FWD_COS
+            }
+        }
+    }
+
+    /// Replace the cached plan, recording the pose it was built for.
+    pub fn set(&mut self, observer: DVec3, forward: DVec3, plan: Vec<(IVec3, Lod)>) {
+        self.built_for = Some((observer, forward));
+        self.plan = plan;
+    }
+}
+
+/// Re-sort a [`desired_chunks`] plan to load forward-facing bricks first.
+///
+/// Each entry's effective ordering distance is multiplied by
+/// `(1 - VIEW_PRIORITY_WEIGHT * max(0, cos_angle_with_forward))` so a
+/// brick directly in front loads ahead of an equally distant brick
+/// behind or beside the camera. Bricks behind the camera retain their
+/// natural closest-first ordering relative to each other.
+pub fn prioritize_view(plan: &mut [(IVec3, Lod)], observer: DVec3, forward: DVec3) {
+    let brick_edge_v = BRICK_EDGE as f64;
+    plan.sort_by(|a, b| {
+        let sa = view_priority_score(a, observer, forward, brick_edge_v);
+        let sb = view_priority_score(b, observer, forward, brick_edge_v);
+        sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Effective ordering distance for [`prioritize_view`]. Exposed for
+/// unit tests; production callers use [`prioritize_view`] directly.
+pub fn view_priority_score(
+    entry: &(IVec3, Lod),
+    observer: DVec3,
+    forward: DVec3,
+    brick_edge_v: f64,
+) -> f64 {
+    let (coord, lod) = entry;
+    let scale = (1u64 << lod.depth as u32) as f64;
+    let edge_m = brick_edge_v * scale;
+    let cx = (coord.x as f64 + 0.5) * edge_m - observer.x;
+    let cy = (coord.y as f64 + 0.5) * edge_m - observer.y;
+    let cz = (coord.z as f64 + 0.5) * edge_m - observer.z;
+    let d = (cx * cx + cy * cy + cz * cz).sqrt();
+    if d <= f64::EPSILON {
+        return 0.0;
+    }
+    let cos_fwd = (cx * forward.x + cy * forward.y + cz * forward.z) / d;
+    let bias = VIEW_PRIORITY_WEIGHT * cos_fwd.max(0.0);
+    d * (1.0 - bias)
+}
+
 /// Build a closest-first sorted list of `(coord, lod)` brick keys that
 /// should be loaded for the given observer.
 ///
 /// For each tier in the ladder, the call enumerates the AABB of brick
 /// coords that intersect a sphere of radius `tier.outer_radius_m`
-/// centered on `observer`, in that tier's brick grid. A brick is
-/// emitted at tier `i` only if its center distance lies inside that
-/// tier's band — `prev_tier.outer_radius_m <= d < tier.outer_radius_m`.
-/// This **radial** check is the load shape; it produces a symmetric
-/// ring in all four horizontal directions (the prior 2-tier
-/// implementation used cubes whose corners were ~73 % farther than
-/// their faces, which produced visible directional asymmetry as the
-/// observer walked).
+/// centered on `observer`, in that tier's brick grid. Whether a brick
+/// that's fully covered by a finer tier is included depends on
+/// [`LodCoveragePolicy::mask_finer_covered`]:
+///
+/// - `mask_finer_covered() == true` ([`crate::render::defaults::MaskedShells`]):
+///   each tier emits only its shell band
+///   (`prev_tier.outer_radius_m <= d < tier.outer_radius_m`). One brick
+///   per region — LOD transitions pop because the parent must be
+///   generated when the child becomes ineligible.
+/// - `mask_finer_covered() == false` ([`crate::render::defaults::NestedSummary`],
+///   the default): every tier emits its full inner sphere
+///   (`0 <= d < tier.outer_radius_m`), so each region is covered by
+///   the finer LOD *and* every coarser parent simultaneously. The
+///   FP renderer's visibility system keeps only the finest visible
+///   per region; the parents are pre-cached "summaries" that fade in
+///   instantly when the child unloads, eliminating the LOD pop.
+///
+/// The **radial** outer test produces a symmetric ring in all four
+/// horizontal directions (the prior 2-tier implementation used cubes
+/// whose corners were ~73 % farther than their faces, which produced
+/// visible directional asymmetry as the observer walked).
 ///
 /// `horizon_m` is `f64::INFINITY` for flat tiers (cube worlds) and the
 /// surface-horizon distance for spherical bodies — radii are clamped to
@@ -316,12 +456,14 @@ pub fn desired_chunks(
     streamer: &ChunkStreamer,
     observer: DVec3,
     horizon_m: f64,
+    coverage: &dyn LodCoveragePolicy,
 ) -> Vec<(IVec3, Lod)> {
     let mut out: Vec<(IVec3, Lod)> = Vec::new();
     if streamer.ladder.tiers.is_empty() {
         return out;
     }
     let brick_edge_v = BRICK_EDGE as f64;
+    let mask_inner = coverage.mask_finer_covered();
 
     for (i, tier) in streamer.ladder.tiers.iter().enumerate() {
         let (inner_r, outer_r) = streamer.ladder.tier_band_m(i);
@@ -329,7 +471,10 @@ pub fn desired_chunks(
         // bodies. Inner is also clamped so the band stays non-degenerate
         // when horizon shrinks below the ladder.
         let outer_r = outer_r.min(horizon_m);
-        let inner_r = inner_r.min(outer_r);
+        // For NestedSummary (mask_inner == false) the parent stays
+        // resident underneath the finer tier, so the inner band starts
+        // at 0 — every tier emits its full inner sphere.
+        let inner_r = if mask_inner { inner_r.min(outer_r) } else { 0.0 };
         if outer_r <= 0.0 {
             continue;
         }
@@ -424,16 +569,32 @@ pub struct ChunkStreamerPlugin;
 impl Plugin for ChunkStreamerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChunkStreamer>()
-            .init_resource::<LoadedChunks>();
+            .init_resource::<LoadedChunks>()
+            .init_resource::<DesiredChunksCache>();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::defaults::{MaskedShells, NestedSummary};
 
     fn streamer() -> ChunkStreamer {
         ChunkStreamer::default()
+    }
+
+    /// Helper: shell-only coverage matching pre-nested-summary
+    /// behaviour. Every desired_chunks call in the legacy tests below
+    /// uses this so the assertions about shell ownership / inner-band
+    /// masking / centroid distribution still hold.
+    fn masked() -> MaskedShells {
+        MaskedShells
+    }
+
+    /// Helper: nested coverage — every tier emits its full inner
+    /// sphere, parent stays resident under the finer tier.
+    fn nested() -> NestedSummary {
+        NestedSummary
     }
 
     /// Helper: drop the LOD depth and return the set of XZ brick
@@ -491,7 +652,7 @@ mod tests {
         // span is exactly the reflection of `x`'s span across zero).
         let s = streamer();
         let obs = DVec3::new(0.0, 0.0, 0.0);
-        let plan = desired_chunks(&s, obs, f64::INFINITY);
+        let plan = desired_chunks(&s, obs, f64::INFINITY, &masked());
 
         for depth in 0u8..=3 {
             let set = xz_set_at_lod(&plan, depth);
@@ -540,7 +701,7 @@ mod tests {
         ];
         let counts: Vec<usize> = positions
             .iter()
-            .map(|p| desired_chunks(&s, *p, f64::INFINITY).len())
+            .map(|p| desired_chunks(&s, *p, f64::INFINITY, &masked()).len())
             .collect();
         let first = counts[0];
         for (i, n) in counts.iter().enumerate() {
@@ -574,7 +735,7 @@ mod tests {
             DVec3::new(0.5, 0.5, 0.5),
         ];
         for obs in cases {
-            let plan = desired_chunks(&s, obs, f64::INFINITY);
+            let plan = desired_chunks(&s, obs, f64::INFINITY, &masked());
             assert!(!plan.is_empty(), "plan must not be empty at {obs:?}");
             let mut sum = DVec3::ZERO;
             for (c, lod) in &plan {
@@ -609,7 +770,7 @@ mod tests {
         // sphere — equivalently, the brick AABB intersects the horizon.
         let s = streamer();
         let obs = DVec3::new(0.0, 0.0, 0.0);
-        let plan = desired_chunks(&s, obs, f64::INFINITY);
+        let plan = desired_chunks(&s, obs, f64::INFINITY, &masked());
         let outer = s.outer_radius_m();
         let outer_sq = outer * outer;
         let brick_edge_v = BRICK_EDGE as f64;
@@ -644,7 +805,7 @@ mod tests {
     fn no_gaps_at_tier_boundaries() {
         let s = streamer();
         let obs = DVec3::new(0.0, 0.0, 0.0);
-        let plan = desired_chunks(&s, obs, f64::INFINITY);
+        let plan = desired_chunks(&s, obs, f64::INFINITY, &masked());
         let brick_edge_v = BRICK_EDGE as f64;
 
         // Build a per-LOD set so AABB membership tests are cheap.
@@ -697,7 +858,7 @@ mod tests {
     #[test]
     fn desired_chunks_emits_distinct_keys() {
         let s = streamer();
-        let chunks = desired_chunks(&s, DVec3::new(0.0, 0.0, 0.0), f64::INFINITY);
+        let chunks = desired_chunks(&s, DVec3::new(0.0, 0.0, 0.0), f64::INFINITY, &masked());
         let mut seen: std::collections::HashSet<(IVec3, u8)> = Default::default();
         for (c, l) in &chunks {
             assert!(
@@ -712,7 +873,7 @@ mod tests {
     #[test]
     fn closest_first_sort_orders_by_meters_across_tiers() {
         let s = streamer();
-        let chunks = desired_chunks(&s, DVec3::new(0.0, 0.0, 0.0), f64::INFINITY);
+        let chunks = desired_chunks(&s, DVec3::new(0.0, 0.0, 0.0), f64::INFINITY, &masked());
         // The first emitted brick must be at the highest fidelity
         // (depth 0) — it's the one straddling the observer.
         let first = chunks.first().expect("at least one chunk");
@@ -745,7 +906,7 @@ mod tests {
         // shell out of subsequent tiers' fetches.
         let s = streamer();
         let obs = DVec3::new(0.0, 0.0, 0.0);
-        let plan = desired_chunks(&s, obs, f64::INFINITY);
+        let plan = desired_chunks(&s, obs, f64::INFINITY, &masked());
         // Take a small near-origin brick at L0 and check the
         // L1-grid brick covering the same point is NOT in the set.
         let l0 = (IVec3::new(0, 0, 0), Lod::new(0));
@@ -840,6 +1001,99 @@ mod tests {
     // Horizon clamp (spherical worlds)
     // -----------------------------------------------------------------
 
+    // -----------------------------------------------------------------
+    // DesiredChunksCache — rebuild thresholds
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn cache_first_frame_forces_rebuild() {
+        let cache = DesiredChunksCache::default();
+        // No `built_for` ⇒ rebuild regardless of pose.
+        assert!(cache.should_rebuild(DVec3::ZERO, DVec3::new(0.0, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn cache_skips_rebuild_under_position_threshold() {
+        let mut cache = DesiredChunksCache::default();
+        let obs = DVec3::new(0.0, 0.0, 0.0);
+        let fwd = DVec3::new(0.0, 0.0, 1.0);
+        cache.set(obs, fwd, vec![]);
+        // 1 m drift << 4 m threshold ⇒ reuse cache.
+        let next = DVec3::new(1.0, 0.0, 0.0);
+        assert!(!cache.should_rebuild(next, fwd));
+    }
+
+    #[test]
+    fn cache_rebuilds_past_position_threshold() {
+        let mut cache = DesiredChunksCache::default();
+        let obs = DVec3::new(0.0, 0.0, 0.0);
+        let fwd = DVec3::new(0.0, 0.0, 1.0);
+        cache.set(obs, fwd, vec![]);
+        // 5 m drift > 4 m threshold ⇒ rebuild.
+        let next = DVec3::new(5.0, 0.0, 0.0);
+        assert!(cache.should_rebuild(next, fwd));
+    }
+
+    #[test]
+    fn cache_rebuilds_when_camera_turns_past_threshold() {
+        let mut cache = DesiredChunksCache::default();
+        let obs = DVec3::new(0.0, 0.0, 0.0);
+        let fwd0 = DVec3::new(0.0, 0.0, 1.0);
+        cache.set(obs, fwd0, vec![]);
+        // 20° rotation (cos ≈ 0.94) > 15° threshold (cos ≈ 0.9659) ⇒ rebuild.
+        let theta = 20.0_f64.to_radians();
+        let fwd1 = DVec3::new(theta.sin(), 0.0, theta.cos());
+        assert!(cache.should_rebuild(obs, fwd1));
+    }
+
+    #[test]
+    fn cache_reuses_under_small_camera_turn() {
+        let mut cache = DesiredChunksCache::default();
+        let obs = DVec3::new(0.0, 0.0, 0.0);
+        let fwd0 = DVec3::new(0.0, 0.0, 1.0);
+        cache.set(obs, fwd0, vec![]);
+        // 5° rotation (cos ≈ 0.9962) > cos(15°) ⇒ reuse.
+        let theta = 5.0_f64.to_radians();
+        let fwd1 = DVec3::new(theta.sin(), 0.0, theta.cos());
+        assert!(!cache.should_rebuild(obs, fwd1));
+    }
+
+    // -----------------------------------------------------------------
+    // View priority sort
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn view_priority_pulls_forward_brick_ahead_of_equidistant_behind() {
+        let observer = DVec3::new(0.0, 0.0, 0.0);
+        let forward = DVec3::new(0.0, 0.0, 1.0); // +Z
+        let brick_edge_v = BRICK_EDGE as f64;
+        // Two bricks at same true distance but on opposite Z sides.
+        let in_front = (IVec3::new(0, 0, 5), Lod::new(0));
+        let behind = (IVec3::new(0, 0, -6), Lod::new(0));
+        let s_front = view_priority_score(&in_front, observer, forward, brick_edge_v);
+        let s_behind = view_priority_score(&behind, observer, forward, brick_edge_v);
+        assert!(
+            s_front < s_behind,
+            "forward brick (score={s_front}) should sort ahead of behind brick (score={s_behind})"
+        );
+    }
+
+    #[test]
+    fn prioritize_view_keeps_closest_first_within_each_hemisphere() {
+        let observer = DVec3::new(0.0, 0.0, 0.0);
+        let forward = DVec3::new(0.0, 0.0, 1.0);
+        let mut plan = vec![
+            (IVec3::new(0, 0, 9), Lod::new(0)),  // far ahead
+            (IVec3::new(0, 0, 3), Lod::new(0)),  // near ahead
+            (IVec3::new(0, 0, -10), Lod::new(0)), // far behind
+        ];
+        prioritize_view(&mut plan, observer, forward);
+        // Near-ahead first, then far-ahead, then far-behind.
+        assert_eq!(plan[0].0.z, 3);
+        assert_eq!(plan[1].0.z, 9);
+        assert_eq!(plan[2].0.z, -10);
+    }
+
     #[test]
     fn horizon_clamp_truncates_outer_tier() {
         // With AABB-based outer test, a brick is loaded iff its NEAR
@@ -851,7 +1105,7 @@ mod tests {
         let obs = DVec3::new(0.0, 0.0, 0.0);
         let brick_edge_v = BRICK_EDGE as f64;
         for horizon in [100.0_f64, 300.0_f64] {
-            let plan = desired_chunks(&s, obs, horizon);
+            let plan = desired_chunks(&s, obs, horizon, &masked());
             let horizon_sq = horizon * horizon;
             for (c, lod) in &plan {
                 let edge_m = brick_edge_v * (1u64 << lod.depth as u32) as f64;
@@ -869,6 +1123,128 @@ mod tests {
                      d={} is past the horizon",
                     lod.depth,
                     near_d2.sqrt()
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // NestedSummary coverage policy
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn nested_summary_keeps_parent_under_inner_shell() {
+        // Regression-spec for the LOD-pop fix. With NestedSummary, the
+        // L1 brick at the origin (which spans world meters [0, 32) per
+        // axis and is fully covered by the L0 tier) MUST be in the
+        // desired set — that's what gives the renderer an instant
+        // summary backdrop when the L0 brick fades out. The
+        // `near_tier_bricks_dont_overlap_far_tier_at_same_position`
+        // test above is the opposite assertion under MaskedShells; the
+        // two policies should produce mutually exclusive results here.
+        let s = streamer();
+        let plan = desired_chunks(&s, DVec3::ZERO, f64::INFINITY, &nested());
+        let l0_origin = (IVec3::new(0, 0, 0), Lod::new(0));
+        let l1_origin = (IVec3::new(0, 0, 0), Lod::new(1));
+        let l2_origin = (IVec3::new(0, 0, 0), Lod::new(2));
+        let l3_origin = (IVec3::new(0, 0, 0), Lod::new(3));
+        assert!(plan.contains(&l0_origin), "L0 origin should always load");
+        assert!(
+            plan.contains(&l1_origin),
+            "NestedSummary must keep the L1 parent loaded under the L0 shell"
+        );
+        assert!(
+            plan.contains(&l2_origin),
+            "NestedSummary must keep the L2 grandparent loaded too"
+        );
+        assert!(
+            plan.contains(&l3_origin),
+            "NestedSummary must keep the L3 great-grandparent loaded"
+        );
+    }
+
+    #[test]
+    fn nested_summary_inflates_brick_count_within_expected_bound() {
+        // The nested policy loads every tier as a full inner sphere,
+        // so brick counts grow. Each coarser tier covers 8× the
+        // volume per brick, so the parent count is ~1/8 of the child
+        // count — total inflation is bounded by roughly
+        // 1 + 1/8 + 1/64 + 1/512 ≈ 1.14×. We assert the masked count
+        // is strictly less than nested, and nested is < 1.3 × masked.
+        let s = streamer();
+        let masked_plan = desired_chunks(&s, DVec3::ZERO, f64::INFINITY, &masked());
+        let nested_plan = desired_chunks(&s, DVec3::ZERO, f64::INFINITY, &nested());
+        assert!(
+            nested_plan.len() > masked_plan.len(),
+            "NestedSummary must produce more bricks than MaskedShells \
+             (got nested={} masked={})",
+            nested_plan.len(),
+            masked_plan.len()
+        );
+        let ratio = nested_plan.len() as f64 / masked_plan.len() as f64;
+        assert!(
+            ratio < 1.30,
+            "NestedSummary inflation ratio {ratio:.3} exceeds the 1.30 \
+             bound (nested={} masked={})",
+            nested_plan.len(),
+            masked_plan.len()
+        );
+    }
+
+    #[test]
+    fn nested_summary_every_loaded_brick_has_parent_until_outermost() {
+        // The point of NestedSummary is: every brick that isn't at the
+        // outermost tier has its immediate-coarser-LOD parent also
+        // loaded. Without that invariant the LOD crossfade in
+        // `fp_update_lod_visibility` has nothing to reveal.
+        let s = streamer();
+        let plan = desired_chunks(&s, DVec3::ZERO, f64::INFINITY, &nested());
+        let outer_depth = s.ladder.tiers.last().unwrap().lod.depth;
+        let plan_set: std::collections::HashSet<(IVec3, u8)> =
+            plan.iter().map(|(c, l)| (*c, l.depth)).collect();
+        for (coord, lod) in &plan {
+            if lod.depth >= outer_depth {
+                continue;
+            }
+            let parent = (
+                IVec3::new(
+                    coord.x.div_euclid(2),
+                    coord.y.div_euclid(2),
+                    coord.z.div_euclid(2),
+                ),
+                lod.depth + 1,
+            );
+            assert!(
+                plan_set.contains(&parent),
+                "NestedSummary: child {coord:?} lod={} has no parent {:?} \
+                 at lod={} in the desired set — crossfade would have \
+                 nothing to reveal",
+                lod.depth,
+                parent.0,
+                parent.1,
+            );
+        }
+    }
+
+    #[test]
+    fn nested_summary_passes_symmetry_check() {
+        // The reflection/rotation symmetry tests in the legacy block
+        // run on MaskedShells. Make sure NestedSummary preserves the
+        // same symmetry so the new policy doesn't reintroduce the
+        // directional-asymmetry bug.
+        let s = streamer();
+        let plan = desired_chunks(&s, DVec3::ZERO, f64::INFINITY, &nested());
+        for depth in 0u8..=3 {
+            let set = xz_set_at_lod(&plan, depth);
+            assert!(!set.is_empty(), "nested: depth={depth} produced no bricks");
+            for &(x, z) in &set {
+                assert!(
+                    set.contains(&(-x - 1, z)),
+                    "nested depth={depth}: X-asymmetry at ({x},{z})"
+                );
+                assert!(
+                    set.contains(&(x, -z - 1)),
+                    "nested depth={depth}: Z-asymmetry at ({x},{z})"
                 );
             }
         }

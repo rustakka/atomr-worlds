@@ -170,6 +170,17 @@ events so scenarios can capture A/B comparisons deterministically.
 - **Hysteresis** — chunks linger two streamer ticks past their
   desired-set boundary before despawn so single-step jitter
   doesn't re-mesh.
+- **Nested-summary LOD coverage** — `LodCoveragePolicy` strategy
+  decides whether each tier is loaded only as its shell band
+  (`MaskedShells`, historical) or as the full inner sphere
+  (`NestedSummary`, the default). The default keeps every coarser
+  parent brick resident underneath the finer LOD so the FP
+  visibility system (`fp_update_lod_visibility`) can crossfade
+  between tiers when the camera moves across a boundary —
+  `BrickFadeOut` shrinks the child while `BrickFadeIn` blooms the
+  parent, eliminating the LOD pop. Memory inflation is bounded:
+  the 4-tier ladder grows by ≲ 15 % bricks
+  (`harness/scenes/lod_crossfade*.toml` is the visual A/B).
 
 ### CPU + headless path (Phase 2 / Phase 13g)
 

@@ -182,3 +182,37 @@ pub trait TonemapStrategy: Send + Sync + 'static {
         None
     }
 }
+
+// ---------------------------------------------------------------------------
+// LOD coverage policy
+// ---------------------------------------------------------------------------
+
+/// Decides whether the progressive chunk streamer keeps a coarser LOD
+/// brick loaded *underneath* a finer-LOD shell that already covers it.
+///
+/// Two impls ship today (see [`super::defaults`]):
+/// - `MaskedShells` — historical behaviour: each tier loads only its
+///   shell, no overlap. Cheaper memory, but the transition from one
+///   LOD to the next is a hard pop because the coarser brick has to
+///   be generated + meshed the moment the finer one becomes
+///   ineligible.
+/// - `NestedSummary` — every tier loads its full inner sphere up to
+///   its outer radius. The parent LOD is always resident as a
+///   "summary" backdrop, so when a finer brick fades out the parent
+///   is already in memory and just toggles visible / fades in. This
+///   is the default; it eliminates the per-transition generation
+///   stall and lets the visibility system crossfade between tiers.
+///
+/// The trait is intentionally narrow: a single predicate that the
+/// inner-band test in [`crate::world_stream::desired_chunks`] consults.
+/// `MaskedShells` keeps the existing mask; `NestedSummary` disables it.
+pub trait LodCoveragePolicy: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    /// Whether a brick whose volume is fully inside the inner-band
+    /// sphere (i.e. covered by the finer tier) should be skipped.
+    ///
+    /// `true`  → behave like `MaskedShells` (skip — one tier per shell).
+    /// `false` → behave like `NestedSummary` (keep — parent stays loaded
+    /// as a fallback summary).
+    fn mask_finer_covered(&self) -> bool;
+}

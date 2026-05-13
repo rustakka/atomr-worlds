@@ -1,0 +1,141 @@
+# LOD transition crossfade — climb to altitude, then sprint across an
+# LOD boundary while capturing one shot per ~6 frames. The point is to
+# step through the resulting PNGs and confirm the boundary handoff is a
+# smooth crossfade (parent LOD already resident, fades in while the
+# child fades out) rather than a hard frame-to-frame pop.
+#
+# NestedSummary is the default coverage policy and is active here; the
+# `lod_crossfade_legacy.toml` companion scenario flips back to
+# MaskedShells for a side-by-side comparison.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "lod_crossfade"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Confirm we're on NestedSummary explicitly even though it's the
+# default — makes the scenario self-describing if defaults change.
+[[events]]
+frame = 0
+kind     = "set_strategy"
+slot     = "coverage"
+strategy = "NestedSummary"
+
+# Climb to ~80 m altitude so the brick grid is visible and the camera
+# can fly cleanly across an LOD boundary without being interrupted by
+# terrain collisions.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "Space"
+[[events]]
+frame = 405
+kind  = "key_release"
+key   = "Space"
+[[events]]
+frame = 405
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Pitch down ~35° so the LOD rings are clearly visible as concentric
+# bands rather than just sky / horizon.
+[[events]]
+frame = 420
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 432
+kind  = "key_release"
+key   = "ArrowDown"
+
+# Let the streamer settle before we capture the baseline.
+[[events]]
+frame = 620
+kind  = "screenshot"
+note  = "settled — baseline"
+
+# Sprint forward (W + Shift) across the L0/L1 boundary. The default
+# L0 outer radius is 128 m, so sprint speed should hit at least one
+# crossing inside the capture window.
+[[events]]
+frame = 630
+kind  = "key_press"
+key   = "KeyW"
+[[events]]
+frame = 630
+kind  = "key_press"
+key   = "ShiftLeft"
+
+# Capture every ~10 frames during the sprint so the boundary crossing
+# is densely sampled. A pop would show as a sudden change between
+# adjacent frames; a crossfade is a gradient.
+[[events]]
+frame = 640
+kind  = "screenshot"
+note  = "t+0.17s into sprint"
+[[events]]
+frame = 660
+kind  = "screenshot"
+note  = "t+0.50s into sprint"
+[[events]]
+frame = 680
+kind  = "screenshot"
+note  = "t+0.83s into sprint"
+[[events]]
+frame = 700
+kind  = "screenshot"
+note  = "t+1.17s into sprint"
+[[events]]
+frame = 720
+kind  = "screenshot"
+note  = "t+1.50s into sprint"
+[[events]]
+frame = 740
+kind  = "screenshot"
+note  = "t+1.83s into sprint"
+[[events]]
+frame = 760
+kind  = "screenshot"
+note  = "t+2.17s into sprint"
+[[events]]
+frame = 780
+kind  = "screenshot"
+note  = "t+2.50s into sprint"
+[[events]]
+frame = 800
+kind  = "screenshot"
+note  = "t+2.83s into sprint"
+[[events]]
+frame = 820
+kind  = "screenshot"
+note  = "t+3.17s into sprint"
+
+[[events]]
+frame = 830
+kind  = "key_release"
+key   = "KeyW"
+[[events]]
+frame = 830
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Settle frame after the stop.
+[[events]]
+frame = 880
+kind  = "screenshot"
+note  = "settled after sprint"
+
+[[events]]
+frame = 900
+kind  = "exit"

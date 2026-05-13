@@ -25,6 +25,11 @@ pub struct RenderConfig {
     pub shadow:    Arc<dyn ShadowStrategy>,
     pub fog:       Arc<dyn FogStrategy>,
     pub tonemap:   Arc<dyn TonemapStrategy>,
+    /// Decides whether coarser-LOD bricks stay resident underneath
+    /// finer-LOD shells (`NestedSummary`, the default — smoother LOD
+    /// transitions, ~15 % more bricks) or are masked out
+    /// (`MaskedShells` — historical, one tier per shell).
+    pub coverage:  Arc<dyn LodCoveragePolicy>,
     /// If true, [`super::WorldTime`] advances each frame; if false (the
     /// default), it only moves when the harness or user code sets it.
     pub time_advances_automatically: bool,
@@ -48,6 +53,7 @@ impl Default for RenderConfig {
             shadow:    Arc::new(BasicCascades::default()),
             fog:       Arc::new(ExpSquaredSkyTintedFog::default()),
             tonemap:   Arc::new(AcesTonemap),
+            coverage:  Arc::new(NestedSummary),
             time_advances_automatically: false,
             seconds_per_hour: 60.0,
         }
@@ -61,7 +67,9 @@ impl RenderConfig {
         match preset {
             RenderPreset::Legacy => {
                 // Pre-upgrade defaults: greedy mesh, no AO, static sun,
-                // no shadows, flat sky, no fog, stock tonemap.
+                // no shadows, flat sky, no fog, stock tonemap. Keeps the
+                // historical one-tier-per-shell coverage so the preset
+                // really is "what it was".
                 self.mesher = Arc::new(GreedyFlat);
                 self.ao = Arc::new(NoAo);
                 self.shading = Arc::new(LegacyVertexColor);
@@ -70,6 +78,7 @@ impl RenderConfig {
                 self.shadow = Arc::new(NoShadows);
                 self.fog = Arc::new(NoFog);
                 self.tonemap = Arc::new(DefaultTonemap);
+                self.coverage = Arc::new(MaskedShells);
             }
             RenderPreset::Stylized => {
                 self.ao = Arc::new(MinecraftCornerAo);

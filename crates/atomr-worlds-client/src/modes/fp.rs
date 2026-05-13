@@ -1,40 +1,65 @@
 //! Phase 14a — 1st-person walk, native Bevy 3D.
 //!
 //! - `WalkCamera` (from `atomr-worlds-view`) drives input → pose.
-//! - Each frame we ensure a fixed-radius cube of bricks around the camera is
-//!   loaded into Bevy as `PbrBundle`s; bricks that fall outside the cube are
-//!   despawned. Greedy-meshing uses `atomr-worlds-view::mesh::greedy_mesh`.
-//! - Vertex colors carry per-material RGB so we render with a single
-//!   `StandardMaterial`.
-
-use std::collections::HashMap;
+//! - Each frame we reconcile a desired-set of `(brick_coord, lod)` keys
+//!   from the [`crate::world_stream::ChunkStreamer`] against the entities
+//!   currently loaded into Bevy. Greedy-meshing uses
+//!   `atomr-worlds-view::mesh::greedy_mesh`. Per-material vertex colors
+//!   carry RGB so we can render through a single `StandardMaterial`.
+//!
+//! # LOD-transition pipeline
+//!
+//! The streamer is parameterised by a
+//! [`crate::render::LodCoveragePolicy`]. With the default
+//! [`crate::render::defaults::NestedSummary`] every region of the world
+//! is covered by the finest LOD *and* every coarser parent LOD
+//! simultaneously — parents are pre-cached "summaries" that the renderer
+//! can fall back to instantly when a finer brick unloads.
+//!
+//! Two systems collaborate to keep the screen showing the right LOD per
+//! region without popping:
+//!
+//! - [`fp_update_lod_visibility`] runs each frame, walks every loaded
+//!   brick, and hides any whose immediate finer children are all
+//!   resident (and not currently fading out). Bricks transitioning
+//!   from hidden → visible get a fresh [`BrickFadeIn`] so the reveal
+//!   blooms instead of popping.
+//! - [`fp_animate_fade_out`] handles the despawn side: when a brick
+//!   exits the desired set past the hysteresis window, the streamer
+//!   attaches [`BrickFadeOut`] instead of destroying the entity
+//!   immediately. The fade-out lasts longer than the fade-in by
+//!   design — the overlap is the crossfade that smooths the LOD
+//!   handoff.
+//!
+//! See [`crate::world_stream`] for the streaming-side rationale and
+//! `harness/scenes/lod_crossfade*.toml` for the A/B visual regression
+//! scenarios that drive a camera across a tier boundary under each
+//! policy.
 
 use atomr_worlds_core::addr::WorldAddr;
 use atomr_worlds_core::coord::{DVec3, IVec3};
-use atomr_worlds_core::lod::Lod;
 use atomr_worlds_core::vehicle::ContainingFrame;
-use atomr_worlds_view::{
-    greedy_mesh_by_material, WalkCamera, WalkInput, WorldQuery,
-};
+use atomr_worlds_view::{WalkCamera, WalkInput, WorldQuery};
 // (WorldQuery brings ground_height_m into scope.)
 use atomr_worlds_voxel::BRICK_EDGE;
 use bevy::core_pipeline::bloom::BloomSettings;
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::MouseMotion;
-use bevy::pbr::FogSettings;
 use bevy::prelude::*;
-use bevy::render::camera::{Exposure, RenderTarget};
+use bevy::render::camera::RenderTarget;
 use bevy::render::mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
+use crate::brick_gen::{BrickGenWorkers, BrickReady, DEFAULT_SPAWN_BUDGET};
 use crate::render::{
     OffscreenTarget, PaletteEntryGpu, RenderConfig, ShadingMode, SkyboxRuntime, VoxelMaterial,
     VoxelMaterialExt, WorldSunMarker,
 };
 use crate::view_mode::ViewMode;
 use crate::world_runtime::{ActiveWorld, WorldRuntime};
-use crate::world_stream::{desired_chunks, ChunkStreamer, LoadedChunk, LoadedChunks};
+use crate::world_stream::{
+    desired_chunks, prioritize_view, ChunkStreamer, DesiredChunksCache, LoadedChunk, LoadedChunks,
+};
 
 pub struct FpPlugin;
 
@@ -52,12 +77,71 @@ impl Plugin for FpPlugin {
                     fp_input_look,
                     fp_sync_camera,
                     fp_stream_bricks,
+                    fp_update_lod_visibility,
+                    fp_animate_fade_in,
+                    fp_animate_fade_out,
                     fp_visibility_toggle,
                 )
                     .chain(),
             );
     }
 }
+
+/// Tags a freshly-spawned brick entity that is mid-fade-in. The
+/// streaming system installs it with `age = 0` and a per-LOD scale;
+/// [`fp_animate_fade_in`] tweens the `SpatialBundle` transform to
+/// full size over [`FADE_IN_SECONDS`] before removing the marker.
+#[derive(Component)]
+pub struct BrickFadeIn {
+    /// Seconds since spawn.
+    pub age: f32,
+    /// Final scale to land on (= the LOD's voxel-edge scale).
+    pub final_scale: f32,
+}
+
+/// Tags a brick entity that is fading out before despawn. Mirror of
+/// [`BrickFadeIn`]: the streaming system replaces immediate
+/// `despawn_recursive` with a scale shrink so the LOD transition has
+/// a soft tail rather than a frame-perfect pop. [`fp_animate_fade_out`]
+/// walks the scale to 0, then despawns and clears the corresponding
+/// [`LoadedChunks`] entry.
+#[derive(Component)]
+pub struct BrickFadeOut {
+    /// Seconds since the fade-out started.
+    pub age: f32,
+    /// Scale this brick was at when the fade-out began (= the LOD's
+    /// voxel-edge scale unless it was caught mid-fade-in).
+    pub from_scale: f32,
+    /// `(coord, lod_depth)` key for the matching [`LoadedChunks`]
+    /// entry, so the fade-out completion can drop the entry and
+    /// release the parent brick to the visibility system.
+    pub key: (IVec3, u8),
+}
+
+/// `(coord, lod_depth)` of the brick rendered by this entity. Stored
+/// on the parent spatial entity so the visibility system can match
+/// parent/child relationships across LODs without re-deriving them
+/// from `LoadedChunks`.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct BrickLod {
+    pub coord: IVec3,
+    pub depth: u8,
+}
+
+/// Duration of the per-brick scale-up reveal. Short — just enough to
+/// soften the pop-in. Combined with the existing exponential fog the
+/// load process looks like a ring expanding from the observer.
+pub const FADE_IN_SECONDS: f32 = 0.18;
+/// Starting scale fraction. 0.75 ⇒ each new brick is briefly 75 % of
+/// its final extent so it "blooms" into place rather than appearing
+/// in one frame.
+pub const FADE_IN_START_FRACTION: f32 = 0.75;
+
+/// Duration of the LOD-transition fade-out. Slightly longer than
+/// [`FADE_IN_SECONDS`] so the parent brick has time to scale up
+/// underneath while the child shrinks away — the two tweens overlap
+/// to produce a crossfade rather than a strict sequence.
+pub const FADE_OUT_SECONDS: f32 = 0.25;
 
 /// Marker for the 3D world camera.
 #[derive(Component)]
@@ -487,12 +571,13 @@ fn fp_sync_camera(
 #[allow(clippy::too_many_arguments)]
 fn fp_stream_bricks(
     state: Res<FpState>,
-    runtime: Res<WorldRuntime>,
     pool: Res<MaterialPool>,
     voxel_pool: Res<VoxelMaterialPool>,
     render_cfg: Res<RenderConfig>,
     mut streamer: ResMut<ChunkStreamer>,
     mut loaded: ResMut<LoadedChunks>,
+    mut plan_cache: ResMut<DesiredChunksCache>,
+    mut workers: ResMut<BrickGenWorkers>,
     mut meshes: ResMut<Assets<BevyMesh>>,
     mut commands: Commands,
 ) {
@@ -510,25 +595,48 @@ fn fp_stream_bricks(
     // We use the *world* position (no eye-height offset) so brick
     // boundaries are stable when crouching.
     let observer = state.walk.observer.position;
+    // Camera forward (world space) for view-priority sorting. Use the
+    // WalkCamera-derived target so it matches the rendered view.
+    let cam = state.walk.camera();
+    let target = DVec3::new(cam.target[0] as f64, cam.target[1] as f64, cam.target[2] as f64);
+    let mut forward = target - observer;
+    let mag = (forward.x * forward.x + forward.y * forward.y + forward.z * forward.z).sqrt();
+    if mag > 1e-6 {
+        forward.x /= mag;
+        forward.y /= mag;
+        forward.z /= mag;
+    } else {
+        forward = DVec3::new(0.0, 0.0, 1.0);
+    }
 
-    // Plan near + far rings. World tier defaults to an infinite horizon
-    // (the cube world); spherical bodies will pass their surface horizon
-    // here once the body-aware ContainingFrame plumbing lands (Phase 18).
-    let horizon_m = f64::INFINITY;
-    let mut desired = desired_chunks(&streamer, observer, horizon_m);
+    // Rebuild the desired-chunks plan only when the observer drifts or
+    // the camera turns past the configured thresholds. The full sweep
+    // costs ms on the default 4-tier ladder — caching it lets quiet
+    // frames spend almost no time in the streamer.
+    if plan_cache.should_rebuild(observer, forward) {
+        let horizon_m = f64::INFINITY;
+        let mut plan =
+            desired_chunks(&streamer, observer, horizon_m, render_cfg.coverage.as_ref());
+        prioritize_view(&mut plan, observer, forward);
+        plan_cache.set(observer, forward, plan);
+    }
 
     // Mark every desired chunk as "seen this frame" so the hysteresis
     // window resets while we're inside the ring.
-    for (coord, lod) in &desired {
+    for (coord, lod) in &plan_cache.plan {
         let key = LoadedChunk::key(*coord, *lod);
         if let Some(entry) = loaded.0.get_mut(&key) {
             entry.last_seen_frame = frame;
         }
     }
 
-    // Despawn chunks that have been outside the desired set for longer
-    // than the hysteresis window. `despawn_recursive` cascades to the
-    // per-material child meshes spawned below.
+    // Stale chunks (outside the desired set past the hysteresis window)
+    // start fading out instead of being immediately despawned. The
+    // [`fp_animate_fade_out`] system handles the eventual despawn +
+    // [`LoadedChunks`] removal once the scale reaches 0. We keep the
+    // entry in `LoadedChunks` while the fade plays so the visibility
+    // system still sees the brick as "loaded" and can keep the parent
+    // hidden until the crossfade hands off.
     let hyst = streamer.hysteresis_ticks;
     let stale_keys: Vec<(IVec3, u8)> = loaded
         .0
@@ -542,158 +650,61 @@ fn fp_stream_bricks(
         })
         .collect();
     for k in stale_keys {
-        if let Some(chunk) = loaded.0.remove(&k) {
-            if let Some(ent) = chunk.entity {
-                commands.entity(ent).despawn_recursive();
-            }
-        }
-    }
-
-    // Load up to the streamer's per-tick budget. `desired_chunks` is
-    // already sorted closest-first.
-    let mut budget = streamer.policy.bricks_per_tick as usize;
-    desired.retain(|(c, lod)| !loaded.0.contains_key(&LoadedChunk::key(*c, *lod)));
-    for (bc, lod) in desired {
-        if budget == 0 {
-            break;
-        }
-        let key = LoadedChunk::key(bc, lod);
-
-        // Per-LOD world-space scale: each voxel at depth L is 2^L meters
-        // wide, so a brick covers `BRICK_EDGE * 2^L` meters per side and
-        // the SpatialBundle inherits a uniform scale of 2^L.
-        let lod_scale = (1u64 << lod.depth as u32) as f32;
-        let edge_m = BRICK_EDGE as f32 * lod_scale;
-
-        let Some(brick) = runtime.query.brick(&state.addr, bc, lod) else {
-            // Empty / missing brick — record an entity-less placeholder so
-            // we don't re-query every frame.
-            loaded.0.insert(
-                key,
-                LoadedChunk { coord: bc, lod, entity: None, last_seen_frame: frame },
-            );
-            budget -= 1;
+        let Some(chunk) = loaded.0.get(&k) else { continue };
+        let Some(ent) = chunk.entity else {
+            // Empty-brick placeholder; nothing to fade. Drop it.
+            loaded.0.remove(&k);
             continue;
         };
-        let mut by_material = greedy_mesh_by_material(&brick);
-        if by_material.is_empty() {
-            loaded.0.insert(
-                key,
-                LoadedChunk { coord: bc, lod, entity: None, last_seen_frame: frame },
-            );
-            budget -= 1;
-            continue;
-        }
-        // Apply the AO strategy after splitting so each per-material
-        // submesh's vertices get their corner AO factors.
-        for sub_mesh in by_material.values_mut() {
-            render_cfg.ao.bake(sub_mesh, &brick);
-        }
-        let origin = Vec3::new(
-            (bc.x as f32) * edge_m,
-            (bc.y as f32) * edge_m,
-            (bc.z as f32) * edge_m,
-        );
-        let parent = commands
-            .spawn(SpatialBundle::from_transform(
-                Transform::from_translation(origin)
-                    .with_scale(Vec3::splat(lod_scale)),
-            ))
-            .id();
-        match shading_mode {
-            ShadingMode::SplitPerMaterial => {
-                for (mat_id, sub_mesh) in by_material.iter() {
-                    if sub_mesh.indices.is_empty() {
-                        continue;
-                    }
-                    let Some(material) = pool.handle_for(*mat_id) else { continue };
-                    let bevy_mesh = atomr_to_bevy_mesh(sub_mesh);
-                    let mesh_handle = meshes.add(bevy_mesh);
-                    commands.entity(parent).with_children(|p| {
-                        p.spawn((
-                            PbrBundle {
-                                mesh: mesh_handle,
-                                material: material.clone(),
-                                ..default()
-                            },
-                            BrickMesh,
-                        ));
-                    });
-                }
-            }
-            ShadingMode::PaletteVoxelMaterial => {
-                let Some(voxel_handle) = voxel_pool.handle.as_ref() else {
-                    loaded.0.insert(
-                        key,
-                        LoadedChunk { coord: bc, lod, entity: Some(parent), last_seen_frame: frame },
-                    );
-                    budget -= 1;
-                    continue;
-                };
-                let merged = merge_by_material(&by_material);
-                if !merged.indices().map(|i| i.is_empty()).unwrap_or(true) {
-                    let mesh_handle = meshes.add(merged);
-                    commands.entity(parent).with_children(|p| {
-                        p.spawn((
-                            MaterialMeshBundle::<VoxelMaterial> {
-                                mesh: mesh_handle,
-                                material: voxel_handle.clone(),
-                                ..default()
-                            },
-                            BrickMesh,
-                        ));
-                    });
-                }
-            }
-        }
-        loaded.0.insert(
-            key,
-            LoadedChunk { coord: bc, lod, entity: Some(parent), last_seen_frame: frame },
-        );
-        budget -= 1;
+        let from_scale = (1u64 << chunk.lod.depth as u32) as f32;
+        commands
+            .entity(ent)
+            .remove::<BrickFadeIn>()
+            .insert(BrickFadeOut { age: 0.0, from_scale, key: k });
     }
 
-    // Diagnostic: per-LOD per-side counts AND centroid drift. If loading
-    // is symmetric, the centroid of loaded brick centers should equal
-    // the observer (centroid_dx,dy,dz ≈ 0). Nonzero values prove
-    // directional bias. Gated on `ATOMR_STREAM_DIAG=1` so production
-    // runs stay quiet; the symmetry guarantee is exercised by the
-    // `desired_chunks_load_symmetrically_in_all_four_cardinal_directions`
-    // unit test in `world_stream.rs`.
-    if frame == 60 && std::env::var("ATOMR_STREAM_DIAG").is_ok() {
-        // One-shot terrain height probe at 16 cardinal/diagonal positions
-        // around the observer at radii 256, 512, 1024. If `ground_height_m`
-        // is heavily biased to one quadrant, that's a noise/terrain
-        // generator issue — NOT a streaming bug.
-        let mut sum = [0f64; 4]; // +X+Z, +X-Z, -X+Z, -X-Z
-        let mut cnt = [0u32; 4];
-        let radii = [256.0_f64, 512.0, 1024.0];
-        let dirs: [(f64, f64); 8] = [
-            (1.0, 0.0), (0.7071, 0.7071), (0.0, 1.0), (-0.7071, 0.7071),
-            (-1.0, 0.0), (-0.7071, -0.7071), (0.0, -1.0), (0.7071, -0.7071),
-        ];
-        for r in radii {
-            for (dx, dz) in dirs {
-                let x = observer.x + dx * r;
-                let z = observer.z + dz * r;
-                if let Some(h) = runtime.query.ground_height_m(&state.addr, [x, z]) {
-                    let qi = match (x - observer.x >= 0.0, z - observer.z >= 0.0) {
-                        (true, true) => 0,
-                        (true, false) => 1,
-                        (false, true) => 2,
-                        (false, false) => 3,
-                    };
-                    sum[qi] += h as f64;
-                    cnt[qi] += 1;
-                    eprintln!("TERRAIN_PROBE r={} dir=({:.2},{:.2}) world=({:.1},{:.1}) h={:.2}", r, dx, dz, x, z, h);
-                }
-            }
+    // Dispatch async fetches for desired-but-not-loaded bricks. The
+    // workers are capped at `MAX_IN_FLIGHT` so we don't pile up tasks
+    // during initial world fill; remaining work resumes next frame.
+    // We walk the (already view-priority-sorted) plan front-to-back so
+    // forward-facing bricks resolve first.
+    for (bc, lod) in plan_cache.plan.iter() {
+        if workers.is_saturated() {
+            break;
         }
-        for i in 0..4 {
-            let avg = if cnt[i] > 0 { sum[i] / cnt[i] as f64 } else { f64::NAN };
-            eprintln!("TERRAIN_QUAD q{}: avg_h={:.2} n={}", i, avg, cnt[i]);
+        let key = LoadedChunk::key(*bc, *lod);
+        if loaded.0.contains_key(&key) {
+            continue;
         }
+        if workers.contains(&key) {
+            continue;
+        }
+        workers.dispatch(state.addr, *bc, *lod);
     }
+
+    // Drain completed brick fetches and convert them into Bevy entities.
+    // Capped per frame so mesh-asset upload stays inside the frame
+    // budget — running a 64-brick backlog through `meshes.add` on one
+    // frame produces a visible hitch.
+    let ready_batch = workers.drain(DEFAULT_SPAWN_BUDGET);
+    for ready in ready_batch {
+        spawn_brick_entity(
+            ready,
+            frame,
+            shading_mode,
+            &pool,
+            &voxel_pool,
+            &mut meshes,
+            &mut commands,
+            &mut loaded,
+        );
+    }
+
+    // Diagnostic (mesh quadrant counts). The original frame==60 terrain
+    // height probe was dropped when the streamer moved to async dispatch
+    // — its job (catch directional asymmetry in `ground_height_m`) is
+    // already covered by `desired_chunks_load_symmetrically_in_all_four_cardinal_directions`
+    // in `world_stream.rs`.
     if frame % 60 == 0 && std::env::var("ATOMR_STREAM_DIAG").is_ok() {
         // Per-quadrant counts of MESH-bearing entities (entity: Some(_)),
         // i.e., the bricks that actually contribute geometry to the render.
@@ -732,6 +743,266 @@ fn fp_stream_bricks(
             q_no_mesh[0], q_no_mesh[1], q_no_mesh[2], q_no_mesh[3],
             sum_cx / n, sum_cz / n,
         );
+    }
+}
+
+/// Build the Bevy entity for a single async-streamed brick.
+///
+/// Called on the main thread from `fp_stream_bricks` once a
+/// [`BrickReady`] payload arrives from the worker pool. Splits into
+/// per-material child meshes (`SplitPerMaterial`) or builds the
+/// merged mesh + `VoxelMaterial` draw (`PaletteVoxelMaterial`) per
+/// the active [`ShadingMode`].
+///
+/// Empty / missing bricks still record a `LoadedChunk` placeholder so
+/// the streamer doesn't re-dispatch the same key every frame.
+#[allow(clippy::too_many_arguments)]
+fn spawn_brick_entity(
+    ready: BrickReady,
+    frame: u64,
+    shading_mode: ShadingMode,
+    pool: &MaterialPool,
+    voxel_pool: &VoxelMaterialPool,
+    meshes: &mut Assets<BevyMesh>,
+    commands: &mut Commands,
+    loaded: &mut LoadedChunks,
+) {
+    let BrickReady { coord: bc, lod, brick: _, meshes: mut by_material } = ready;
+    let key = LoadedChunk::key(bc, lod);
+    let lod_scale = (1u64 << lod.depth as u32) as f32;
+    let edge_m = BRICK_EDGE as f32 * lod_scale;
+    if by_material.is_empty() {
+        loaded.0.insert(
+            key,
+            LoadedChunk { coord: bc, lod, entity: None, last_seen_frame: frame },
+        );
+        return;
+    }
+    let origin = Vec3::new(
+        (bc.x as f32) * edge_m,
+        (bc.y as f32) * edge_m,
+        (bc.z as f32) * edge_m,
+    );
+    // Bloom-in reveal: start slightly under-scale and tween up to the
+    // LOD scale over `FADE_IN_SECONDS`. The transform's `scale` is what
+    // becomes `lod_scale` once `fp_animate_fade_in` finishes.
+    //
+    // The brick spawns Hidden — `fp_update_lod_visibility` runs in the
+    // same frame and decides whether this LOD is the finest available
+    // for its region. If so, it's made visible (with the bloom-in
+    // tween). Otherwise it sits invisible behind whatever finer LOD
+    // currently owns the region, ready to crossfade in when the
+    // finer tier unloads. The `BrickLod` tag carries the
+    // `(coord, depth)` key so the visibility system can match
+    // parent/child relationships.
+    let start_scale = lod_scale * FADE_IN_START_FRACTION;
+    let parent = commands
+        .spawn((
+            SpatialBundle {
+                transform: Transform::from_translation(origin)
+                    .with_scale(Vec3::splat(start_scale)),
+                visibility: Visibility::Hidden,
+                ..default()
+            },
+            BrickFadeIn { age: 0.0, final_scale: lod_scale },
+            BrickLod { coord: bc, depth: lod.depth },
+        ))
+        .id();
+    match shading_mode {
+        ShadingMode::SplitPerMaterial => {
+            for (mat_id, sub_mesh) in by_material.iter_mut() {
+                if sub_mesh.indices.is_empty() {
+                    continue;
+                }
+                let Some(material) = pool.handle_for(*mat_id) else { continue };
+                let bevy_mesh = atomr_to_bevy_mesh(sub_mesh);
+                let mesh_handle = meshes.add(bevy_mesh);
+                commands.entity(parent).with_children(|p| {
+                    p.spawn((
+                        PbrBundle {
+                            mesh: mesh_handle,
+                            material: material.clone(),
+                            ..default()
+                        },
+                        BrickMesh,
+                    ));
+                });
+            }
+        }
+        ShadingMode::PaletteVoxelMaterial => {
+            let Some(voxel_handle) = voxel_pool.handle.as_ref() else {
+                loaded.0.insert(
+                    key,
+                    LoadedChunk { coord: bc, lod, entity: Some(parent), last_seen_frame: frame },
+                );
+                return;
+            };
+            let merged = merge_by_material(&by_material);
+            if !merged.indices().map(|i| i.is_empty()).unwrap_or(true) {
+                let mesh_handle = meshes.add(merged);
+                commands.entity(parent).with_children(|p| {
+                    p.spawn((
+                        MaterialMeshBundle::<VoxelMaterial> {
+                            mesh: mesh_handle,
+                            material: voxel_handle.clone(),
+                            ..default()
+                        },
+                        BrickMesh,
+                    ));
+                });
+            }
+        }
+    }
+    loaded.0.insert(
+        key,
+        LoadedChunk { coord: bc, lod, entity: Some(parent), last_seen_frame: frame },
+    );
+}
+
+/// Smoothstep the per-brick scale from [`FADE_IN_START_FRACTION`] up to
+/// 1× over [`FADE_IN_SECONDS`], then strip the [`BrickFadeIn`] marker
+/// so the entity is no longer queried.
+///
+/// Hidden bricks (those waiting for a finer LOD to unload) keep their
+/// age frozen so the tween plays from `age=0` when they're eventually
+/// revealed — otherwise the animation would silently elapse while
+/// invisible and the brick would pop in at full scale.
+fn fp_animate_fade_in(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut Transform, &mut BrickFadeIn, &Visibility)>,
+) {
+    let dt = time.delta_seconds();
+    for (ent, mut tf, mut fade, vis) in q.iter_mut() {
+        if *vis == Visibility::Hidden {
+            // Brick is being suppressed by a finer LOD; freeze the
+            // tween until it's revealed.
+            continue;
+        }
+        fade.age += dt;
+        let t = (fade.age / FADE_IN_SECONDS).clamp(0.0, 1.0);
+        // Smoothstep — gives a softer end-of-tween than a linear ramp.
+        let s = t * t * (3.0 - 2.0 * t);
+        let scale = fade.final_scale * (FADE_IN_START_FRACTION + (1.0 - FADE_IN_START_FRACTION) * s);
+        tf.scale = Vec3::splat(scale);
+        if t >= 1.0 {
+            tf.scale = Vec3::splat(fade.final_scale);
+            commands.entity(ent).remove::<BrickFadeIn>();
+        }
+    }
+}
+
+/// Smoothstep the per-brick scale from its starting LOD scale down to
+/// 0 over [`FADE_OUT_SECONDS`], then despawn the entity and remove
+/// the matching [`LoadedChunks`] entry. The fade overlaps with the
+/// parent LOD's fade-in (revealed by [`fp_update_lod_visibility`]) so
+/// LOD transitions crossfade instead of popping.
+fn fp_animate_fade_out(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut loaded: ResMut<LoadedChunks>,
+    mut q: Query<(Entity, &mut Transform, &mut BrickFadeOut)>,
+) {
+    let dt = time.delta_seconds();
+    for (ent, mut tf, mut fade) in q.iter_mut() {
+        fade.age += dt;
+        let t = (fade.age / FADE_OUT_SECONDS).clamp(0.0, 1.0);
+        // Reverse smoothstep so the shrink starts slow and accelerates.
+        let s = t * t * (3.0 - 2.0 * t);
+        let scale = fade.from_scale * (1.0 - s);
+        tf.scale = Vec3::splat(scale.max(0.0));
+        if t >= 1.0 {
+            loaded.0.remove(&fade.key);
+            commands.entity(ent).despawn_recursive();
+        }
+    }
+}
+
+/// Per-frame visibility pass for the nested-LOD pipeline.
+///
+/// With [`crate::render::defaults::NestedSummary`] as the active
+/// [`crate::render::LodCoveragePolicy`], every brick region is covered
+/// by the finer LOD *and* every coarser parent simultaneously. This
+/// system decides which of those concurrent LODs actually renders:
+///
+/// 1. Build a "covered" set from every loaded child brick — for each
+///    `(coord, depth)` in [`LoadedChunks`], emit the parent
+///    `(coord/2, depth+1)`. A parent is considered covered iff *all 8*
+///    of its immediate children are present in [`LoadedChunks`] (we
+///    accumulate child counts per parent key and check `== 8`).
+///    Bricks mid-fade-out do not count toward coverage, so the parent
+///    is "uncovered" the moment any child starts to disappear — that's
+///    what kicks off the crossfade reveal.
+/// 2. Walk every entity with [`BrickLod`]. If its key is in the
+///    "covered" set, force `Visibility::Hidden`. Otherwise force
+///    `Visibility::Inherited` *and* — if it was previously hidden and
+///    isn't already mid-fade-in — attach a fresh [`BrickFadeIn`] so it
+///    blooms in smoothly rather than appearing in one frame.
+fn fp_update_lod_visibility(
+    loaded: Res<LoadedChunks>,
+    fading_out: Query<(), With<BrickFadeOut>>,
+    mut commands: Commands,
+    mut q: Query<(
+        Entity,
+        &BrickLod,
+        &mut Visibility,
+        Option<&BrickFadeIn>,
+    )>,
+) {
+    // Build a `parent_key → child_count` table from the loaded set,
+    // excluding children that are currently fading out (they're on
+    // their way to despawn; the parent should already be uncovered).
+    let mut child_counts: std::collections::HashMap<(IVec3, u8), u32> =
+        std::collections::HashMap::new();
+    for ((coord, depth), chunk) in loaded.0.iter() {
+        // Children only — depth 0 has no finer children that could
+        // cover it. Bricks with `entity: None` (empty placeholders)
+        // still count: they "cover" their parent's region because the
+        // region really is empty there.
+        let _ = chunk;
+        // Bricks mid-fade-out don't contribute to coverage so the
+        // parent gets revealed before the child fully disappears.
+        if let Some(ent) = chunk.entity {
+            if fading_out.get(ent).is_ok() {
+                continue;
+            }
+        }
+        // Parent of `(c, d)` lives at `(c.div_euclid(2), d+1)`. Using
+        // `div_euclid` (not `/2`) keeps the relationship correct for
+        // negative coords — `-1 / 2 == 0` in Rust truncation but
+        // `(-1).div_euclid(2) == -1`, which matches our voxel-grid
+        // convention.
+        let parent = (
+            IVec3::new(
+                coord.x.div_euclid(2),
+                coord.y.div_euclid(2),
+                coord.z.div_euclid(2),
+            ),
+            depth + 1,
+        );
+        *child_counts.entry(parent).or_insert(0) += 1;
+    }
+
+    for (ent, lod, mut vis, fade_in) in q.iter_mut() {
+        let key = (lod.coord, lod.depth);
+        let covered = child_counts.get(&key).map(|n| *n == 8).unwrap_or(false);
+        if covered {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+        } else if *vis == Visibility::Hidden {
+            *vis = Visibility::Inherited;
+            // Brick is being revealed — re-attach BrickFadeIn so it
+            // blooms instead of popping. Skip if it already has one
+            // (e.g. it was hidden mid-fade-in then re-revealed on the
+            // very next frame).
+            if fade_in.is_none() {
+                let lod_scale = (1u64 << lod.depth as u32) as f32;
+                commands
+                    .entity(ent)
+                    .insert(BrickFadeIn { age: 0.0, final_scale: lod_scale });
+            }
+        }
     }
 }
 

@@ -33,7 +33,7 @@ pub use skybox::{
     NIGHT_BRIGHTNESS, SKYBOX_FACE_RESOLUTION,
 };
 pub use strategy::{
-    AoStrategy, FogStrategy, MeshStrategy, PaletteStrategy, ShadingMode, ShadingStrategy,
-    ShadowStrategy, SkyStrategy, SunCurveStrategy, SunState, TonemapStrategy,
+    AoStrategy, FogStrategy, LodCoveragePolicy, MeshStrategy, PaletteStrategy, ShadingMode,
+    ShadingStrategy, ShadowStrategy, SkyStrategy, SunCurveStrategy, SunState, TonemapStrategy,
 };
 pub use sun::{advance_world_time, sync_sky_and_fog, sync_sun, WorldSunMarker, WorldTime};
