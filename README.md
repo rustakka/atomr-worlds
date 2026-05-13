@@ -19,10 +19,17 @@ make the substrate usable for:
 - **Digital twins / earth-scale environments** — ingesting real DEM,
   satellite, and OSM-style vector layers into the same brick grid that
   procedural content uses. The roadmap below is explicit about this.
-- **Interactive visualization** — five view-modes already, with each
-  render decision (mesher, palette, AO, shading, sky, sun curve, shadow,
-  fog, tonemap) behind a `RenderConfig` strategy slot for trivial
-  experimentation. See [docs/RENDERING.md](docs/RENDERING.md).
+- **Interactive visualization** — a working Bevy renderer with five
+  view modes, PBR lighting with time-of-day sun and soft cascaded
+  shadows, ambient occlusion, sky-tinted exponential fog tied to the
+  streaming horizon, a re-baked cubemap skybox of the distant world,
+  greedy per-material meshing, custom WGSL palette-voxel and
+  sky-dome shaders, and a 4-tier progressive LOD streamer that fills
+  ≈ 1 km of terrain around the camera. Every render decision is one
+  of nine pluggable `RenderConfig` strategy slots — change the sky,
+  the tonemap, the shadow cascades, or the entire shading mode by
+  swapping a single trait object. See [Rendering](#rendering) below
+  and [docs/RENDERING.md](docs/RENDERING.md) for the strategy spine.
 - **Procedural-content R&D** — deterministic seed derivation across the
   Universe → Galaxy → Sector → System → World hierarchy; every brick is
   a pure function of `(world_seed, brick_coord, lod)`. Reproducible
@@ -61,19 +68,129 @@ procedural-brick generation, threading `Lod` end-to-end so coarse-LOD
 bricks discretize the same heightfield in world meters instead of
 re-using LOD-0 content) are all implemented and tested end-to-end.
 
-The upstream bridge from `atomr-worlds-view`'s mesh output into
-`atomr-view`'s scene API is still blocked on the latter growing 3D
-primitives / a headless wgpu path; the Phase-15 Bevy client uses native
-`bevy_pbr` for 3D and native `bevy_ui` for the HUD as a working
-substitute. See [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) for the
-topology.
-
 See [docs/PHASES.md](docs/PHASES.md) for the per-phase history,
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the model,
 [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for module-by-module
 specifics, [docs/RENDERING.md](docs/RENDERING.md) for the strategy-based
-renderer, and [docs/LOD.md](docs/LOD.md) for the per-tier streaming and
-generation contract.
+renderer, [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) for the
+client/server topology, and [docs/LOD.md](docs/LOD.md) for the
+per-tier streaming and generation contract.
+
+## Rendering
+
+The Bevy-based client (`crates/atomr-worlds-client`) is a full
+interactive renderer, not a stub. It implements:
+
+### View modes (Phase 14)
+
+| mode       | hotkey | pipeline                                                                                                |
+| ---------- | ------ | ------------------------------------------------------------------------------------------------------- |
+| `fp`       | `1`    | First-person walk. WASD + mouse-look, sprint, crouch, click-to-grab.                                    |
+| `tp`       | `2`    | Third-person chase. Orbiting camera anchored to the FP walk position.                                   |
+| `slice`    | `3`    | Dwarf-Fortress horizontal slice. Per-column raster from a derived 2D index.                             |
+| `rts`      | `4`    | RTS oblique-orthographic. Sub-screen raster with strategic readability.                                 |
+| `overview` | `5`    | Regional / body-scale overview. Sphere projection + drag-to-rotate globe.                               |
+
+`Tab` cycles modes; each mode shares the same `WalkCamera` anchor so
+moving in one mode persists into the others. The three raster modes
+(slice / RTS / overview) reuse the `atomr-worlds-view::derived` 2D
+column/slice samplers cached on `(xz, lod)`; the streamer's
+`lod_for_meters` picks the LOD per sample, so raster and FP/TP see
+the same brick-fetch grid.
+
+### Strategy spine (Phase 16)
+
+Nine `Arc<dyn Trait>` slots on a single `RenderConfig` resource,
+each with a default and at least one alternative:
+
+| slot         | trait                | default               | other impls today                            |
+| ------------ | -------------------- | --------------------- | -------------------------------------------- |
+| `mesher`     | `MeshStrategy`       | `GreedyFlat`          | —                                            |
+| `palette`    | `PaletteStrategy`    | `HardcodedPalette`    | —                                            |
+| `ao`         | `AoStrategy`         | `MinecraftCornerAo`   | `NoAo`                                       |
+| `shading`    | `ShadingStrategy`    | `LegacyVertexColor`   | `PaletteVoxelMaterial` (custom WGSL)         |
+| `sky`        | `SkyStrategy`        | `SkyTinted`           | `ConstantSky`, `ProceduralDomeSky` (WGSL)    |
+| `sun_curve`  | `SunCurveStrategy`   | `KeyframeLutSun`      | `StaticSun`                                  |
+| `shadow`     | `ShadowStrategy`     | `BasicCascades`       | `NoShadows`                                  |
+| `fog`        | `FogStrategy`        | `ExpSquaredSkyTintedFog` | `NoFog`                                   |
+| `tonemap`    | `TonemapStrategy`    | `AcesTonemap`         | `DefaultTonemap`                             |
+
+`RenderPreset` bundles named looks (`Stylized` / `Legacy` / `Debug`).
+The harness DSL exposes `set_time_of_day` and `set_render_preset`
+events so scenarios can capture A/B comparisons deterministically.
+
+### Lighting and atmosphere (Phase 16)
+
+- **Time-of-day clock** — `WorldTime` in `[0, 24)` hours feeds a
+  keyframe LUT producing a `SunState { direction, color,
+  illuminance, day_factor }`. The Bevy `DirectionalLight`'s
+  transform, color, and illuminance are updated each tick, along
+  with `AmbientLight` color and brightness, the `Skybox`
+  brightness, the per-camera `FogSettings`, and the clear color.
+- **Soft shadows** — `BasicCascades` `ShadowStrategy` configures
+  Bevy's `CascadeShadowConfig` with tuned depth/normal biases. Sun
+  pose drives shadow direction so shadows follow the sun across
+  the day cycle.
+- **Sky-tinted fog** — `ExpSquaredSkyTintedFog` reads the current
+  horizon color from the sky strategy and the load-horizon band
+  `(start_m, end_m)` from `ChunkStreamer::fog_band_m()`. Far chunks
+  streaming into the outermost tier fade in from mist instead of
+  popping.
+- **PBR materials** — `MaterialPool` produces one
+  `StandardMaterial` per palette entry with per-material
+  roughness / metallic / emissive / alpha; the alternative
+  `PaletteVoxelMaterial` shading mode packs all materials into a
+  storage buffer indexed by a per-vertex material id (one draw
+  call per brick).
+- **AO** — `MinecraftCornerAo` bakes per-vertex ambient occlusion
+  factors from the four air-side neighbors of each face corner,
+  written into vertex color (Bevy's `ATTRIBUTE_COLOR` interpolates
+  bilinearly across the quad).
+- **HDR + ACES** — `Tonemapping::AcesFitted` and `Exposure` on the
+  camera; HDR is enabled so bloom has headroom.
+
+### Streaming + skybox (Phase 17 + 17.1)
+
+- **Progressive LOD ladder** — `ChunkStreamer` walks the default
+  4-tier `LodLadder` (1 / 2 / 4 / 8 m voxels at 128 / 256 / 512 /
+  1024 m radii) and emits a closest-first sorted list of
+  `(brick_coord, lod)` keys each frame. The load shape is purely
+  radial, so the ring is symmetric in all four cardinal directions
+  (regression-tested).
+- **Per-LOD generation** — `BrickGenContext.lod` and the host's
+  `(IVec3, u8)` cache key let each tier discretize the same
+  heightfield at its own voxel scale. Adjacent tiers agree on
+  surface height in expectation; the only remaining vertical step
+  at a tier boundary is voxel/2 discretization. See
+  [docs/LOD.md](docs/LOD.md).
+- **Cubemap skybox** — `SkyboxRuntime` bakes a six-face cubemap
+  from the far-ring meshes and re-bakes when the observer drifts
+  past a 5 % threshold; `crossfade_t` ramps `Skybox.brightness`
+  between the old and new bakes so the swap is invisible.
+- **Hysteresis** — chunks linger two streamer ticks past their
+  desired-set boundary before despawn so single-step jitter
+  doesn't re-mesh.
+
+### CPU + headless path (Phase 2 / Phase 13g)
+
+Independent of the Bevy client, `atomr-worlds-view` ships a
+deterministic CPU rasterizer (`render.rs`) and an
+isometric-perspective composite renderer (`iso.rs`) that produce
+PNGs from `LocalHost` bricks with zero GPU dependency. The
+`examples/view-png` demo writes an isometric 512×512 PNG of a 4×4×6
+brick slab on a headless host; the deterministic-screenshot test
+asserts an FNV-1a hash equal across runs. This is what powers the
+CI screenshot gate and what enables documentation / batch
+visualization without an X display.
+
+### Screenshot harness
+
+`crates/atomr-worlds-client/src/harness.rs` drives the live Bevy
+renderer through a TOML scenario (key presses, mouse motion, time-
+of-day, render-preset switches) and captures PNGs at named frames.
+Output is via an offscreen `Image` target + wgpu readback (sidesteps
+a Bevy 0.13.2 `ScreenshotManager` bug on hybrid-GPU Linux). See
+[`harness/README.md`](harness/README.md).
 
 ## Roadmap
 
@@ -312,23 +429,27 @@ grounded in real data. It provides the address space, the hash-based
 hierarchy of seeds, the data structures for sparse voxel content at
 multiple scales, the wire/host protocol downstream code routes through,
 CPU + CUDA brick generation, a streaming host with durable write replay,
-a deterministic CPU renderer, a Bevy-based interactive client with five
-view modes, and Python bindings.
+a deterministic CPU rasterizer, a Bevy-based interactive client with
+five view modes and a nine-slot pluggable render-strategy spine, and
+Python bindings.
 
 It is **not yet** a finished application of any kind — game, GIS
-viewer, digital twin, simulator. The Bevy client is a working
-visualization of the substrate, not a packaged product. The pieces
-deliberately left out: a renderer-side `atomr-view` scene bridge
-(blocked on upstream 3D primitives — the Bevy client uses native
-`bevy_pbr` in the meantime), variable-depth hierarchies, cross-dimension
-portals / passivation rules, multi-galaxy load-balancing policy, cluster
-subscription routing (one-shot requests forward cross-node;
-subscriptions stay node-local), gossip-based cluster membership,
-transport TLS, the real-Earth data-feed ingestion described in the
-Roadmap above, transition meshes between LOD tiers, and a PyPI release.
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design
-principles and [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) for the
-Phase-15 topology and known gaps.
+viewer, digital twin, simulator. The Bevy client is a complete and
+working visualization of the substrate, but the application-shaped
+work above it (mission design, persistence policy, UI for end users)
+is still your job.
+
+Pieces deliberately left out at the substrate level: variable-depth
+hierarchies, cross-dimension portals / passivation rules, multi-galaxy
+load-balancing policy, cluster subscription routing (one-shot requests
+forward cross-node; subscriptions stay node-local), gossip-based
+cluster membership, transport TLS, the real-Earth data-feed ingestion
+described in the Roadmap above, transition meshes between LOD tiers
+(adjacent tiers currently disagree by ≤ voxel/2 — see
+[docs/LOD.md](docs/LOD.md)), and a PyPI release. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design principles
+and [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) for the topology
+and known gaps.
 
 ## License
 
