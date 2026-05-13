@@ -41,19 +41,41 @@ the observer. The default progressive ladder is:
 | 2    | 2         | 4 m        | 512 m        |
 | 3    | 3         | 8 m        | 1024 m       |
 
-The shells are non-overlapping bands `[inner, outer)` measured against
-the **3D distance** between brick center and observer (the previous
+The shells are bands `[inner, outer)` measured against the
+**3D distance** between brick AABB and observer (the previous
 cube-shaped ring caused a visible directional asymmetry; see the
 symmetry tests in `world_stream.rs`). Radii are multiples of the
-coarsest brick edge (`BRICK_EDGE × 2^3 = 128 m`) so brick grids tile
-cleanly across tier boundaries without gaps or overlap.
+coarsest brick edge (`BRICK_EDGE × 2^3 = 128 m`).
+
+The band test is AABB-based, not center-based:
+
+- A brick is masked out of tier `i` (covered by finer tier) only when
+  its **far corner** distance < `outer_r_{i-1}` — i.e. the brick is
+  *entirely* inside the previous tier's shell.
+- A brick is masked out of tier `i` (past the load horizon) only when
+  its **near corner** distance ≥ `outer_r_i` — i.e. the brick is
+  *entirely* outside this tier's shell.
+
+A center-only test would leave brick-shaped holes where an
+inter-tier brick AABB straddles a band boundary: the brick at the
+coarser tier gets skipped (center inside finer tier) and the fine
+sub-bricks covering the AABB's protruding 3D corner also get skipped
+(centers past finer tier's outer). Both sides empty ⇒ visible gap.
+The AABB rule guarantees every voxel position in `[outer_r_{i-1},
+outer_r_i)` is covered by at least one loaded brick at tier `i`; the
+`no_gaps_at_tier_boundaries` test in `world_stream.rs` densely
+samples voxel positions across the full ladder and asserts coverage.
 
 `desired_chunks(streamer, observer, horizon_m)` walks the ladder, emits
-`(brick_coord, lod)` pairs whose centers land inside their tier's band,
-and sorts the result closest-first in meters so the high-fidelity inner
-shell fills before trailing far bricks. `horizon_m` is `f64::INFINITY`
-for flat cube worlds and the surface-horizon distance for spheres —
-radii clamp to it so we never stream past the visible surface.
+`(brick_coord, lod)` pairs that pass the AABB band test, and sorts the
+result closest-first in meters so the high-fidelity inner shell fills
+before trailing far bricks. `horizon_m` is `f64::INFINITY` for flat
+cube worlds and the surface-horizon distance for spheres — radii clamp
+to it so we never stream past the visible surface. A small number of
+bricks straddling each tier boundary load at both adjacent tiers
+(volumes inside the inner sphere are also rendered by the finer tier),
+which the depth buffer resolves cleanly because the finer-tier
+surface is always nearer or equal to the coarser one.
 
 ## The (coord, lod_depth) cache key
 

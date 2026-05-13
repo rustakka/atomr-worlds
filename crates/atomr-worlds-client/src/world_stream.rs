@@ -341,9 +341,23 @@ pub fn desired_chunks(
         let outer_sq = outer_r * outer_r;
 
         // Brick-grid AABB that bounds the outer sphere. The actual
-        // band check is `inner <= |center - observer| < outer`, which
-        // produces a spherical shell (symmetric across X, Y, Z).
-        let outer_v = (outer_r / edge_m).ceil() as i64;
+        // band check uses brick AABB intersection with the spherical
+        // shell, NOT brick center alone — a center-only test leaves
+        // boxy gaps wherever a brick AABB straddles the boundary and
+        // both its center and the corresponding finer-LOD brick centers
+        // happen to land on the "wrong" side. Specifically:
+        //   inner: skip the brick only when its FAR CORNER is still
+        //     inside `inner_r` (i.e. the brick is entirely covered by
+        //     the finer tier). A brick straddling the boundary stays.
+        //   outer: load if any AABB voxel intersects the outer sphere,
+        //     equivalent to `near_corner_d < outer_r`. The center-only
+        //     outer test was missing boundary bricks symmetrically.
+        // The pair guarantees every voxel position with
+        // `outer_r_{i-1} <= d < outer_r_i` is covered by some loaded
+        // brick at tier `i` (verified by the `no_gaps_at_tier_boundaries`
+        // test below).
+        let half_edge = edge_m * 0.5;
+        let outer_v = ((outer_r + half_edge) / edge_m).ceil() as i64;
         let ox = (observer.x / edge_m).floor() as i64;
         let oy = (observer.y / edge_m).floor() as i64;
         let oz = (observer.z / edge_m).floor() as i64;
@@ -354,11 +368,24 @@ pub fn desired_chunks(
                     let cx = (bx as f64 + 0.5) * edge_m - observer.x;
                     let cy = (by as f64 + 0.5) * edge_m - observer.y;
                     let cz = (bz as f64 + 0.5) * edge_m - observer.z;
-                    let d2 = cx * cx + cy * cy + cz * cz;
-                    if d2 >= outer_sq {
+                    // Far corner: |c_axis| + half_edge per axis.
+                    let fx = cx.abs() + half_edge;
+                    let fy = cy.abs() + half_edge;
+                    let fz = cz.abs() + half_edge;
+                    let far_d2 = fx * fx + fy * fy + fz * fz;
+                    // Near corner: max(0, |c_axis| - half_edge) per axis.
+                    let nx = (cx.abs() - half_edge).max(0.0);
+                    let ny = (cy.abs() - half_edge).max(0.0);
+                    let nz = (cz.abs() - half_edge).max(0.0);
+                    let near_d2 = nx * nx + ny * ny + nz * nz;
+                    // Inner mask: brick fully inside the inner sphere
+                    // ⇒ finer tier already covers it.
+                    if far_d2 < inner_sq {
                         continue;
                     }
-                    if d2 < inner_sq {
+                    // Outer mask: brick fully outside the outer sphere
+                    // ⇒ next tier will pick it up.
+                    if near_d2 >= outer_sq {
                         continue;
                     }
                     out.push((IVec3::new(bx, by, bz), tier.lod));
@@ -576,6 +603,10 @@ mod tests {
 
     #[test]
     fn outer_tier_emits_no_brick_past_horizon_radius() {
+        // With AABB-based outer test, a brick is loaded iff its NEAR
+        // CORNER is inside the outer horizon. So the assertion is:
+        // every loaded brick has at least one corner inside the horizon
+        // sphere — equivalently, the brick AABB intersects the horizon.
         let s = streamer();
         let obs = DVec3::new(0.0, 0.0, 0.0);
         let plan = desired_chunks(&s, obs, f64::INFINITY);
@@ -584,17 +615,82 @@ mod tests {
         let brick_edge_v = BRICK_EDGE as f64;
         for (c, lod) in &plan {
             let edge_m = brick_edge_v * (1u64 << lod.depth as u32) as f64;
+            let half = edge_m * 0.5;
             let cx = (c.x as f64 + 0.5) * edge_m;
             let cy = (c.y as f64 + 0.5) * edge_m;
             let cz = (c.z as f64 + 0.5) * edge_m;
-            let d2 = cx * cx + cy * cy + cz * cz;
+            let nx = (cx.abs() - half).max(0.0);
+            let ny = (cy.abs() - half).max(0.0);
+            let nz = (cz.abs() - half).max(0.0);
+            let near_d2 = nx * nx + ny * ny + nz * nz;
             assert!(
-                d2 < outer_sq,
-                "brick {c:?} lod={} at center-dist {} exceeds horizon {}",
+                near_d2 < outer_sq,
+                "brick {c:?} lod={} near-corner-dist {} exceeds horizon {}",
                 lod.depth,
-                d2.sqrt(),
+                near_d2.sqrt(),
                 outer
             );
+        }
+    }
+
+    /// Regression test for the "moving black-hole patches" bug — earlier
+    /// the inner-band test was `d²_center < inner_sq` which created
+    /// volumes that no tier covered. The new test is `d²_far_corner <
+    /// inner_sq`, i.e. only skip a brick if it's *entirely* inside the
+    /// inner sphere. This test densely samples voxel positions in the
+    /// load horizon and asserts each one lies inside at least one
+    /// loaded brick's AABB.
+    #[test]
+    fn no_gaps_at_tier_boundaries() {
+        let s = streamer();
+        let obs = DVec3::new(0.0, 0.0, 0.0);
+        let plan = desired_chunks(&s, obs, f64::INFINITY);
+        let brick_edge_v = BRICK_EDGE as f64;
+
+        // Build a per-LOD set so AABB membership tests are cheap.
+        let mut by_lod: std::collections::HashMap<u8, std::collections::HashSet<(i64, i64, i64)>>
+            = Default::default();
+        for (c, l) in &plan {
+            by_lod.entry(l.depth).or_default().insert((c.x, c.y, c.z));
+        }
+
+        let outer = s.outer_radius_m();
+        // Sample voxel positions on a 4 m grid inside the load horizon.
+        // 4 m << every brick edge (16 m at L0) so each voxel sits well
+        // inside whatever brick claims it. The sample shape is the
+        // sphere itself.
+        let step: f64 = 4.0;
+        let max_steps = (outer * 0.95 / step) as i64;
+        for iz in -max_steps..=max_steps {
+            for iy in -max_steps..=max_steps {
+                for ix in -max_steps..=max_steps {
+                    let x = ix as f64 * step;
+                    let y = iy as f64 * step;
+                    let z = iz as f64 * step;
+                    let d = (x * x + y * y + z * z).sqrt();
+                    if d > outer * 0.95 {
+                        continue;
+                    }
+                    // Find the appropriate tier for this point and
+                    // confirm the containing brick at that tier is loaded.
+                    let tier = s.ladder.lod_for_distance(d);
+                    let scale = (1u64 << tier.depth as u32) as f64;
+                    let edge_m = brick_edge_v * scale;
+                    let bx = (x / edge_m).floor() as i64;
+                    let by = (y / edge_m).floor() as i64;
+                    let bz = (z / edge_m).floor() as i64;
+                    let covered = by_lod
+                        .get(&tier.depth)
+                        .map(|s| s.contains(&(bx, by, bz)))
+                        .unwrap_or(false);
+                    assert!(
+                        covered,
+                        "voxel ({x},{y},{z}) at d={d} should be in tier depth={} brick \
+                         ({bx},{by},{bz}) but that brick is not loaded",
+                        tier.depth
+                    );
+                }
+            }
         }
     }
 
@@ -746,25 +842,35 @@ mod tests {
 
     #[test]
     fn horizon_clamp_truncates_outer_tier() {
+        // With AABB-based outer test, a brick is loaded iff its NEAR
+        // CORNER is inside the horizon — i.e. some part of its volume
+        // is visible. Outer tiers whose nearest brick AABB straddles
+        // the horizon still appear; we only assert no brick is *fully*
+        // outside the horizon.
         let s = streamer();
         let obs = DVec3::new(0.0, 0.0, 0.0);
-        // Tight 100 m horizon — everything past tier 0 should vanish
-        // since tier 1's inner radius (128 m) is past the horizon.
-        let plan = desired_chunks(&s, obs, 100.0);
-        for (_, lod) in &plan {
-            assert!(
-                lod.depth == 0,
-                "horizon clamp 100 m must drop bricks past tier 0, saw depth {}",
-                lod.depth
-            );
+        let brick_edge_v = BRICK_EDGE as f64;
+        for horizon in [100.0_f64, 300.0_f64] {
+            let plan = desired_chunks(&s, obs, horizon);
+            let horizon_sq = horizon * horizon;
+            for (c, lod) in &plan {
+                let edge_m = brick_edge_v * (1u64 << lod.depth as u32) as f64;
+                let half = edge_m * 0.5;
+                let cx = (c.x as f64 + 0.5) * edge_m;
+                let cy = (c.y as f64 + 0.5) * edge_m;
+                let cz = (c.z as f64 + 0.5) * edge_m;
+                let nx = (cx.abs() - half).max(0.0);
+                let ny = (cy.abs() - half).max(0.0);
+                let nz = (cz.abs() - half).max(0.0);
+                let near_d2 = nx * nx + ny * ny + nz * nz;
+                assert!(
+                    near_d2 < horizon_sq,
+                    "horizon clamp {horizon} m: brick {c:?} lod={} near corner at \
+                     d={} is past the horizon",
+                    lod.depth,
+                    near_d2.sqrt()
+                );
+            }
         }
-        // 300 m horizon: tier 2 (inner 256) is barely engaged, tier 3
-        // is entirely out of bounds.
-        let plan = desired_chunks(&s, obs, 300.0);
-        let max_depth = plan.iter().map(|(_, l)| l.depth).max().unwrap_or(0);
-        assert!(
-            max_depth <= 2,
-            "horizon 300 m must drop tier 3 (inner 512), saw depth {max_depth}"
-        );
     }
 }

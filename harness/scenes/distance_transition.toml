@@ -1,0 +1,141 @@
+# Distance transition study: confirms the near→far blend is clean and
+# progressive at multiple times of day, both at ground level and from
+# elevation. Used while tuning fog density / sky tint / cubemap bake.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "distance"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# --- Shot 1: ground-level horizon ----------------------------------------
+# Default spawn (~28 m) with pitch raised to near-level. Tests how the
+# transition reads when the foreground LOD-0 voxels and the LOD-3 ring
+# share the frame.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ArrowUp"
+[[events]]
+frame = 24
+kind  = "key_release"
+key   = "ArrowUp"
+
+[[events]]
+frame = 200
+kind  = "screenshot"
+note  = "noon, ground level — near + far in frame"
+
+# --- Shot 2: elevated horizon --------------------------------------------
+# Climb ~120 m so all four LOD bands are clearly visible.
+[[events]]
+frame = 205
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 205
+kind  = "key_press"
+key   = "Space"
+[[events]]
+frame = 805
+kind  = "key_release"
+key   = "Space"
+[[events]]
+frame = 805
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Drop pitch a touch so the horizon is just below mid-screen.
+[[events]]
+frame = 820
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 832
+kind  = "key_release"
+key   = "ArrowDown"
+
+# Nudge sideways so a fresh cubemap bake fires at this position.
+[[events]]
+frame = 850
+kind  = "key_tap"
+key   = "KeyA"
+[[events]]
+frame = 900
+kind  = "key_tap"
+key   = "KeyD"
+
+[[events]]
+frame = 1100
+kind  = "screenshot"
+note  = "noon, elevated — full progressive LOD ladder visible"
+
+# --- Shot 3: dawn at elevation ------------------------------------------
+[[events]]
+frame = 1105
+kind  = "set_time_of_day"
+hours = 6.5
+
+[[events]]
+frame = 1110
+kind  = "key_tap"
+key   = "KeyA"
+[[events]]
+frame = 1160
+kind  = "key_tap"
+key   = "KeyD"
+
+[[events]]
+frame = 1320
+kind  = "screenshot"
+note  = "dawn — warm sun-tinted horizon"
+
+# --- Shot 4: late afternoon ---------------------------------------------
+[[events]]
+frame = 1325
+kind  = "set_time_of_day"
+hours = 16.0
+
+[[events]]
+frame = 1330
+kind  = "key_tap"
+key   = "KeyA"
+[[events]]
+frame = 1380
+kind  = "key_tap"
+key   = "KeyD"
+
+[[events]]
+frame = 1540
+kind  = "screenshot"
+note  = "late afternoon — softer light, gentler fade"
+
+# --- Shot 5: dusk -------------------------------------------------------
+[[events]]
+frame = 1545
+kind  = "set_time_of_day"
+hours = 19.0
+
+[[events]]
+frame = 1550
+kind  = "key_tap"
+key   = "KeyA"
+[[events]]
+frame = 1600
+kind  = "key_tap"
+key   = "KeyD"
+
+[[events]]
+frame = 1760
+kind  = "screenshot"
+note  = "dusk — orange horizon, terrain in silhouette"
+
+[[events]]
+frame = 1770
+kind  = "exit"

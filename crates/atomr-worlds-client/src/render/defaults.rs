@@ -439,13 +439,16 @@ impl FogStrategy for NoFog {
     }
 }
 
-/// Exp² / linear fog, color = sky horizon at current sun.
+/// Exp² atmospheric fog, color = sky horizon at current sun.
 ///
-/// When the progressive chunk streamer supplies a `horizon_band_m`,
-/// fog switches to *linear* falloff between `band.0` and `band.1` so
-/// the outermost tier (bricks streaming in) is masked by mist while it
-/// pops in. Without a band the strategy falls back to its constant
-/// `density` for backwards compatibility.
+/// When the progressive chunk streamer supplies a `horizon_band_m`, the
+/// fog density is auto-tuned so transmittance reaches ≈ `HORIZON_TRANS`
+/// at `band.end` — i.e. the outer load horizon is almost fully fogged.
+/// Because exp² is smooth from zero, every closer LOD tier also picks
+/// up atmospheric perspective: near voxels stay clear, mid-distance
+/// LOD-1/2 bricks gain a soft horizon tint, and the far LOD-3 ring
+/// dissolves into the sky color. Without a band the strategy uses its
+/// `density` field directly.
 pub struct ExpSquaredSkyTintedFog {
     /// Fallback density when no streamer horizon is plumbed in.
     pub density: f32,
@@ -453,9 +456,16 @@ pub struct ExpSquaredSkyTintedFog {
 
 impl Default for ExpSquaredSkyTintedFog {
     fn default() -> Self {
-        Self { density: 0.008 }
+        // Matches the auto-tune at outer=1024 m so headless callers (no
+        // streamer band) still get usable distance fade.
+        Self { density: 0.0019 }
     }
 }
+
+/// Transmittance at the load-horizon distance — i.e. how much of the
+/// original brick color survives at the very edge of streaming. 0.05 ⇒
+/// 95 % of the pixel reads as sky color when a brick is at the horizon.
+const HORIZON_TRANSMITTANCE: f32 = 0.05;
 
 impl FogStrategy for ExpSquaredSkyTintedFog {
     fn name(&self) -> &'static str {
@@ -467,15 +477,20 @@ impl FogStrategy for ExpSquaredSkyTintedFog {
         sky_horizon: Color,
         horizon_band_m: Option<(f32, f32)>,
     ) -> FogSettings {
-        let falloff = match horizon_band_m {
-            Some((start, end)) if end > start && end > 0.0 => {
-                FogFalloff::Linear { start, end }
+        // Auto-tune density from the streamer horizon so fog reaches
+        // HORIZON_TRANSMITTANCE exactly at `band.end`. Solve
+        //   exp(-(d * density)²) = T
+        // for density = sqrt(-ln T) / d.
+        let density = match horizon_band_m {
+            Some((_start, end)) if end > 0.0 => {
+                let target = HORIZON_TRANSMITTANCE.max(1e-3).min(0.5);
+                (-target.ln()).sqrt() / end
             }
-            _ => FogFalloff::ExponentialSquared { density: self.density },
+            _ => self.density,
         };
         FogSettings {
             color: sky_horizon,
-            falloff,
+            falloff: FogFalloff::ExponentialSquared { density },
             ..default()
         }
     }

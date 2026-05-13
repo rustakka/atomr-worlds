@@ -1,0 +1,102 @@
+# Slow lateral sweep at altitude — catches the moving LOD-gap patches
+# the user reported. Climb high enough to see across all four tier
+# boundaries, then strafe a few seconds while screenshotting every
+# half-second so the same gap can be tracked across frames.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "lod_sweep"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Climb to ~60 m altitude — low enough to see the brick grid clearly
+# but high enough to see all four LOD rings as concentric bands.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "Space"
+[[events]]
+frame = 305
+kind  = "key_release"
+key   = "Space"
+[[events]]
+frame = 305
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Default pitch is -0.4 rad (~-23°). Pitch DOWN modestly to ~-40°
+# below horizon — terrain dominates the frame, concentric LOD rings
+# are visible, but the foreground isn't crushed straight down.
+[[events]]
+frame = 320
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 332
+kind  = "key_release"
+key   = "ArrowDown"
+
+# Let the streamer settle.
+[[events]]
+frame = 520
+kind  = "screenshot"
+note  = "settled, before strafe"
+
+# Begin slow strafe along +X (KeyA), screenshot every 30 frames so we
+# can track patches as the observer crosses tier boundaries.
+[[events]]
+frame = 530
+kind  = "key_press"
+key   = "KeyA"
+
+[[events]]
+frame = 560
+kind  = "screenshot"
+note  = "strafe t+0.5s"
+[[events]]
+frame = 590
+kind  = "screenshot"
+note  = "strafe t+1.0s"
+[[events]]
+frame = 620
+kind  = "screenshot"
+note  = "strafe t+1.5s"
+[[events]]
+frame = 650
+kind  = "screenshot"
+note  = "strafe t+2.0s"
+[[events]]
+frame = 680
+kind  = "screenshot"
+note  = "strafe t+2.5s"
+[[events]]
+frame = 710
+kind  = "screenshot"
+note  = "strafe t+3.0s"
+[[events]]
+frame = 740
+kind  = "screenshot"
+note  = "strafe t+3.5s"
+[[events]]
+frame = 770
+kind  = "screenshot"
+note  = "strafe t+4.0s"
+
+[[events]]
+frame = 780
+kind  = "key_release"
+key   = "KeyA"
+
+[[events]]
+frame = 790
+kind  = "exit"

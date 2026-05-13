@@ -645,18 +645,26 @@ outermost-tier LOD for overview (because its per-pixel viewing
 distance is body-scale). `lod_for_meters` walks the ladder so raster
 LOD selection lines up bit-for-bit with the FP/TP brick-fetch grids.
 
-### Horizon fog (mist masks the load front)
+### Horizon fog (atmospheric perspective across every tier)
 
 `ChunkStreamer::fog_band_m()` returns `(start, end)` derived from the
 outermost tier's radius (defaults: 55 % and 98 % of the load horizon
 ⇒ 563 m / 1003 m for the default ladder). `sync_sky_and_fog` reads the
 band each frame and passes it to the `FogStrategy`. The default
-`ExpSquaredSkyTintedFog` switches to **linear** falloff between
-`(start, end)` when a band is supplied, so the outer-tier shell —
-where bricks are still streaming in — fades into mist instead of
-popping in. Without a band (legacy callers / tests / spherical-body
-modes still in flight) the strategy falls back to its constant
-exponential density.
+`ExpSquaredSkyTintedFog` uses **exponential-squared** falloff with a
+density auto-tuned so transmittance reaches ≈ 5 % exactly at the load
+horizon (`density = sqrt(-ln 0.05) / band.end`). Because exp² is
+smooth from zero, every closer LOD tier picks up atmospheric
+perspective: near voxels stay sharp, mid-distance LOD-1 / LOD-2 bricks
+gain a soft horizon tint, and the far LOD-3 ring dissolves into the
+cubemap horizon color. Without a band the strategy falls back to its
+constant density (matched to the auto-tune at outer=1024 m so headless
+callers still get usable distance fade).
+
+A previous version used `FogFalloff::Linear { start, end }` whenever
+the streamer band was supplied — that left 0–563 m of terrain entirely
+unfogged, so near and mid bricks read as hard silhouettes against the
+sky. The exp² rewrite blends every LOD into the horizon continuously.
 
 The fog color tracks the current sky horizon (sun-curve-driven), so
 the mist matches whatever atmosphere the sky strategy is rendering at
