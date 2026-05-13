@@ -69,6 +69,11 @@ pub struct MaterialEntry {
     pub base_color: [f32; 3],
     pub roughness: f32,
     pub metallic: f32,
+    /// HDR emissive RGB (linear). Used by glowing materials such as
+    /// `glow_rock`; default `[0, 0, 0]` for inert materials.
+    pub emissive: [f32; 3],
+    /// `1.0` for opaque, `< 1.0` for blended materials such as water/ice.
+    pub alpha: f32,
 }
 
 #[derive(Debug, Clone, Default)]

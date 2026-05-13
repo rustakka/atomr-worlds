@@ -1,36 +1,167 @@
 # atomr-worlds
 
-A procedural-universe substrate for [atomr](https://github.com/rustakka/atomr): hierarchical seeded
-generation across **Universe → Galaxy → Sector → System → World**, with per-node dimensions, sparse
-voxel storage, metric levels of detail, and a hosting model that runs either embedded in-process
-(single-player) or sharded across an atomr cluster (multiplayer) — same actor protocol either way.
+**A general-purpose substrate for 3D reality modeling.** A deterministic,
+hierarchically-addressed, streamable sparse-voxel world that scales from a
+single brick on a laptop to a sharded multi-node cluster — and a hosting
+model that does both behind the same actor protocol.
+
+Games are one obvious application — the engine ships an interactive Bevy
+client with five view modes (first-person walk, third-person chase,
+horizontal slice, RTS oblique-orthographic, and a regional overview). They
+are not the only application. The same primitives — addressable voxel
+content, metric LOD, streamed brick subscriptions, world shapes from cubic
+to spherical, and a pluggable per-brick `Generator` trait — were chosen to
+make the substrate usable for:
+
+- **Simulation and analysis** — terrain processing, hydrological /
+  geological / atmospheric modeling, robotics environments, agent-based
+  simulations on continuous landscapes.
+- **Digital twins / earth-scale environments** — ingesting real DEM,
+  satellite, and OSM-style vector layers into the same brick grid that
+  procedural content uses. The roadmap below is explicit about this.
+- **Interactive visualization** — five view-modes already, with each
+  render decision (mesher, palette, AO, shading, sky, sun curve, shadow,
+  fog, tonemap) behind a `RenderConfig` strategy slot for trivial
+  experimentation. See [docs/RENDERING.md](docs/RENDERING.md).
+- **Procedural-content R&D** — deterministic seed derivation across the
+  Universe → Galaxy → Sector → System → World hierarchy; every brick is
+  a pure function of `(world_seed, brick_coord, lod)`. Reproducible
+  experiments are the default, not an afterthought.
+
+Everything below `atomr-worlds-host` is GPU-/runtime-agnostic; the CUDA
+accelerator and the Bevy client are integrations on top of the substrate
+rather than the substrate itself.
 
 ## Status
 
-**Phases 0–15 landed.** Phase 0 (primitives), Phase 1 (procedural generators + real
-`LocalHost` on atomr's actor system), Phase 2 (CPU renderer: greedy meshing + software
-rasterizer to PNG), Phase 3 (persistence: `atomr-persistence` Journal/SnapshotStore binding,
-in-memory + optional SQL backends, recovery on host restart), Phase 4 (streaming
-subscriptions), Phase 5 (GPU acceleration: CUDA backend via `atomr-accel-cuda` NVRTC, gated on
-byte-for-byte determinism vs the CPU path), Phase 6 (Python bindings), Phases 7–12 (vehicles +
-policy + strategy registry, atmosphere + metric LOD, isosurface meshing, `ClusterHost`, Python
-release, persistence + observability hardening), Phase 13 (world shape + horizon streaming +
-geologic macro pre-sim + authored-region stipulation + skybox cubemap + composite renderer +
-cross-LOD seam fix + transitive skybox), Phase 14 (five world display modes — 1st-person walk,
-3rd-person chase, Dwarf-Fortress horizontal slice, RTS oblique strategy, and large-scale
-regional overview — each with its own rendering pipeline and derived data structure on top of
-the new `Projection` enum, `WorldQuery` trait, `raster2d` blitter, and `ViewCache` foundation),
-and Phase 15 (client/server: Bevy-driven interactive client, headless `atomr-worlds-server`
-binary, `atomr-remote`-based `RemoteHost`, and wire-up of `ClusterHost`'s cross-node
-forwarder) are all implemented and tested end-to-end.
+**Phases 0–17 plus the 17.1 per-LOD brick-generation fix landed.** Phase 0
+(primitives), Phase 1 (procedural generators + real `LocalHost` on
+atomr's actor system), Phase 2 (CPU renderer: greedy meshing + software
+rasterizer to PNG), Phase 3 (persistence: `atomr-persistence` Journal/
+SnapshotStore binding, in-memory + optional SQL backends, recovery on
+host restart), Phase 4 (streaming subscriptions), Phase 5 (GPU
+acceleration: CUDA backend via `atomr-accel-cuda` NVRTC, gated on
+byte-for-byte determinism vs the CPU path), Phase 6 (Python bindings),
+Phases 7–12 (vehicles + policy + strategy registry, atmosphere + metric
+LOD, isosurface meshing, `ClusterHost`, Python release, persistence +
+observability hardening), Phase 13 (world shape + horizon streaming +
+geologic macro pre-sim + authored-region stipulation + skybox cubemap +
+composite renderer + cross-LOD seam fix + transitive skybox), Phase 14
+(five world display modes — 1st-person walk, 3rd-person chase,
+Dwarf-Fortress horizontal slice, RTS oblique strategy, and large-scale
+regional overview — each with its own rendering pipeline and derived
+data structure on top of the new `Projection` enum, `WorldQuery` trait,
+`raster2d` blitter, and `ViewCache` foundation), Phase 15 (client/
+server: Bevy-driven interactive client, headless `atomr-worlds-server`
+binary, `atomr-remote`-based `RemoteHost`, and wire-up of
+`ClusterHost`'s cross-node forwarder), Phase 16 (PBR lighting + material
+upgrade; nine pluggable render-strategy slots), Phase 17 (progressive
+4-tier LOD streamer + skybox integration), and Phase 17.1 (per-LOD
+procedural-brick generation, threading `Lod` end-to-end so coarse-LOD
+bricks discretize the same heightfield in world meters instead of
+re-using LOD-0 content) are all implemented and tested end-to-end.
 
-The upstream bridge from `atomr-worlds-view`'s mesh output into `atomr-view`'s scene API is
-still blocked on the latter growing 3D primitives / a headless wgpu path; the Phase-15 Bevy
-client uses native `bevy_pbr` for 3D and native `bevy_ui` for the HUD as a working
-substitute. See [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) for the topology.
+The upstream bridge from `atomr-worlds-view`'s mesh output into
+`atomr-view`'s scene API is still blocked on the latter growing 3D
+primitives / a headless wgpu path; the Phase-15 Bevy client uses native
+`bevy_pbr` for 3D and native `bevy_ui` for the HUD as a working
+substitute. See [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) for the
+topology.
 
-See [docs/PHASES.md](docs/PHASES.md) for the roadmap, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-for the model, and [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for module-by-module specifics.
+See [docs/PHASES.md](docs/PHASES.md) for the per-phase history,
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the model,
+[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for module-by-module
+specifics, [docs/RENDERING.md](docs/RENDERING.md) for the strategy-based
+renderer, and [docs/LOD.md](docs/LOD.md) for the per-tier streaming and
+generation contract.
+
+## Roadmap
+
+The substrate is the foundation; the next wave of work is about
+expanding *what kind of reality* you can put on top of it. Three
+threads are explicitly planned:
+
+### Finer-grained LOD
+
+The current ladder is four shells deep — 1 m / 2 m / 4 m / 8 m voxels
+at 128 / 256 / 512 / 1024 m radii — which is enough to look right at
+ground level but does not scale up or down. Planned:
+
+- **Sub-meter LOD−1** for vehicle-, character-, and interior-detail
+  rings: 0.5 m / 0.25 m voxels. Needed for legible UI / cockpit /
+  interior scenes inside a larger world.
+- **Deeper coarse tiers** for body- and system-scale rendering:
+  16 m / 32 m / 64 m voxels at multi-kilometer radii feeding the
+  overview mode and the regional skybox bake.
+- **Per-view-mode tier counts** — the FP/TP path can afford a tight
+  inner shell; an RTS or strategic-overview mode benefits from a much
+  flatter ladder. `LodLadder` is already constructable per `Resource`
+  but the modes still share one default.
+- **Transition meshes** (Transvoxel / boundary stitching) to remove
+  the intrinsic ≤ voxel/2 height step where adjacent LOD tiers
+  discretize the same continuous surface at different metrics. See
+  [docs/LOD.md](docs/LOD.md) for why this step exists and the
+  bound on its magnitude.
+
+### Additional generation styles
+
+`BrickGenerator` is a single-method trait that already powers the
+default `TerrainGenerator` and the placeholder `EmptyPlanetoid`,
+`AsteroidBelt`, and `GasGiant` strategies. Each receives a
+`BrickGenContext { world_seed, brick_coord, lod, shape, macro_state,
+scale }` and returns a `Brick`. The roadmap adds:
+
+- **Urban / structural generators** — procedural cities, road
+  networks, building footprints, road-aware terrain conforming.
+- **Biome packs** — biome-driven material / vegetation / hydrology
+  layered on top of the existing macro-state biome map (currently
+  used by the `LayeredWithFeatures` material strategy for surface
+  topsoil; the geometry side is still procedural FBM).
+- **Planetary archetypes** — alien-rock, ice-shell, water-world,
+  desert. The macro-state path (Phase 13c) already produces the
+  geologic / climate / biome surface grid; archetype generators
+  read it and emit bricks accordingly.
+- **Authored region overlays** — the Phase-13d/13e `AuthoredRegion`
+  store (`LiteralRegion`, `HeightmapRegion`, `VoxFileRegion`) is the
+  manual-stipulation API. Expanding the loaders to glTF, USD, and
+  CityGML is on this thread.
+- **Composable strategies** — multi-stage pipelines (terrain →
+  hydrology → vegetation → structures) wired via a small DSL or
+  registry change rather than hand-coding `BrickGenContext`
+  consumers.
+
+### Real-world data feeds
+
+The world-meter sampling API added in Phase 17.1 is the right
+integration surface for ingesting external 3D / 2D layers. Planned
+data sources, each as its own `BrickGenerator` implementation:
+
+- **Elevation** — SRTM / ASTER / Copernicus DEM tile pyramids; LIDAR
+  / DSM where available. The generator's `ctx.lod` selects the right
+  pyramid level, so a 30-m DEM serves the depth-3 ring while a 1-m
+  LIDAR mosaic populates the depth-0 inner shell.
+- **Land cover and vegetation** — ESA WorldCover, NLCD, Sentinel-2
+  derived classification feeding the material-selection strategy
+  alongside the procedural biome path.
+- **Vector overlays** — OSM (roads, buildings, water, landuse),
+  Microsoft Building Footprints, USGS hydrography. Vector features
+  are rasterized into the brick grid via the same authored-region
+  pathway used by `HeightmapRegion` today.
+- **Live / time-varying layers** — weather (NEXRAD, GFS) and
+  satellite imagery (Sentinel-2 cloud-free composites, Landsat).
+  These flow through the streaming subscription protocol the same
+  way procedural updates do; the host has no opinion about whether
+  a `BrickSnapshot` came from FBM, a DEM tile, or a live feed.
+- **Coordinate-system bridge** — a small `geo` adapter mapping
+  WGS84 / Web-Mercator / UTM into the engine's metric brick grid,
+  so a `LocalHost` can be parameterized by a real-world bounding
+  box rather than only a synthetic seed.
+
+The roadmap is intentionally about *plugging into the existing per-LOD
+generation contract*, not about adding a parallel pipeline. The
+contract (covered in [docs/LOD.md](docs/LOD.md)) is the right shape
+for any source of 3D content that can answer "what material is at
+world meter `(x, y, z)` at metric scale `2^L`?".
 
 ## Workspace layout
 
@@ -176,18 +307,28 @@ hash equal across runs), and (under `--features cuda`) CUDA-vs-CPU brick byte eq
 
 ## What this is, what it isn't
 
-This is the **foundation layer** for a procedural universe. It provides the address space, the
-hash-based hierarchy of seeds, the data structures for sparse voxel content at multiple scales,
-the wire/host shape downstream code routes through, CPU + CUDA brick generation, a streaming
-host with durable write replay, a deterministic CPU renderer, and Python bindings.
+This is the **foundation layer** for a 3D reality model — synthetic or
+grounded in real data. It provides the address space, the hash-based
+hierarchy of seeds, the data structures for sparse voxel content at
+multiple scales, the wire/host protocol downstream code routes through,
+CPU + CUDA brick generation, a streaming host with durable write replay,
+a deterministic CPU renderer, a Bevy-based interactive client with five
+view modes, and Python bindings.
 
-It is **not** (yet) a game. The pieces it deliberately leaves out: a renderer-side `atomr-view`
-scene bridge (blocked on upstream 3D primitives — the Bevy client uses native `bevy_pbr` in
-the meantime), variable-depth hierarchies, cross-dimension portals / passivation rules,
-multi-galaxy load-balancing policy, cluster subscription routing (one-shot requests forward
-cross-node; subscriptions stay node-local), gossip-based cluster membership, transport TLS,
-and a PyPI release. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design principles
-and [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) for the Phase-15 topology and known gaps.
+It is **not yet** a finished application of any kind — game, GIS
+viewer, digital twin, simulator. The Bevy client is a working
+visualization of the substrate, not a packaged product. The pieces
+deliberately left out: a renderer-side `atomr-view` scene bridge
+(blocked on upstream 3D primitives — the Bevy client uses native
+`bevy_pbr` in the meantime), variable-depth hierarchies, cross-dimension
+portals / passivation rules, multi-galaxy load-balancing policy, cluster
+subscription routing (one-shot requests forward cross-node;
+subscriptions stay node-local), gossip-based cluster membership,
+transport TLS, the real-Earth data-feed ingestion described in the
+Roadmap above, transition meshes between LOD tiers, and a PyPI release.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design
+principles and [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) for the
+Phase-15 topology and known gaps.
 
 ## License
 

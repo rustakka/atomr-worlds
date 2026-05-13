@@ -52,6 +52,10 @@ fn tp_input(
     let dt = time.delta_seconds().min(0.05);
     let mut yaw_delta = 0.0f32;
     let mut pitch_delta = 0.0f32;
+    // Only consume mouse motion when the cursor is grabbed; otherwise
+    // every cursor move would spin the orbit camera even with the menu
+    // open. WASD movement is handled by `world_walk_input` running in
+    // the same frame so the player anchor walks under the orbit.
     for ev in motion.read() {
         yaw_delta -= ev.delta.x * 0.005;
         pitch_delta -= ev.delta.y * 0.005;

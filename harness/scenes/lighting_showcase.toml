@@ -1,0 +1,76 @@
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "lighting"
+
+# --- Hour 6 (dawn): warm orange sun rising in the east ----------------
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 6.0
+
+[[events]]
+frame = 4
+kind  = "screenshot"
+note  = "dawn"
+
+# --- Hour 9: mid-morning, warm yellow sun --------------------------------
+[[events]]
+frame = 10
+kind  = "set_time_of_day"
+hours = 9.0
+
+[[events]]
+frame = 14
+kind  = "screenshot"
+note  = "morning"
+
+# --- Hour 12 (noon): white cool sun overhead -----------------------------
+[[events]]
+frame = 20
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 24
+kind  = "screenshot"
+note  = "noon"
+
+# --- Hour 17 (late afternoon): warm amber sun --------------------------
+[[events]]
+frame = 30
+kind  = "set_time_of_day"
+hours = 17.0
+
+[[events]]
+frame = 34
+kind  = "screenshot"
+note  = "afternoon"
+
+# --- Hour 19 (dusk): deep orange near horizon -------------------------
+[[events]]
+frame = 40
+kind  = "set_time_of_day"
+hours = 19.0
+
+[[events]]
+frame = 44
+kind  = "screenshot"
+note  = "dusk"
+
+# --- Hour 21 (night): dim blue moonlight -----------------------------
+[[events]]
+frame = 50
+kind  = "set_time_of_day"
+hours = 21.0
+
+[[events]]
+frame = 54
+kind  = "screenshot"
+note  = "night"
+
+[[events]]
+frame = 60
+kind  = "exit"

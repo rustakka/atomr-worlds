@@ -1,0 +1,293 @@
+# Cardinal direction loading/unloading verification.
+#
+# Stops at the same physical world position (8,28,8) and captures
+# yaws 0/90/180/270 — same loaded ring, four different slices. With
+# symmetric streaming, the terrain density at each LOD distance band
+# should be visually consistent across the four shots (the *content*
+# at each yaw differs because the FBM terrain is direction-aware, but
+# the *amount of loaded brick mass* at each radius should match).
+#
+# Then walks +Z 30m and back, +X 30m and back, etc., capturing a
+# "look back" shot in each. Symmetric streaming + hysteresis means
+# the trail behind the camera should despawn uniformly regardless
+# of direction.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "cardinal_verify"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# ----- 4 yaws at the same position -----
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "origin yaw 0° (+Z)"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 68
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 75
+kind  = "screenshot"
+note  = "origin yaw 90° (+X)"
+
+[[events]]
+frame = 80
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 143
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 150
+kind  = "screenshot"
+note  = "origin yaw 180° (-Z)"
+
+[[events]]
+frame = 155
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 218
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 225
+kind  = "screenshot"
+note  = "origin yaw 270° (-X)"
+
+# Return to yaw 0
+[[events]]
+frame = 230
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 293
+kind  = "key_release"
+key   = "ArrowLeft"
+
+# ----- Walk +Z 40m, then yaw 180° to look back -----
+[[events]]
+frame = 300
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 300
+kind  = "key_press"
+key   = "KeyW"
+[[events]]
+frame = 500
+kind  = "key_release"
+key   = "KeyW"
+[[events]]
+frame = 500
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Yaw 180° to look back
+[[events]]
+frame = 505
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 631
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 640
+kind  = "screenshot"
+note  = "after +Z sprint, looking back (-Z) at trail"
+
+# Walk back to origin (still facing -Z, so KeyW pushes -Z)
+[[events]]
+frame = 645
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 645
+kind  = "key_press"
+key   = "KeyW"
+[[events]]
+frame = 845
+kind  = "key_release"
+key   = "KeyW"
+[[events]]
+frame = 845
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Yaw 90° more so we're now at 270° → face +X
+[[events]]
+frame = 850
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 913
+kind  = "key_release"
+key   = "ArrowLeft"
+
+# Walk +X 40m
+[[events]]
+frame = 920
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 920
+kind  = "key_press"
+key   = "KeyW"
+[[events]]
+frame = 1120
+kind  = "key_release"
+key   = "KeyW"
+[[events]]
+frame = 1120
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Yaw 180° to look back
+[[events]]
+frame = 1125
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 1251
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 1260
+kind  = "screenshot"
+note  = "after +X sprint, looking back (-X) at trail"
+
+# Walk back to origin
+[[events]]
+frame = 1265
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 1265
+kind  = "key_press"
+key   = "KeyW"
+[[events]]
+frame = 1465
+kind  = "key_release"
+key   = "KeyW"
+[[events]]
+frame = 1465
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Yaw 90° more → face -Z (yaw = 360+90 → 90)
+# Walk -Z 40m via KeyW (since yaw faces -Z)
+[[events]]
+frame = 1470
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 1533
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 1540
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 1540
+kind  = "key_press"
+key   = "KeyW"
+[[events]]
+frame = 1740
+kind  = "key_release"
+key   = "KeyW"
+[[events]]
+frame = 1740
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 1745
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 1871
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 1880
+kind  = "screenshot"
+note  = "after -Z sprint, looking back (+Z) at trail"
+
+# Walk back
+[[events]]
+frame = 1885
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 1885
+kind  = "key_press"
+key   = "KeyW"
+[[events]]
+frame = 2085
+kind  = "key_release"
+key   = "KeyW"
+[[events]]
+frame = 2085
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Yaw 90° more → face -X
+[[events]]
+frame = 2090
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 2153
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 2160
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 2160
+kind  = "key_press"
+key   = "KeyW"
+[[events]]
+frame = 2360
+kind  = "key_release"
+key   = "KeyW"
+[[events]]
+frame = 2360
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 2365
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 2491
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 2500
+kind  = "screenshot"
+note  = "after -X sprint, looking back (+X) at trail"
+
+[[events]]
+frame = 2510
+kind  = "exit"

@@ -1,0 +1,240 @@
+# Phase 17/18 — Hybrid rendering verification.
+#
+# Stands the FP camera at the spawn (ground+10) and spins in place
+# capturing screenshots at 0°/90°/180°/270° yaw. Then ascends with
+# Space, captures another 4-yaw sweep mid-air, and finally jumps very
+# high and looks down + horizontally + up to expose the full LOD →
+# skybox transition stack.
+#
+# Visual regression target: each of the four yaw screenshots at a
+# given altitude should show similar fog/skybox bands and brick
+# density (rotational symmetry). The "look up" shots at altitude
+# should show the procedurally-baked skybox horizon (NOT fog white
+# nor pitch black).
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "hybrid_360"
+
+# Noon so the sun, fog and skybox are at their brightest.
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# -------------------------------------------------------------------
+# Ground-level (spawn + 10m): yaw 0/90/180/270
+# -------------------------------------------------------------------
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "ground, yaw 0° (forward +Z) — fresh LOD ring + skybox"
+
+# Yaw left ~90°. look_speed = 1.5 rad/s. 90° = pi/2 ≈ 1.57 rad → 63 frames at 60fps.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 68
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 75
+kind  = "screenshot"
+note  = "ground, yaw 90° (+X)"
+
+[[events]]
+frame = 80
+kind  = "key_press"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 143
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 150
+kind  = "screenshot"
+note  = "ground, yaw 180° (-Z)"
+
+[[events]]
+frame = 155
+kind  = "key_press"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 218
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 225
+kind  = "screenshot"
+note  = "ground, yaw 270° (-X)"
+
+# -------------------------------------------------------------------
+# Mid-air ascent: hold Space to rise ~50m at 12 m/s sprint (≈4.2 s)
+# -------------------------------------------------------------------
+[[events]]
+frame = 230
+kind  = "key_press"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 293
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 300
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 300
+kind  = "key_press"
+key   = "Space"
+
+[[events]]
+frame = 555
+kind  = "key_release"
+key   = "Space"
+
+[[events]]
+frame = 555
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 565
+kind  = "screenshot"
+note  = "mid-air, yaw 0° — should see LOD shells expanding below"
+
+# Mid-air sweep
+[[events]]
+frame = 570
+kind  = "key_press"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 633
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 640
+kind  = "screenshot"
+note  = "mid-air, yaw 90°"
+
+[[events]]
+frame = 645
+kind  = "key_press"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 708
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 715
+kind  = "screenshot"
+note  = "mid-air, yaw 180°"
+
+[[events]]
+frame = 720
+kind  = "key_press"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 783
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 790
+kind  = "screenshot"
+note  = "mid-air, yaw 270°"
+
+# -------------------------------------------------------------------
+# High altitude: rise another ~150m (12.5 s) then look down/horiz/up
+# to expose the full LOD/skybox stack
+# -------------------------------------------------------------------
+[[events]]
+frame = 795
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 795
+kind  = "key_press"
+key   = "Space"
+
+[[events]]
+frame = 1545
+kind  = "key_release"
+key   = "Space"
+
+[[events]]
+frame = 1545
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Look down ~45° — pitch_delta = -1.5 rad/s. 45° = 0.78 rad → 31 frames.
+[[events]]
+frame = 1550
+kind  = "key_press"
+key   = "ArrowDown"
+
+[[events]]
+frame = 1581
+kind  = "key_release"
+key   = "ArrowDown"
+
+[[events]]
+frame = 1590
+kind  = "screenshot"
+note  = "high alt, pitch -45° — should show all 4 LOD shells + cubemap"
+
+# Look back up ~45° → horizontal
+[[events]]
+frame = 1595
+kind  = "key_press"
+key   = "ArrowUp"
+
+[[events]]
+frame = 1626
+kind  = "key_release"
+key   = "ArrowUp"
+
+[[events]]
+frame = 1635
+kind  = "screenshot"
+note  = "high alt, horizontal — should show skybox horizon band"
+
+# Look up ~45° (into pure sky)
+[[events]]
+frame = 1640
+kind  = "key_press"
+key   = "ArrowUp"
+
+[[events]]
+frame = 1671
+kind  = "key_release"
+key   = "ArrowUp"
+
+[[events]]
+frame = 1680
+kind  = "screenshot"
+note  = "high alt, pitch +45° — should show pure skybox (no fog wash)"
+
+[[events]]
+frame = 1690
+kind  = "exit"

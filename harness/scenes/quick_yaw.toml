@@ -1,0 +1,45 @@
+# Fast yaw test: minimal warmup, then 0° and 180° captures.
+# With the fix, both yaws show terrain content.
+# Without the fix, the 180° shot would be sky-only (negative-coord
+# bricks were rejected by the host's shape containment check).
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "qy"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Pitch -25° (looking down)
+[[events]]
+frame = 1
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 18
+kind  = "key_release"
+key   = "ArrowDown"
+
+# Yaw 180° = pi rad. 1.5 rad/s * (1/60 s/frame) = 0.025 rad/frame → 126 frames.
+[[events]]
+frame = 20
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 146
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 160
+kind  = "screenshot"
+note  = "yaw 180° (-Z) — must show terrain post-fix"
+
+[[events]]
+frame = 165
+kind  = "exit"

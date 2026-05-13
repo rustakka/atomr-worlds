@@ -7,12 +7,16 @@ This document is **descriptive of the design**, not a per-commit log. As phases
 land, [IMPLEMENTATION.md](IMPLEMENTATION.md) gets updated with concrete
 file/line pointers; this document stays focused on the intended end-state.
 
-**Status (2026-05-11)**: Phases 0–6 have all landed. The only remaining
-deliverable on this roadmap is the upstream-bridge piece of Phase 2 — handing
-meshes from `atomr-worlds-view` off to `atomr-view`'s scene API — and it is
-blocked on the upstream growing 3D primitives / a headless wgpu path. The
-CPU renderer plus deterministic-screenshot gate cover everything Phase 2
-needed in the interim.
+**Status (2026-05-13)**: Phases 0–17 plus Phase 17.1 (per-LOD brick
+generation) have all landed. The only remaining deliverable on the
+in-repo roadmap is the upstream-bridge piece of Phase 2 — handing
+meshes from `atomr-worlds-view` off to `atomr-view`'s scene API — and
+it is blocked on the upstream growing 3D primitives / a headless wgpu
+path. The CPU renderer plus deterministic-screenshot gate cover
+everything Phase 2 needed in the interim. The forward-looking work
+(finer-grained LOD ladders, additional generation styles, real-Earth
+data feeds) is sketched in the README under "Roadmap" and depends on
+the per-LOD generation contract documented in [LOD.md](LOD.md).
 
 ## Phase 1 — Generators + `LocalHost` *(landed)*
 
@@ -853,3 +857,297 @@ backwards compatibility.
 - Gossip / persistent membership for the cluster. `--peer` is a static
   hand-rolled map.
 - TLS / auth on the wire.
+
+## Phase 16 — Lighting + materials upgrade *(landed)*
+
+Replaces the single hard-coded `DirectionalLight` and 6-entry color
+table from Phases 14a/15 with a real multi-material PBR look:
+
+1. **Material palette** — 10 ids (stone, dirt, sand, snow, water,
+   grass, wood, leaves, glow_rock, ice) with per-id PBR
+   (roughness/metallic/emissive/alpha). Picked up by the CPU
+   rasterizer (slice/RTS/overview) and by Bevy `StandardMaterial`
+   handles (FP/TP) from the same `MaterialPalette` source.
+2. **Per-material shading (`SplitPerMaterial`)** — FP bricks split
+   into N submeshes (one per material id present), each spawned as a
+   child `PbrBundle` with its own `StandardMaterial`. Water/ice get
+   `AlphaMode::Blend`; glow_rock emissive ×2.
+3. **Tonemap + bloom** — Camera gains HDR + `Tonemapping::AcesFitted`
+   + `Exposure { ev100: 9.0 }` + `BloomSettings { intensity: 0.10 }`.
+4. **Time-of-day** — `WorldTime` resource (hours in `[0,24)`); the
+   `KeyframeLutSun` strategy interpolates a 5-keyframe LUT and writes
+   the `WorldSun` directional light's transform/color/illuminance
+   plus ambient color/brightness per frame.
+5. **Cascaded shadows** — `BasicCascades` strategy returns a
+   `CascadeShadowConfig` tuned to the FP streaming radius (4 cascades,
+   max 200 m, first far bound 8 m).
+6. **Per-vertex AO** — `MinecraftCornerAo` samples the 4 air-side
+   neighbours of each face vertex; AO is baked into `ATTRIBUTE_COLOR`
+   so Bevy's PBR multiplies it against base color natively. Greedy
+   merge keys include the AO 4-tuple so quads only merge when AO
+   matches.
+7. **Sky + fog** — `SkyTinted` returns a horizon color that follows
+   the sun's color (blue night, orange dawn/dusk, pale noon);
+   `ExpSquaredSkyTintedFog` produces fog tinted to match. `ClearColor`
+   + per-camera `FogSettings` are updated each frame.
+
+The whole pipeline is wired through a strategy spine:
+[`atomr-worlds-client/src/render/`](../crates/atomr-worlds-client/src/render/)
+holds `RenderConfig` with nine `Arc<dyn Trait>` fields, one per
+decision point. Swapping is a one-line write or a `set_strategy`
+event from the harness. Three named presets (`Stylized`, `Legacy`,
+`Debug`) bundle whole looks.
+
+### Harness DSL additions
+
+- `set_time_of_day { hours: f32 }`
+- `set_render_preset { preset: "stylized"|"legacy"|"debug" }`
+- `set_strategy { slot: String, strategy: String }`
+
+### Critical-path: offscreen capture
+
+The Bevy 0.13.2 `ScreenshotManager` path is unusable on hybrid-GPU
+Linux laptops (panics in async buffer-map) and `xwd` against the
+Vulkan-rendering window yields all-black PNGs. `OffscreenCapturePlugin`
+points the camera at an `Image` render target, copies the texture to
+a `MAP_READ` buffer in `RenderApp` at `RenderSet::Cleanup`, polls the
+device synchronously, strips the per-row 256-byte padding, swaps
+BGRA → RGBA, and saves PNG. Works headlessly; bypasses the
+swapchain entirely. Memory note at
+`memory/project_harness_offscreen_capture.md`.
+
+### Gates
+
+- `harness/scenes/lighting_showcase.toml` — six time-of-day PNGs
+  (h=6, 9, 12, 17, 19, 21); used to validate the sun curve, shadow
+  cascades, sky-tinted fog, ambient brightness.
+- `harness/scenes/strategy_compare.toml` — A/B per-preset and
+  per-slot comparison; validates that preset rollback (`Legacy`)
+  reaches every slot.
+- Pinned-hash view-crate tests (`tests/deterministic_screenshot.rs`,
+  `tests/slice_golden.rs`) updated for the new `material_color`
+  palette.
+
+### Lessons learned + cross-mode applicability
+
+Full prose in [RENDERING.md](RENDERING.md). The methodologies
+(strategy spine, preset enum that pins every slot, offscreen
+capture, harness DSL parity with new capability) port to the
+CPU rasterizer modes; the FP-specific lighting plumbing
+(PBR + shadows + fog + bloom) does not, and porting it would
+require a software-shading equivalent in `atomr-worlds-view`.
+
+### Phase 16 opt-in custom shaders *(landed)*
+
+Two custom-WGSL strategies ship alongside the default `StandardMaterial`
+look. Not on by default (the deterministic golden gates in
+`atomr-worlds-view` still compare against the `StandardMaterial` path),
+but available via `set_strategy` from the harness or by hand:
+
+- **`PaletteVoxelMaterial`** (Step 8 — `shading` slot):
+  `ExtendedMaterial<StandardMaterial, VoxelMaterialExt>` with a palette
+  storage buffer at binding 100. Per-vertex material id in
+  `ATTRIBUTE_UV_0.x`, AO in `ATTRIBUTE_COLOR.r`. WGSL imports
+  `bevy_pbr::pbr_fragment::pbr_input_from_standard_material` and
+  `bevy_pbr::pbr_functions::apply_pbr_lighting`, overrides
+  base_color/roughness/metallic/emissive per fragment, returns the lit
+  result through Bevy's standard PBR pipeline. Drops per-brick draw
+  calls from N→1.
+- **`ProceduralDomeSky`** (Step 9 — `sky` slot): inside-out sphere
+  parented to the camera, custom `Material` with WGSL that mixes
+  zenith→horizon and overlays a soft sun disc + glow.
+  `MaterialPlugin::<SkyDomeMaterial>::default()` is always registered;
+  `SkyDomePlugin::sync_sky_dome` toggles visibility based on
+  `cfg.sky.dome_active()` and writes the four uniforms from the
+  current `SunState`.
+
+Asset loading: `AssetPlugin::file_path` is set from an absolute path
+resolved at startup (see `main.rs::resolve_asset_root`) so shaders
+under `crates/atomr-worlds-client/assets/shaders/` load whether the
+binary runs from the workspace root, the crate directory, or a
+packaged install.
+
+### Out of scope (still)
+
+- Triplanar texturing, SSAO post pass, water refraction, real
+  atmospheric scattering — each is a future strategy in an existing
+  slot.
+
+## Phase 17 — Chunk auto-streamer + skybox integration *(landed)*
+
+Phase 17 wires three latent capabilities into the live render path:
+the `Skybox` cubemap (Phase 13f/13i) into Bevy's
+`bevy::core_pipeline::Skybox` component, `StreamingPolicy::ring_for_curved`
+(`atomr-worlds-proto`) into the per-frame brick loader, and the same
+policy into the raster modes' `Lod` selection. One streaming model,
+five view modes.
+
+### Shared chunk streamer
+
+[`crates/atomr-worlds-client/src/world_stream.rs`](../crates/atomr-worlds-client/src/world_stream.rs)
+holds the `ChunkStreamer` and `LoadedChunks` Bevy resources. The
+streamer wraps `StreamingPolicy { near_lod: 0, far_lod: 1,
+transition_radius_m: 64, max_radius_m: 512, bricks_per_tick: 24 }`.
+
+- `desired_chunks(streamer, observer, horizon_m) -> Vec<(IVec3, Lod)>`
+  returns the union of the near ring (at `near_lod`) and the far ring
+  (at `far_lod`, with the near-ring footprint masked out), sorted
+  closest-first in world-meters so the visible leading edge fills
+  before trailing bricks. Far-brick coordinates are in the far-LOD
+  brick grid, not the near grid — `ring_for_curved` emits both rings
+  in near-grid coords; this module converts to the far grid.
+- `ChunkStreamer::lod_for_meters(observer, p)` and `lod_for_brick` —
+  pure helpers used by the slice/RTS/overview raster paths.
+- `LoadedChunk { coord, lod, entity, last_seen_frame }`, keyed by
+  `(coord, lod.depth)` so a tier-change can briefly hold both a
+  `(c, 0)` and `(c, 1)` entry without collision. Hysteresis: a chunk
+  lingers two streamer ticks past its last "seen in desired set"
+  frame before despawn.
+
+### FP/TP brick loader rewrite
+
+[`crates/atomr-worlds-client/src/modes/fp.rs::fp_stream_bricks`](../crates/atomr-worlds-client/src/modes/fp.rs)
+replaces the hand-rolled 7×7×7 cube with a call to `desired_chunks`,
+which now spawns near-LOD bricks at the standard `Transform` and far-LOD
+bricks with `Transform.scale = 2^L`. Because greedy-meshing reads voxel
+positions in `0..BRICK_EDGE`, the per-entity scale is the only
+per-LOD knob — no mesh mutation. TP shares the same scene through
+`FpState`, so it inherits the streamer.
+
+### Skybox in Bevy
+
+[`crates/atomr-worlds-client/src/render/skybox.rs`](../crates/atomr-worlds-client/src/render/skybox.rs)
+holds the `SkyboxRuntime` resource and `sync_skybox` system. Each tick:
+
+1. The runtime updates its `ObserverState` with the current walk
+   position.
+2. If `ObserverState::should_refresh` trips, the system bakes a fresh
+   cubemap from the far-ring `LoadedChunks` via the existing
+   `atomr_worlds_view::skybox::render_skybox_from_meshes`. The bake
+   uses `inner_radius_m = transition_radius_m` and
+   `outer_radius_m = max_radius_m`. A frame-budget guard
+   (`min_frames_between_bakes`) caps re-bakes to ≤ 1 every 30 frames.
+3. The resulting `atomr_worlds_view::skybox::Skybox` is concatenated
+   into a six-layer Bevy `Image` with `TextureViewDimension::Cube` and
+   stored as `next_handle`.
+4. `crossfade_t` ramps `Skybox.brightness` from the old to the new
+   value (`brightness = lerp(50, 2500, sun.day_factor)`); when the
+   crossfade completes, the camera's `Skybox.image` is swapped.
+
+The existing `ProceduralDomeSky` strategy stays on top as the
+atmospheric gradient + sun disc; the cubemap shows the world's
+distant geometry underneath.
+
+### Snow palette dimming
+
+`defaults.rs`/`render.rs`: snow albedo `[0.95, 0.97, 1.00]` ⇒
+`[0.78, 0.82, 0.88]` linear with roughness `0.35` ⇒ `0.70`; the CPU
+rasterizer's `material_color(4)` drops from `[242, 247, 255]` to
+`[210, 218, 228]`. Both surfaces shift together so cross-mode goldens
+stay consistent.
+
+### Raster modes (slice / RTS / overview)
+
+The view-crate per-column samplers
+([`derived/surface_raster.rs`](../crates/atomr-worlds-view/src/derived/surface_raster.rs),
+[`derived/slice_index.rs`](../crates/atomr-worlds-view/src/derived/slice_index.rs))
+already keyed their cache by `(xz, lod)`. Phase 17 replaces the
+hardcoded `Lod::new(0)` at the call sites in
+`modes/slice.rs`/`modes/rts.rs` with `streamer.lod_for_meters(observer,
+column_xz)`; `modes/overview.rs` always uses `streamer.policy.far_lod`
+because its viewing distance is body-scale.
+
+### Verification
+
+- `harness/scenes/stream_walk.toml` — drives the FP camera ~64 m past
+  the transition radius and back; tests load/eviction with hysteresis.
+- `harness/scenes/skybox_refresh.toml` — walks past the 5% drift
+  threshold at three times of day; confirms the cubemap re-bakes and
+  the brightness crossfades.
+- New unit tests: `world_stream::tests::*` (ChunkStreamer, hysteresis,
+  AABB iteration). New integration test:
+  `crates/atomr-worlds-client/tests/skybox_runtime.rs` exercises
+  `SkyboxRuntime` end-to-end (no Bevy app).
+
+### Out of scope for Phase 17
+
+- Body-aware spherical horizon clamp (uses `f64::INFINITY` for now;
+  spherical worlds will pass surface horizon meters once
+  `ContainingFrame`-based body geometry plumbing lands).
+- LOD selection beyond two tiers — `StreamingPolicy` exposes only
+  `near_lod` and `far_lod`; a screen-space pyramid (Phase 18) would
+  evaluate `MetricScale::lod_for_screen` per-brick.
+- Atmospheric tint baked into the cubemap. Today the cubemap captures
+  only mesh-geometry; sky tint is the dome strategy's job.
+
+## Phase 17.1 *(landed)* — Per-LOD brick generation
+
+A follow-up correctness fix layered on Phase 17's streamer. Phase 17
+already emitted `(brick_coord, lod)` pairs and scaled coarse-LOD
+entities by `2^L`, but `WorldRequest::GetBrick { lod }` was discarded
+before reaching the host's procedural cache and the
+`TerrainGenerator`. Coarse-LOD requests therefore returned LOD-0
+content; the renderer's per-entity scale stretched 16 m of detail over
+128 m of world space, producing visible plateaus and mismatched height
+plates at the LOD tier boundaries.
+
+The fix lands in three crates:
+
+- [`crates/atomr-worlds-generate/src/brick.rs`](../crates/atomr-worlds-generate/src/brick.rs)
+  — `BrickGenContext` carries `lod: Lod`. `BrickGenContext::legacy`
+  defaults to `Lod::new(0)` so the CUDA accelerator's CPU fallback and
+  the Python bindings remain byte-equal with the GPU kernel.
+- [`crates/atomr-worlds-generate/src/terrain.rs`](../crates/atomr-worlds-generate/src/terrain.rs)
+  — new `surface_height_world` / `is_cave_world` / `material_at_world`
+  /  `material_at_world_strategy` sample the FBM and Worley fields in
+  continuous world-meter coordinates. `generate_brick` dispatches on
+  `ctx.lod.depth`: depth 0 takes the legacy integer-voxel path (byte-
+  equal to CUDA); depth ≥ 1 samples each voxel at its center
+  `(origin + lx + 0.5) × 2^L` meters.
+- [`crates/atomr-worlds-host/src/local.rs`](../crates/atomr-worlds-host/src/local.rs)
+  — `WorldActor::cache` is keyed by `(IVec3, u8)`. `ensure_brick(bc,
+  lod)` and `snapshot(bc, lod)` thread the LOD through to the
+  generator and the cache. Subscription paths
+  (`handle_subscribe_begin`, `update_observer_pos`) and `GetBrick`
+  request handling pass the subscription/request LOD; voxel writes,
+  authored regions, and the user-write overlay stamp only the depth-0
+  cache entry.
+
+Result: adjacent LOD tiers now sample the *same* heightfield in world-
+meter coordinates and disagree only by voxel discretization — ≤ 1 m at
+the depth-0 ↔ 1 boundary, ≤ 4 m at depth-2 ↔ 3. The dramatic
+"stretched LOD-0 content rendered as LOD-3 plates" failure mode is
+gone.
+
+### Verification
+
+- `harness/scenes/elevated_spin.toml` — climbs to ~200 m, yaws 360° in
+  45° steps, captures eight comparable shots. Before: each shot had a
+  large flat slab dominating one quadrant (a tier-3 brick rendering
+  scaled LOD-0 content). After: continuous voxel terrain at every
+  yaw.
+- `harness/scenes/topdown_ring.toml` — looks straight down from
+  600 m altitude. Used to show a quadrant-biased mismatch; now shows a
+  uniform radial LOD ring.
+- `harness/scenes/altitude_360.toml` — four cardinal yaws + a zenith
+  shot at 240 m altitude.
+- Existing tests untouched:
+  `atomr_worlds_generate::terrain::tests::*` still pass (LOD-0 byte
+  equality preserved); `atomr_worlds_host` tests (request,
+  subscribe, persistence, authored regions, sphere horizon e2e) all
+  pass with the cache key change.
+
+See [LOD.md](LOD.md) for the per-tier generation contract, the
+world-meter sampling API, and the intrinsic-discretization
+characteristics that motivate the roadmap items below.
+
+### Out of scope (follow-ups)
+
+- Transition meshes (Transvoxel) to remove the ≤ voxel/2 height step
+  at LOD ring boundaries.
+- Coarse-LOD overlay re-stamping — voxel writes currently update only
+  the depth-0 cache entry, so edited regions appear smoothed once the
+  observer crosses past the depth-3 ring. A downsampling pass per
+  LOD would close this.
+- Finer LOD ladders (sub-meter `LOD−1`, per-mode tier counts) and
+  external data-feed generators (see README "Roadmap").

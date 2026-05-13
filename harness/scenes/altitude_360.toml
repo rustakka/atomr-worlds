@@ -1,0 +1,124 @@
+# Pure high-altitude 4-yaw sweep at fixed pose.
+#
+# Climbs to ~250m, holds there to let the streamer catch up, then
+# captures (pitch -25°, four cardinal yaws) so we can compare the LOD
+# rings + skybox horizon under rotational symmetry. The four shots
+# should look visually similar — same sky gradient, same fog band,
+# comparable brick density.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "altitude_360"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Climb ~240m at sprint (12 m/s × 20s = 240m). 1200 frames at 60 fps.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "Space"
+
+[[events]]
+frame = 1205
+kind  = "key_release"
+key   = "Space"
+
+[[events]]
+frame = 1205
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Settle 2 seconds (120 frames) so streamer + skybox bake catch up.
+# Tilt to ~-25° pitch so we see horizon + lower LOD bricks together.
+# 25° = 0.436 rad → 17 frames at look_speed=1.5 rad/s.
+[[events]]
+frame = 1325
+kind  = "key_press"
+key   = "ArrowDown"
+
+[[events]]
+frame = 1342
+kind  = "key_release"
+key   = "ArrowDown"
+
+[[events]]
+frame = 1360
+kind  = "screenshot"
+note  = "alt ~240m, yaw 0°, pitch -25°"
+
+# Rotate 90° left and re-shoot. 90° = pi/2 rad ≈ 63 frames.
+[[events]]
+frame = 1365
+kind  = "key_press"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 1428
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 1450
+kind  = "screenshot"
+note  = "alt ~240m, yaw 90°"
+
+[[events]]
+frame = 1455
+kind  = "key_press"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 1518
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 1540
+kind  = "screenshot"
+note  = "alt ~240m, yaw 180°"
+
+[[events]]
+frame = 1545
+kind  = "key_press"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 1608
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 1630
+kind  = "screenshot"
+note  = "alt ~240m, yaw 270°"
+
+# Look straight up — confirm zenith gradient at all yaws.
+[[events]]
+frame = 1635
+kind  = "key_press"
+key   = "ArrowUp"
+
+[[events]]
+frame = 1683
+kind  = "key_release"
+key   = "ArrowUp"
+
+[[events]]
+frame = 1700
+kind  = "screenshot"
+note  = "alt ~240m, looking straight up (zenith)"
+
+[[events]]
+frame = 1710
+kind  = "exit"

@@ -10,6 +10,7 @@ pub mod authored;
 pub mod brick;
 pub mod error;
 pub mod macro_state;
+pub mod material_selection;
 pub mod registry;
 pub mod strategies;
 pub mod terrain;
@@ -31,9 +32,14 @@ pub use registry::{
     GeneratorRegistryBuilder, ResolveError, Resolved, StrategyId, StrategySelector, ASTEROID_BELT,
     EMPTY_PLANETOID, GAS_GIANT, TERRAIN,
 };
+pub use material_selection::{
+    DynMaterialStrategy, LayeredWithFeatures, LegacyBanded, MaterialContext,
+    MaterialSelectionStrategy,
+};
 pub use terrain::{
-    TerrainConfig, TerrainGenerator, MATERIAL_AIR, MATERIAL_CAVE, MATERIAL_DIRT, MATERIAL_SAND,
-    MATERIAL_SNOW, MATERIAL_STONE, MATERIAL_WATER,
+    TerrainConfig, TerrainGenerator, MATERIAL_AIR, MATERIAL_CAVE, MATERIAL_DIRT,
+    MATERIAL_GLOW_ROCK, MATERIAL_GRASS, MATERIAL_ICE, MATERIAL_LEAVES, MATERIAL_SAND,
+    MATERIAL_SNOW, MATERIAL_STONE, MATERIAL_WATER, MATERIAL_WOOD,
 };
 pub use tiers::{
     GalaxyGen, SectorGen, SystemGen, UniverseGen, WorldGen,

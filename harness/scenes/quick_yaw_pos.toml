@@ -1,0 +1,34 @@
+# Same as quick_yaw but yaw stays at 0° (+Z direction).
+# Comparison shot to pair with quick_yaw.toml.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "qyp"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 1
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 18
+kind  = "key_release"
+key   = "ArrowDown"
+
+# Wait same number of frames as quick_yaw's rotation so the streamer
+# has the same time budget; just don't rotate.
+[[events]]
+frame = 160
+kind  = "screenshot"
+note  = "yaw 0° (+Z) — was always loaded pre-fix"
+
+[[events]]
+frame = 165
+kind  = "exit"

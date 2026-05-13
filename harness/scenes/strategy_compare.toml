@@ -1,0 +1,83 @@
+# Strategy-swap demo: capture the same scene under several `RenderConfig`
+# strategy combinations to visualise the effect of each slot. The harness
+# DSL `set_render_preset` and `set_strategy` rebuild `RenderConfig` mid-run
+# without restarting the client.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "strategy"
+
+# 0: noon, default Stylized preset.
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 1
+kind  = "set_render_preset"
+preset = "stylized"
+
+[[events]]
+frame = 5
+kind  = "screenshot"
+note  = "stylized noon"
+
+# 1: same noon but Legacy preset (no shadows, no fog, no ACES, no AO).
+[[events]]
+frame = 10
+kind  = "set_render_preset"
+preset = "legacy"
+
+[[events]]
+frame = 14
+kind  = "screenshot"
+note  = "legacy noon — flat sun, no fog"
+
+# 2: back to stylized but swap shading (placeholder — currently only
+# `LegacyVertexColor` is registered, kept here for the WGSL step).
+[[events]]
+frame = 20
+kind  = "set_render_preset"
+preset = "stylized"
+
+[[events]]
+frame = 21
+kind  = "set_strategy"
+slot = "sky"
+strategy = "ConstantSky"
+
+[[events]]
+frame = 25
+kind  = "screenshot"
+note  = "stylized + ConstantSky (no horizon tint)"
+
+# 3: swap ao to NoAo to see the difference.
+[[events]]
+frame = 30
+kind  = "set_strategy"
+slot = "ao"
+strategy = "NoAo"
+
+[[events]]
+frame = 34
+kind  = "screenshot"
+note  = "AO disabled — corners no longer darken"
+
+# 4: Debug preset = no shadows + flat sky + static sun.
+[[events]]
+frame = 40
+kind  = "set_render_preset"
+preset = "debug"
+
+[[events]]
+frame = 44
+kind  = "screenshot"
+note  = "debug preset — flat material inspection"
+
+[[events]]
+frame = 50
+kind  = "exit"

@@ -15,7 +15,7 @@ use atomr::prelude::*;
 use atomr_worlds_core::addr::{Address, Level, WorldAddr};
 use atomr_worlds_core::coord::{DVec3, IVec3};
 use atomr_worlds_core::interaction::InteractionUnit;
-use atomr_worlds_core::lod::MetricScale;
+use atomr_worlds_core::lod::{Lod, MetricScale};
 use atomr_worlds_core::shape::WorldShape;
 use atomr_worlds_core::vehicle::{AffineFrame, ParentAddr, VehicleAddr};
 use atomr_worlds_generate::{
@@ -363,7 +363,13 @@ pub(crate) struct WorldActor {
     /// brick miss consults this store and overlays any regions whose
     /// bounds intersect the brick.
     authored_regions: Arc<std::sync::Mutex<AuthoredRegionStore>>,
-    cache: HashMap<IVec3, Brick>,
+    /// Procedural-brick cache keyed by `(brick_coord, lod_depth)`. Each
+    /// LOD tier hits the generator independently — coarse-LOD bricks
+    /// downsample procedural noise to their voxel scale, so caching at
+    /// a single key would silently re-use LOD-0 content stretched to
+    /// fit, which was the original "stair-step" terrain bug at the
+    /// streaming horizon. Write paths use `Lod::new(0)`.
+    cache: HashMap<(IVec3, u8), Brick>,
     /// Voxel-position → user-written voxel. Mirrors what's in the journal so
     /// brick cache misses can be repopulated correctly post-recovery.
     overlay: HashMap<IVec3, Voxel>,
@@ -411,9 +417,20 @@ impl WorldActor {
     }
 
     /// True if any voxel of the given brick could lie inside the shape.
-    /// Cheap rejection: if the brick AABB (in world meters, centered) is
+    /// Cheap rejection: if the brick AABB (in centered world meters) is
     /// entirely outside the shape's bounding AABB AND its closest corner
     /// to the origin still fails `contains`, the brick is empty.
+    ///
+    /// Coordinate convention: brick coords are signed integers centered
+    /// on the world origin (i.e. brick (0,0,0) straddles world origin,
+    /// brick (-1,…,…) is the brick to the -X of origin). `WorldShape`
+    /// itself is centered on the origin (see `shape.rs::contains`), so
+    /// the brick AABB maps directly to "centered point" without any
+    /// further offset. Previously this routine offset by `root_size_m/2`,
+    /// which classified any brick at a negative world coord as outside
+    /// the shape — that caused the asymmetric "only +X+Z renders" bug
+    /// when the FP camera streamed bricks symmetrically around its
+    /// origin-anchored observer.
     fn brick_inside_shape(&self, brick_coord: IVec3) -> bool {
         let edge = BRICK_EDGE as i64;
         let scale = self.brush_scale();
@@ -424,34 +441,25 @@ impl WorldActor {
         let bxe = bx + edge as f64 * mpv;
         let bye = by + edge as f64 * mpv;
         let bze = bz + edge as f64 * mpv;
-        // The world's geometric center sits at scale.root_size_m / 2 in
-        // world voxel-meters (matches the existing `apply_region` math).
-        let cx = scale.root_size_m * 0.5;
-        let cy = scale.root_size_m * 0.5;
-        let cz = scale.root_size_m * 0.5;
-        // Bounding-AABB reject: pick the corner closest to the world center
-        // along each axis. If that nearest point is outside the shape, the
-        // whole brick is outside.
-        let nearest_x = (cx).clamp(bx, bxe);
-        let nearest_y = (cy).clamp(by, bye);
-        let nearest_z = (cz).clamp(bz, bze);
-        let rel = atomr_worlds_core::DVec3::new(nearest_x - cx, nearest_y - cy, nearest_z - cz);
-        // Conservative: if the nearest point is inside, brick is in. If the
-        // *furthest* corner is outside, brick is definitely outside. Between
-        // those, we conservatively say "inside" (cheap reject only).
-        if self.shape.contains(rel) {
+        // Nearest point on the brick AABB to the world origin.
+        let nearest_x = 0.0_f64.clamp(bx, bxe);
+        let nearest_y = 0.0_f64.clamp(by, bye);
+        let nearest_z = 0.0_f64.clamp(bz, bze);
+        let near = atomr_worlds_core::DVec3::new(nearest_x, nearest_y, nearest_z);
+        if self.shape.contains(near) {
             return true;
         }
-        // Furthest corner from center along each axis.
-        let far_x = if (bx - cx).abs() > (bxe - cx).abs() { bx } else { bxe };
-        let far_y = if (by - cy).abs() > (bye - cy).abs() { by } else { bye };
-        let far_z = if (bz - cz).abs() > (bze - cz).abs() { bz } else { bze };
-        let far = atomr_worlds_core::DVec3::new(far_x - cx, far_y - cy, far_z - cz);
+        // Furthest brick corner from origin along each axis.
+        let far_x = if bx.abs() > bxe.abs() { bx } else { bxe };
+        let far_y = if by.abs() > bye.abs() { by } else { bye };
+        let far_z = if bz.abs() > bze.abs() { bz } else { bze };
+        let far = atomr_worlds_core::DVec3::new(far_x, far_y, far_z);
         self.shape.contains(far)
     }
 
-    fn ensure_brick(&mut self, brick_coord: IVec3) -> &mut Brick {
-        if !self.cache.contains_key(&brick_coord) {
+    fn ensure_brick(&mut self, brick_coord: IVec3, lod: Lod) -> &mut Brick {
+        let key = (brick_coord, lod.depth);
+        if !self.cache.contains_key(&key) {
             let mut b = if !self.brick_inside_shape(brick_coord) {
                 // Brick is entirely outside the world's shape — skip the
                 // generator entirely. Empty brick fills the cache so we
@@ -461,6 +469,7 @@ impl WorldActor {
                 let ctx = BrickGenContext {
                     world_seed: self.seed,
                     brick_coord,
+                    lod,
                     shape: self.shape,
                     macro_state: self.macro_state.clone(),
                     scale: self.brush_scale(),
@@ -473,31 +482,40 @@ impl WorldActor {
             // Apply authored regions (Phase 13d). Each registered region
             // whose AABB intersects this brick overlays its voxels on
             // top of the procedural fill. Iteration order is sorted by
-            // region id — deterministic across runs.
-            {
+            // region id — deterministic across runs. Authored regions
+            // are LOD-0 only; skip the overlay at coarser LODs so they
+            // aren't stamped at the wrong scale.
+            if lod.depth == 0 {
                 let store = self.authored_regions.lock().unwrap();
                 if !store.is_empty() {
                     let _ = store.apply_all(brick_coord, BRICK_EDGE as i64, &mut b);
                 }
             }
             // Apply any user-write overlay falling inside this brick.
-            let edge = BRICK_EDGE as i64;
-            let origin = IVec3::new(brick_coord.x * edge, brick_coord.y * edge, brick_coord.z * edge);
-            for (pos, voxel) in &self.overlay {
-                if pos.x >= origin.x
-                    && pos.x < origin.x + edge
-                    && pos.y >= origin.y
-                    && pos.y < origin.y + edge
-                    && pos.z >= origin.z
-                    && pos.z < origin.z + edge
-                {
-                    let lc = IVec3::new(pos.x - origin.x, pos.y - origin.y, pos.z - origin.z);
-                    b.set(lc, *voxel);
+            // Overlays are LOD-0 voxel writes; only stamp them on the
+            // LOD-0 cache entry so coarse-LOD bricks stay purely
+            // procedural (and writes don't get mis-stamped 1-for-1 at
+            // larger voxel scales).
+            if lod.depth == 0 {
+                let edge = BRICK_EDGE as i64;
+                let origin =
+                    IVec3::new(brick_coord.x * edge, brick_coord.y * edge, brick_coord.z * edge);
+                for (pos, voxel) in &self.overlay {
+                    if pos.x >= origin.x
+                        && pos.x < origin.x + edge
+                        && pos.y >= origin.y
+                        && pos.y < origin.y + edge
+                        && pos.z >= origin.z
+                        && pos.z < origin.z + edge
+                    {
+                        let lc = IVec3::new(pos.x - origin.x, pos.y - origin.y, pos.z - origin.z);
+                        b.set(lc, *voxel);
+                    }
                 }
             }
-            self.cache.insert(brick_coord, b);
+            self.cache.insert(key, b);
         }
-        self.cache.get_mut(&brick_coord).unwrap()
+        self.cache.get_mut(&key).unwrap()
     }
 
     fn brick_of_voxel(p: IVec3) -> (IVec3, IVec3) {
@@ -507,8 +525,8 @@ impl WorldActor {
         (bc, lc)
     }
 
-    fn snapshot(&mut self, brick_coord: IVec3) -> bytes::Bytes {
-        let b = self.ensure_brick(brick_coord);
+    fn snapshot(&mut self, brick_coord: IVec3, lod: Lod) -> bytes::Bytes {
+        let b = self.ensure_brick(brick_coord, lod);
         bytes::Bytes::from(b.to_bytes())
     }
 
@@ -521,16 +539,16 @@ impl WorldActor {
         match env.body {
             WorldRequest::GetVoxel { addr, pos } => {
                 let (bc, lc) = Self::brick_of_voxel(pos);
-                let voxel = self.ensure_brick(bc).get(lc);
+                let voxel = self.ensure_brick(bc, Lod::new(0)).get(lc);
                 Ok(Envelope::new(corr, from, WorldEvent::Voxel { addr, pos, voxel }))
             }
             WorldRequest::GetBrick { addr, brick, lod } => {
-                let payload = self.snapshot(brick);
+                let payload = self.snapshot(brick, lod);
                 Ok(Envelope::new(corr, from, WorldEvent::BrickSnapshot { addr, brick, lod, payload }))
             }
             WorldRequest::WriteVoxel { addr, pos, voxel } => {
                 let (bc, lc) = Self::brick_of_voxel(pos);
-                let before = self.ensure_brick(bc).get(lc);
+                let before = self.ensure_brick(bc, Lod::new(0)).get(lc);
                 if let Some(p) = &self.persistence {
                     let ev = VoxelWriteEvent { addr, pos, before, after: voxel };
                     p.append(addr, &ev, self.next_seq)
@@ -540,7 +558,7 @@ impl WorldActor {
                     self.writes_since_snapshot += 1;
                 }
                 {
-                    let b = self.ensure_brick(bc);
+                    let b = self.ensure_brick(bc, Lod::new(0));
                     b.set(lc, voxel);
                 }
                 if voxel == Voxel::EMPTY {
@@ -641,7 +659,7 @@ impl WorldActor {
             let origin_x = bc.x * edge;
             let origin_y = bc.y * edge;
             let origin_z = bc.z * edge;
-            let before_count = self.ensure_brick(bc).nonempty_count;
+            let before_count = self.ensure_brick(bc, Lod::new(0)).nonempty_count;
             let mut journaled = Vec::new();
             // Iterate voxels in-brick that the brush touches, journal each
             // change individually so persistence replay reconstructs state
@@ -657,7 +675,7 @@ impl WorldActor {
                         let voxel_world_z = (origin_z + z) as f64 * mpv + mpv * 0.5;
                         let wp = DVec3::new(voxel_world_x, voxel_world_y, voxel_world_z);
                         if unit.contains(center, wp) {
-                            let b = self.cache.get_mut(&bc).unwrap();
+                            let b = self.cache.get_mut(&(bc, 0u8)).unwrap();
                             let before = b.get(local);
                             if b.set(local, voxel) {
                                 let pos = IVec3::new(origin_x + x, origin_y + y, origin_z + z);
@@ -672,7 +690,7 @@ impl WorldActor {
                     }
                 }
             }
-            let after_count = self.cache.get(&bc).unwrap().nonempty_count;
+            let after_count = self.cache.get(&(bc, 0u8)).unwrap().nonempty_count;
             if before_count != after_count || !journaled.is_empty() {
                 touched.push(bc);
             }
@@ -859,7 +877,7 @@ impl WorldActor {
 
         let mut sent_set = std::collections::HashSet::new();
         for bc in &bricks {
-            let payload = self.snapshot(*bc);
+            let payload = self.snapshot(*bc, lod);
             let ev = WorldEvent::BrickSnapshot { addr, brick: *bc, lod, payload };
             let env_out = Envelope::new(corr, from, ev);
             if sink.try_send(env_out).is_err() {
@@ -924,7 +942,7 @@ impl WorldActor {
             if sent.contains(&bc) {
                 continue;
             }
-            let payload = self.snapshot(bc);
+            let payload = self.snapshot(bc, lod);
             let ev = WorldEvent::BrickSnapshot { addr, brick: bc, lod, payload };
             let env_out = Envelope::new(0, addr, ev);
             if sink.try_send(env_out).is_err() {

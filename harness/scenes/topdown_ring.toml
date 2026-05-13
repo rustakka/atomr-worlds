@@ -1,0 +1,56 @@
+# Top-down view at extreme altitude to visualize the loaded LOD ring.
+#
+# Symmetric streaming = circular ring of loaded bricks centered on
+# the observer's XZ. Visible "edge" of streamed terrain should be
+# the same distance from the camera in every direction.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "topdown"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Climb to ~600m at sprint (12 m/s × 50s).
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "Space"
+[[events]]
+frame = 3005
+kind  = "key_release"
+key   = "Space"
+[[events]]
+frame = 3005
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Tilt down to almost straight-down (-85°). 85° = 1.484 rad → 60 frames
+# at look_speed=1.5 rad/s.
+[[events]]
+frame = 3060
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 3120
+kind  = "key_release"
+key   = "ArrowDown"
+
+# Let streamer settle 2 s (120 frames).
+[[events]]
+frame = 3250
+kind  = "screenshot"
+note  = "alt ~600m, pitch -85° (almost straight down)"
+
+[[events]]
+frame = 3260
+kind  = "exit"

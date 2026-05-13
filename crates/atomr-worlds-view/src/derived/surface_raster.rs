@@ -231,6 +231,27 @@ pub fn build_surface_raster(
     voxel_size_m: f32,
     lod: Lod,
 ) -> SurfaceRaster {
+    build_surface_raster_with_lod_fn(world, addr, origin_xz, dims, voxel_size_m, |_| lod)
+}
+
+/// Like [`build_surface_raster`], but the caller supplies a closure that
+/// chooses the LOD per (world-meter) column. RTS uses this with the
+/// `ChunkStreamer` so columns near the observer scan at `near_lod` and
+/// far-off columns scan at `far_lod`.
+///
+/// The brick cache is keyed by `(brick_coord, lod.depth)` so columns at
+/// different LODs don't evict each other.
+pub fn build_surface_raster_with_lod_fn<F>(
+    world: &dyn WorldQuery,
+    addr: &WorldAddr,
+    origin_xz: [f64; 2],
+    dims: [u32; 2],
+    voxel_size_m: f32,
+    mut lod_for_column: F,
+) -> SurfaceRaster
+where
+    F: FnMut([f64; 2]) -> Lod,
+{
     let total = (dims[0] as usize) * (dims[1] as usize);
     let mut heightmap_m = vec![0.0f32; total];
     let mut biome_id = vec![0u8; total];
@@ -243,12 +264,15 @@ pub fn build_surface_raster(
     let voxel_origin_x = (origin_xz[0] / vsize).floor() as i64;
     let voxel_origin_z = (origin_xz[1] / vsize).floor() as i64;
 
-    // Cache brick fetches keyed by (brick_coord) — within one column-scan
-    // we'll hit the same brick repeatedly as we step voxel-Y; across columns
-    // we'll hit the same (bx, bz)-prefix bricks at every Y. Even a tiny
-    // cache cuts WorldQuery::brick calls by ~16× in the common case.
-    let mut brick_cache: std::collections::HashMap<IVec3, Option<std::sync::Arc<atomr_worlds_voxel::Brick>>> =
-        std::collections::HashMap::new();
+    // Cache brick fetches keyed by (brick_coord, lod.depth) — within one
+    // column-scan we hit the same brick repeatedly as we step voxel-Y;
+    // across columns we hit the same (bx, bz)-prefix bricks at every Y.
+    // Including lod-depth in the key lets adjacent columns with different
+    // streamer-selected LODs co-exist without thrashing.
+    let mut brick_cache: std::collections::HashMap<
+        (IVec3, u8),
+        Option<std::sync::Arc<atomr_worlds_voxel::Brick>>,
+    > = std::collections::HashMap::new();
     let edge = BRICK_EDGE as i32;
 
     for r in 0..dims[1] {
@@ -259,6 +283,13 @@ pub fn build_surface_raster(
             let bz = world_vz.div_euclid(edge as i64);
             let lx = world_vx.rem_euclid(edge as i64) as i32;
             let lz = world_vz.rem_euclid(edge as i64) as i32;
+
+            // World-meter center of this column — the streamer measures
+            // distance from the observer in meters, so we hand it a
+            // meter-space sample point rather than voxel coords.
+            let world_x_m = (world_vx as f64 + 0.5) * vsize;
+            let world_z_m = (world_vz as f64 + 0.5) * vsize;
+            let lod = lod_for_column([world_x_m, world_z_m]);
 
             // Scan downward from COLUMN_TOP_VY through COLUMN_TOP_VY -
             // COLUMN_SCAN_VOXELS. Brick coord changes every `BRICK_EDGE`
@@ -271,9 +302,12 @@ pub fn build_surface_raster(
             while vy > scan_bot {
                 let by = (vy as i64).div_euclid(edge as i64);
                 let ly_top = (vy as i64).rem_euclid(edge as i64) as i32;
-                // Pull this brick.
+                // Pull this brick at the per-column LOD.
                 let bc = IVec3::new(bx, by, bz);
-                let brick = brick_cache.entry(bc).or_insert_with(|| world.brick(addr, bc, lod)).clone();
+                let brick = brick_cache
+                    .entry((bc, lod.depth))
+                    .or_insert_with(|| world.brick(addr, bc, lod))
+                    .clone();
                 let ly_bot_in_brick = 0i32;
                 if let Some(brick) = brick {
                     // Walk down inside the brick.
@@ -371,7 +405,7 @@ pub fn surface_raster_to_mesh(raster: &SurfaceRaster, palette: &MaterialPalette)
             let p2 = [x1, h, z1];
             let p3 = [x0, h, z1];
             for p in [p0, p1, p2, p3] {
-                mesh.vertices.push(Vertex { pos: p, normal: n, material: mat });
+                mesh.vertices.push(Vertex { pos: p, normal: n, material: mat, ao: 1.0 });
             }
             // Two triangles, winding so the +Y normal faces "outwards"
             // (matches `mesh::emit_quad` for the `positive` axis case).

@@ -43,6 +43,10 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, Window};
 use serde::Deserialize;
 
+use crate::render::{
+    CaptureOutcomes, CaptureQueueHandle, OffscreenTarget, RenderConfig, RenderPreset,
+    WorldTime,
+};
 use crate::view_mode::ViewMode;
 
 // ---------------------------------------------------------------------------
@@ -91,7 +95,7 @@ pub struct ScenarioEvent {
     pub frame: u64,
     /// One of: `"key_press" | "key_release" | "key_tap" | "screenshot" |
     /// "mouse_move" | "mouse_button_press" | "mouse_button_release" |
-    /// "exit"`.
+    /// "exit" | "set_time_of_day" | "set_render_preset" | "set_strategy"`.
     pub kind: String,
     #[serde(default)]
     pub key: Option<String>,
@@ -103,6 +107,18 @@ pub struct ScenarioEvent {
     pub dx: Option<f32>,
     #[serde(default)]
     pub dy: Option<f32>,
+    /// Hours-of-day for `set_time_of_day`.
+    #[serde(default)]
+    pub hours: Option<f32>,
+    /// Preset name for `set_render_preset`.
+    #[serde(default)]
+    pub preset: Option<String>,
+    /// Strategy slot name for `set_strategy` (e.g. "shading", "sky").
+    #[serde(default)]
+    pub slot: Option<String>,
+    /// Strategy implementation name for `set_strategy` (e.g. "AcesTonemap").
+    #[serde(default)]
+    pub strategy: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
 }
@@ -149,6 +165,10 @@ impl Scenario {
                         button: None,
                         dx: None,
                         dy: None,
+                        hours: None,
+                        preset: None,
+                        slot: None,
+                        strategy: None,
                         note: ev.note.clone(),
                     });
                     expanded.push(ScenarioEvent {
@@ -158,6 +178,10 @@ impl Scenario {
                         button: None,
                         dx: None,
                         dy: None,
+                        hours: None,
+                        preset: None,
+                        slot: None,
+                        strategy: None,
                         note: None,
                     });
                 }
@@ -184,6 +208,37 @@ impl Scenario {
                     expanded.push(ev.clone());
                 }
                 "screenshot" | "exit" => {
+                    expanded.push(ev.clone());
+                }
+                "set_time_of_day" => {
+                    if ev.hours.is_none() {
+                        return Err(format!(
+                            "event #{idx} (set_time_of_day): missing `hours`"
+                        )
+                        .into());
+                    }
+                    expanded.push(ev.clone());
+                }
+                "set_render_preset" => {
+                    let preset_name = ev.preset.as_deref().ok_or_else(|| {
+                        format!("event #{idx} (set_render_preset): missing `preset`")
+                    })?;
+                    if RenderPreset::from_str(preset_name).is_none() {
+                        return Err(format!(
+                            "event #{idx} (set_render_preset): unknown preset `{}`",
+                            preset_name
+                        )
+                        .into());
+                    }
+                    expanded.push(ev.clone());
+                }
+                "set_strategy" => {
+                    if ev.slot.is_none() || ev.strategy.is_none() {
+                        return Err(format!(
+                            "event #{idx} (set_strategy): missing `slot` or `strategy`"
+                        )
+                        .into());
+                    }
                     expanded.push(ev.clone());
                 }
                 other => {
@@ -331,7 +386,7 @@ impl Plugin for HarnessPlugin {
             .add_systems(First, tick_clock)
             .add_systems(PreUpdate, drive_input_events)
             .add_systems(PostUpdate, drive_screenshots)
-            .add_systems(Last, drive_exit);
+            .add_systems(Last, (drain_capture_outcomes, drive_exit).chain());
     }
 }
 
@@ -343,12 +398,15 @@ fn tick_clock(mut clock: ResMut<HarnessClock>) {
     clock.frame = clock.frame.wrapping_add(1);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drive_input_events(
     clock: Res<HarnessClock>,
     cfg: Res<HarnessConfig>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut mouse_buttons: ResMut<ButtonInput<MouseButton>>,
     mut mouse_writer: EventWriter<MouseMotion>,
+    mut world_time: Option<ResMut<WorldTime>>,
+    mut render_config: Option<ResMut<RenderConfig>>,
 ) {
     let now = clock.frame;
     for ev in cfg.scenario.events.iter().filter(|e| e.frame == now) {
@@ -380,21 +438,52 @@ fn drive_input_events(
                     mouse_buttons.release(b);
                 }
             }
+            "set_time_of_day" => {
+                if let (Some(h), Some(t)) = (ev.hours, world_time.as_deref_mut()) {
+                    t.set(h);
+                }
+            }
+            "set_render_preset" => {
+                if let (Some(name), Some(cfg)) =
+                    (ev.preset.as_deref(), render_config.as_deref_mut())
+                {
+                    if let Some(preset) = RenderPreset::from_str(name) {
+                        cfg.apply_preset(preset);
+                    }
+                }
+            }
+            "set_strategy" => {
+                if let (Some(slot), Some(strat), Some(cfg)) = (
+                    ev.slot.as_deref(),
+                    ev.strategy.as_deref(),
+                    render_config.as_deref_mut(),
+                ) {
+                    if !crate::render::apply_strategy_by_name(cfg, slot, strat) {
+                        eprintln!(
+                            "HARNESS_WARNING set_strategy slot={} name={} unknown",
+                            slot, strat
+                        );
+                    }
+                }
+            }
             // screenshot / exit handled in their own systems
             _ => {}
         }
     }
 }
 
+/// Enqueue a capture request into the offscreen plugin's queue. The
+/// PNG is written from the `RenderApp`'s image-copy system; we drain
+/// outcomes in [`drain_capture_outcomes`].
 fn drive_screenshots(
     clock: Res<HarnessClock>,
     cfg: Res<HarnessConfig>,
     mut state: ResMut<HarnessState>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    queue: Option<Res<CaptureQueueHandle>>,
 ) {
     let now = clock.frame;
-    let Ok(window) = windows.get_single() else {
-        return;
+    let Some(queue) = queue else {
+        return; // not in harness/offscreen mode
     };
     for ev in cfg.scenario.events.iter().filter(|e| e.frame == now) {
         if ev.kind != "screenshot" {
@@ -404,18 +493,35 @@ fn drive_screenshots(
             "{}_{:04}.png",
             cfg.scenario.output_prefix, state.shot_index
         ));
-        match capture_window_png(&window.title, &path) {
-            Ok(()) => {
-                println!("HARNESS_SHOT {}", path.display());
-                state.paths.push(path);
-                state.shot_index += 1;
-            }
-            Err(e) => {
-                eprintln!(
-                    "HARNESS_ERROR screenshot at frame {} failed: {}",
-                    now, e
-                );
-            }
+        let mut q = queue.0.lock().unwrap();
+        let id = q.next_id;
+        q.next_id = q.next_id.wrapping_add(1);
+        q.pending.push_back((id, path.clone()));
+        drop(q);
+        state.paths.push(path);
+        state.shot_index += 1;
+    }
+}
+
+/// Pull capture outcomes off the shared bus and emit `HARNESS_SHOT` /
+/// `HARNESS_ERROR` lines. Runs in `Last` so it sees the result of
+/// captures issued earlier in the same frame.
+fn drain_capture_outcomes(outcomes: Option<Res<CaptureOutcomes>>) {
+    let Some(outcomes) = outcomes else { return };
+    let mut taken = Vec::new();
+    {
+        let mut guard = outcomes.0.lock().unwrap();
+        std::mem::swap(&mut *guard, &mut taken);
+    }
+    for outcome in taken {
+        if outcome.ok {
+            println!("HARNESS_SHOT {}", outcome.path.display());
+        } else {
+            eprintln!(
+                "HARNESS_ERROR capture for {} failed: {}",
+                outcome.path.display(),
+                outcome.message.unwrap_or_else(|| "(no detail)".into())
+            );
         }
     }
 }

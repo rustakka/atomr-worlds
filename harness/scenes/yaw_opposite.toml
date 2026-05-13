@@ -1,0 +1,81 @@
+# Direct visual proof of the brick_inside_shape fix:
+# Capture at yaw 0° (+Z) and yaw 180° (-Z) from the same position.
+# Pre-fix: yaw 180° showed empty sky because negative-coord bricks
+#   were rejected by the host's shape containment check.
+# Post-fix: both yaws show terrain.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 360
+output_prefix = "yaw_opp"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Pitch -25° (looking down a bit) so we see ground in both directions.
+[[events]]
+frame = 1
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 18
+kind  = "key_release"
+key   = "ArrowDown"
+
+# Shot 0: yaw 0° (facing +Z, the formerly-only-loaded direction)
+[[events]]
+frame = 30
+kind  = "screenshot"
+note  = "yaw 0° (+Z) — should always have terrain"
+
+# Yaw 180° = pi rad. At 1.5 rad/s → 126 frames.
+[[events]]
+frame = 35
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 161
+kind  = "key_release"
+key   = "ArrowLeft"
+
+# Shot 1: yaw 180° (facing -Z, formerly empty before the fix)
+[[events]]
+frame = 200
+kind  = "screenshot"
+note  = "yaw 180° (-Z) — must show terrain (was empty pre-fix)"
+
+# Yaw to 90° (+X)
+[[events]]
+frame = 205
+kind  = "key_press"
+key   = "ArrowRight"
+[[events]]
+frame = 268
+kind  = "key_release"
+key   = "ArrowRight"
+[[events]]
+frame = 290
+kind  = "screenshot"
+note  = "yaw 90° (+X)"
+
+# Yaw to 270° (-X) by going to 90 - 180 = -90 = 270
+[[events]]
+frame = 295
+kind  = "key_press"
+key   = "ArrowRight"
+[[events]]
+frame = 421
+kind  = "key_release"
+key   = "ArrowRight"
+[[events]]
+frame = 445
+kind  = "screenshot"
+note  = "yaw 270° (-X)"
+
+[[events]]
+frame = 455
+kind  = "exit"

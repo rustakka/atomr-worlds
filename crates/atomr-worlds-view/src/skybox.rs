@@ -2,10 +2,12 @@
 //!
 //! Phase 13f ships the cubemap data type plus a mesh-input rasterizer pipeline
 //! that fills its six faces by rendering the same `MeshNode` slab from six
-//! `Camera::for_cube_face` viewpoints. A higher-tier wrapper that pulls the
-//! parent-tier brick slab from a `WorldHost` is intentionally deferred to
-//! Phase 13g/13i — keeping 13f testable in isolation means the renderer takes
-//! a slice of `MeshNode`s and nothing else.
+//! `Camera::for_cube_face` viewpoints. The host-pulling wrapper landed in
+//! Phase 13i (`ObserverState`) and is consumed by Phase 17
+//! (`atomr-worlds-client/src/render/skybox.rs`): the Bevy client bakes the
+//! cubemap from the far ring of `LoadedChunks` and binds it as
+//! `bevy::core_pipeline::Skybox`. This module stays mesh-input-only so the
+//! deterministic tests can drive it without a host.
 //!
 //! **Coordinate convention.** Right-handed, +Y up — same as the rest of the
 //! renderer. The six faces follow the OpenGL / Vulkan / DirectX cube-map
@@ -209,9 +211,9 @@ pub struct SkyboxConfig {
     /// world's edge or behind the camera).
     pub background_color: [u8; 4],
     /// Soft hint: if the host can supply a parent-tier mesh slab, include it
-    /// when computing the skybox. Phase 13f ignores this flag because the
-    /// host-pulling wrapper is deferred to 13g/13i; downstream code that
-    /// builds the mesh slab is free to honor it.
+    /// when computing the skybox. Phase 17 honors this flag in the Bevy
+    /// client by including the far-LOD `LoadedChunks` ring in the bake;
+    /// this module itself stays pure (the flag is forwarded to callers).
     pub include_parent_tier: bool,
 }
 
@@ -315,7 +317,12 @@ fn combine_meshes(meshes: &[MeshNode]) -> crate::mesh::Mesh {
         for v in &node.mesh.vertices {
             let p = transform_point_affine(t, v.pos);
             let n = transform_dir(t, v.normal);
-            out.vertices.push(crate::mesh::Vertex { pos: p, normal: n, material: v.material });
+            out.vertices.push(crate::mesh::Vertex {
+                pos: p,
+                normal: n,
+                material: v.material,
+                ao: v.ao,
+            });
         }
         for idx in &node.mesh.indices {
             out.indices.push(*idx + base);

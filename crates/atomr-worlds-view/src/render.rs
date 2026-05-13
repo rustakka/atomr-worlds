@@ -94,11 +94,20 @@ impl Framebuffer {
 }
 
 /// Map a material id to an RGB color. Air (`0`) is unused (transparent).
+/// Mirrors the client-side `HardcodedPalette` so the raster2d view modes
+/// (slice/RTS/overview) agree with the 3D modes on what each id looks like.
 pub fn material_color(material: u16) -> [u8; 3] {
     match material {
-        1 => [120, 110, 100], // stone
-        2 => [100, 140, 70],  // dirt
-        3 => [200, 180, 130], // sand (reserved)
+        1 => [107, 102, 97],   // stone (linear 0.42/0.40/0.38 → sRGB ~107/102/97)
+        2 => [82, 56, 36],     // dirt
+        3 => [199, 178, 122],  // sand
+        4 => [210, 218, 228],  // snow
+        5 => [25, 89, 140],    // water
+        6 => [46, 115, 41],    // grass
+        7 => [76, 46, 25],     // wood
+        8 => [33, 92, 30],     // leaves
+        9 => [255, 200, 60],   // glow_rock (bright — emissive)
+        10 => [199, 224, 242], // ice
         _ => {
             // Cheap deterministic palette for unknown materials.
             let m = material as u32;

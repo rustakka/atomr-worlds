@@ -69,23 +69,30 @@ fn overview_input(
             OverviewProjection::OrthographicSphere => OverviewProjection::OrthographicFlat,
         };
     }
-    if keys.pressed(KeyCode::Equal) {
+    // Q/E zoom (matching slice/RTS); Equal/Minus stay as aliases.
+    if keys.pressed(KeyCode::KeyQ) || keys.pressed(KeyCode::Equal) {
         state.extent = (state.extent * 0.97).max(0.05);
     }
-    if keys.pressed(KeyCode::Minus) {
+    if keys.pressed(KeyCode::KeyE) || keys.pressed(KeyCode::Minus) {
         state.extent = (state.extent * 1.03).min(1.0);
     }
+    // WASD rotates on both axes. Arrow keys remain as aliases. Yaw
+    // (center[0]) and pitch (center[1]) both wrap freely via
+    // `rem_euclid(2π)` — no ±π/2 clamp, so dragging past the south
+    // pole continues into a flipped orientation rather than locking
+    // up. The trig in `projection_sphere` is periodic, so any input
+    // is geometrically valid.
     let pan = 0.01;
-    if keys.pressed(KeyCode::ArrowLeft) {
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
         state.center[0] -= pan;
     }
-    if keys.pressed(KeyCode::ArrowRight) {
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
         state.center[0] += pan;
     }
-    if keys.pressed(KeyCode::ArrowUp) {
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
         state.center[1] -= pan;
     }
-    if keys.pressed(KeyCode::ArrowDown) {
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
         state.center[1] += pan;
     }
     // Drag-to-rotate the globe: hold left mouse and drag. We scale by
@@ -103,11 +110,18 @@ fn overview_input(
         // Pitch: dragging down (positive dy) should tilt the globe to
         // reveal the south pole — match the trackball feel users expect.
         state.center[1] += dy * sensitivity;
-        let half_pi = core::f64::consts::FRAC_PI_2 - 1e-3;
-        state.center[1] = state.center[1].clamp(-half_pi, half_pi);
     } else {
         motion.clear();
     }
+    // Wrap both axes to [-π, π] so rotation never resets / locks. The
+    // pitch wrap means dragging past the pole yields a flipped view
+    // (correct for an unconstrained orbit); equirect/ortho-sphere
+    // projections handle that via the periodic trig.
+    let two_pi = core::f64::consts::TAU;
+    state.center[0] = ((state.center[0] + core::f64::consts::PI).rem_euclid(two_pi))
+        - core::f64::consts::PI;
+    state.center[1] = ((state.center[1] + core::f64::consts::PI).rem_euclid(two_pi))
+        - core::f64::consts::PI;
 }
 
 fn overview_render(

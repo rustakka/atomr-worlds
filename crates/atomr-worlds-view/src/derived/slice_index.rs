@@ -146,9 +146,9 @@ impl DerivedKey for SliceKey {
 /// Build a slice table by scanning each (x, z) column downward through the
 /// band. See module rustdoc for the convention.
 ///
-/// `z_band_thickness` is clamped to `>= 1`. The caller chooses LOD via the
-/// world-query trait; today this always queries [`Lod::ROOT`] — Wave 3+ can
-/// thread an LOD parameter through if slice mode wants coarser scans.
+/// `z_band_thickness` is clamped to `>= 1`. This entry point queries all
+/// bricks at [`Lod::ROOT`]; use [`build_slice_table_with_lod_fn`] to pick
+/// the LOD per-column from a `ChunkStreamer`-style distance policy.
 pub fn build_slice_table(
     world: &dyn WorldQuery,
     addr: &WorldAddr,
@@ -157,6 +157,30 @@ pub fn build_slice_table(
     z_band_top: i32,
     z_band_thickness: u8,
 ) -> SliceTable {
+    build_slice_table_with_lod_fn(world, addr, origin_xz, dims, z_band_top, z_band_thickness, |_| {
+        Lod::ROOT
+    })
+}
+
+/// Like [`build_slice_table`], but the caller supplies a closure returning
+/// the LOD to query for each `(world_x, world_z)` voxel column. Slice / RTS
+/// modes pass `streamer.lod_for_meters(observer, …)` so far-away columns
+/// fall back to a coarser brick tier.
+///
+/// The brick cache is keyed by `(brick_coord, lod.depth)` so a column at
+/// `lod=1` doesn't blow away a neighbouring column's `lod=0` fetch.
+pub fn build_slice_table_with_lod_fn<F>(
+    world: &dyn WorldQuery,
+    addr: &WorldAddr,
+    origin_xz: [i32; 2],
+    dims: [u32; 2],
+    z_band_top: i32,
+    z_band_thickness: u8,
+    mut lod_for_column: F,
+) -> SliceTable
+where
+    F: FnMut([i64; 2]) -> Lod,
+{
     let thickness = z_band_thickness.max(1);
     let dx = dims[0];
     let dz = dims[1];
@@ -165,15 +189,19 @@ pub fn build_slice_table(
     // Cache the most-recently-fetched brick. Slice scans are coherent in
     // (x, z) and step down in y by one cell at a time, so the brick coord
     // changes rarely — caching avoids hammering `WorldQuery::brick` for
-    // every voxel.
+    // every voxel. The cache key now includes lod-depth so two adjacent
+    // columns with different LOD selections don't thrash each other.
     let edge: i64 = BRICK_EDGE as i64;
-    let mut cached: Option<(IVec3, std::sync::Arc<atomr_worlds_voxel::brick::Brick>)> = None;
-    let lod = Lod::ROOT;
+    let mut cached: Option<((IVec3, u8), std::sync::Arc<atomr_worlds_voxel::brick::Brick>)> = None;
 
     for z_idx in 0..dz {
         for x_idx in 0..dx {
             let world_x: i64 = (origin_xz[0] as i64) + (x_idx as i64);
             let world_z: i64 = (origin_xz[1] as i64) + (z_idx as i64);
+
+            // Per-column LOD: the streamer picks near_lod inside the
+            // transition radius and far_lod beyond it.
+            let lod = lod_for_column([world_x, world_z]);
 
             let mut top_voxel = Voxel::EMPTY;
             let mut top_y = z_band_top - thickness as i32;
@@ -186,12 +214,13 @@ pub fn build_slice_table(
                     IVec3::new(world_x.div_euclid(edge), world_y.div_euclid(edge), world_z.div_euclid(edge));
                 let lc =
                     IVec3::new(world_x.rem_euclid(edge), world_y.rem_euclid(edge), world_z.rem_euclid(edge));
+                let cache_key = (bc, lod.depth);
                 let brick_opt = match &cached {
-                    Some((bc_cached, b)) if *bc_cached == bc => Some(b.clone()),
+                    Some((k_cached, b)) if *k_cached == cache_key => Some(b.clone()),
                     _ => {
                         let fetched = world.brick(addr, bc, lod);
                         if let Some(ref b) = fetched {
-                            cached = Some((bc, b.clone()));
+                            cached = Some((cache_key, b.clone()));
                         } else {
                             cached = None;
                         }

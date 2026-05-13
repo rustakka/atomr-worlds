@@ -1,0 +1,23 @@
+# Minimal screenshot scenario — just capture one shot to verify the
+# harness completes after the brick_inside_shape fix.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "minimal"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 5
+kind  = "screenshot"
+note  = "one shot at spawn after 3s warmup"
+
+[[events]]
+frame = 10
+kind  = "exit"

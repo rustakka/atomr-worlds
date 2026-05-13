@@ -1,0 +1,147 @@
+# Elevated spin: climb to ~200m, then yaw 360° in 8 stops of 45°.
+# At each stop, capture a screenshot AT PITCH -25° (looking down/forward).
+# Symmetric streaming + rendering = 8 shots with similar brick density
+# at similar distances. If only 2 directions load, 6 of 8 will be empty.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "elevated_spin"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Climb to ~200m via Space (sprint = 12 m/s × 17 s = 204m).
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "Space"
+[[events]]
+frame = 1025
+kind  = "key_release"
+key   = "Space"
+[[events]]
+frame = 1025
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Settle 2 s so streamer catches up.
+# Pitch -25° (~0.44 rad → 17 frames at 1.5 rad/s).
+[[events]]
+frame = 1150
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 1167
+kind  = "key_release"
+key   = "ArrowDown"
+
+# Shot 0 — yaw 0°
+[[events]]
+frame = 1200
+kind  = "screenshot"
+note  = "yaw 0° (+Z)"
+
+# Shot 1 — yaw 45°. 45° ≈ 0.785 rad → 31 frames.
+[[events]]
+frame = 1205
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 1236
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 1260
+kind  = "screenshot"
+note  = "yaw 45°"
+
+[[events]]
+frame = 1265
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 1296
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 1320
+kind  = "screenshot"
+note  = "yaw 90° (+X)"
+
+[[events]]
+frame = 1325
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 1356
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 1380
+kind  = "screenshot"
+note  = "yaw 135°"
+
+[[events]]
+frame = 1385
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 1416
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 1440
+kind  = "screenshot"
+note  = "yaw 180° (-Z)"
+
+[[events]]
+frame = 1445
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 1476
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 1500
+kind  = "screenshot"
+note  = "yaw 225°"
+
+[[events]]
+frame = 1505
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 1536
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 1560
+kind  = "screenshot"
+note  = "yaw 270° (-X)"
+
+[[events]]
+frame = 1565
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 1596
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 1620
+kind  = "screenshot"
+note  = "yaw 315°"
+
+[[events]]
+frame = 1630
+kind  = "exit"

@@ -1,0 +1,93 @@
+# Input smoke test: confirms WASD now drives the world walk position in
+# all walk-based modes (FP, TP, Slice, RTS). Each pair of shots brackets
+# a `W`-held interval; the second shot should differ from the first
+# because the camera anchor moved.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "input"
+
+# --- FP baseline + walk ---------------------------------------------------
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 9.0
+
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "fp before walking"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 65
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 67
+kind  = "screenshot"
+note  = "fp after 60 frames of W (should differ)"
+
+# --- Switch to TP, walk W, screenshot ------------------------------------
+[[events]]
+frame = 75
+kind  = "key_tap"
+key   = "Digit2"
+
+[[events]]
+frame = 80
+kind  = "screenshot"
+note  = "tp before walking (orbit around current anchor)"
+
+[[events]]
+frame = 85
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 145
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 147
+kind  = "screenshot"
+note  = "tp after 60 frames of W (anchor should have moved)"
+
+# --- Switch to Slice, walk W, screenshot ---------------------------------
+[[events]]
+frame = 155
+kind  = "key_tap"
+key   = "Digit3"
+
+[[events]]
+frame = 160
+kind  = "screenshot"
+note  = "slice before walking"
+
+[[events]]
+frame = 165
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 225
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 227
+kind  = "screenshot"
+note  = "slice after 60 frames of W (raster should re-center)"
+
+[[events]]
+frame = 235
+kind  = "exit"

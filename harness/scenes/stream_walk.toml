@@ -1,0 +1,91 @@
+# Phase 17 streaming walk: drives the FP camera along +Z while
+# capturing PNGs along the way. The progressive `LodLadder` should
+# load inner-tier bricks in front of the observer and evict trailing
+# bricks under hysteresis. After-walk shots should be byte-different
+# from before-walk shots because the visible horizon has translated.
+# See `progressive_streaming.toml` for the four-direction
+# symmetry sweep.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "stream_walk"
+
+# --- Origin baseline -----------------------------------------------------
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "origin (ladder: 128/256/512/1024 m; fog band 55 %/98 % of outer)"
+
+# --- Walk ~64 m (one transition radius). Sprint speed = 12 m/s ~~ 5.3 s
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 65
+kind  = "screenshot"
+note  = "after 1 s of sprint (~12 m) — leading-edge bricks loading"
+
+[[events]]
+frame = 245
+kind  = "screenshot"
+note  = "after 4 s of sprint (~48 m) — outer-tier shell still streaming"
+
+[[events]]
+frame = 305
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 305
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 307
+kind  = "screenshot"
+note  = "after walking ~60 m, motion settled"
+
+# --- Walk back, confirms despawn under hysteresis ------------------------
+[[events]]
+frame = 320
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 320
+kind  = "key_press"
+key   = "KeyS"
+
+[[events]]
+frame = 380
+kind  = "key_release"
+key   = "KeyS"
+
+[[events]]
+frame = 380
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 384
+kind  = "screenshot"
+note  = "returned near origin — trailing bricks should be despawned"
+
+[[events]]
+frame = 400
+kind  = "exit"

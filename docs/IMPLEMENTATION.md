@@ -958,3 +958,268 @@ worktree commits. Module-by-module pointers (full prose in
 - Examples follow the existing `examples/sphere-flyby` pattern: spin up
   a `LocalHost`, render N frames, write PNGs to `/tmp/view-<mode>-NN.png`,
   print FNV-1a digests. No display server required.
+
+## Phase 16 (landed) — Lighting + materials upgrade
+
+The Bevy client (`atomr-worlds-client`) now ships a multi-material PBR
+look with time-of-day lighting, cascaded shadows, AO, sky-tinted fog,
+ACES tonemapping, and a strategy spine that makes every decision
+swappable at runtime. Full prose in [RENDERING.md](RENDERING.md);
+pointers below.
+
+### Render-strategy module
+
+[`crates/atomr-worlds-client/src/render/`](../crates/atomr-worlds-client/src/render/)
+holds the spine:
+
+- [`config.rs`](../crates/atomr-worlds-client/src/render/config.rs) —
+  `RenderConfig` resource (9 `Arc<dyn Trait>` slots + `time_advances_automatically`
+  + `seconds_per_hour`); `RenderPreset::{Legacy, Stylized, Debug}` +
+  `apply_preset` that writes every slot explicitly (never builds on
+  `Default`).
+- [`strategy.rs`](../crates/atomr-worlds-client/src/render/strategy.rs)
+  — trait definitions: `MeshStrategy`, `PaletteStrategy`, `AoStrategy`,
+  `ShadingStrategy`, `SkyStrategy`, `SunCurveStrategy`, `ShadowStrategy`,
+  `FogStrategy`, `TonemapStrategy`. Plus `SunState { direction, color,
+  illuminance, day_factor }` returned by `SunCurveStrategy::sun_state`.
+- [`defaults.rs`](../crates/atomr-worlds-client/src/render/defaults.rs)
+  — default impls: `GreedyFlat` (mesher), `HardcodedPalette` (10
+  entries), `NoAo`, `MinecraftCornerAo`, `LegacyVertexColor`,
+  `StaticSun`, `KeyframeLutSun` (5-keyframe LUT at h=5/7/12/18/21),
+  `ConstantSky`, `SkyTinted`, `NoShadows`, `BasicCascades`, `NoFog`,
+  `ExpSquaredSkyTintedFog`, `DefaultTonemap`, `AcesTonemap`. Helper
+  `lerp_keyframes(hours, &[(h, vec3, scalar)], …)` for wrap-around
+  time-of-day interpolation.
+- [`sun.rs`](../crates/atomr-worlds-client/src/render/sun.rs) —
+  `WorldTime(pub f32)` resource (hours in `[0, 24)`),
+  `WorldSunMarker` component, three systems:
+  - `advance_world_time` (opt-in via
+    `RenderConfig::time_advances_automatically`).
+  - `sync_sun` — writes `DirectionalLight` (transform via `look_to` +
+    color + illuminance) and `AmbientLight` (color + brightness × 200
+    to land in Bevy's 0..100 scale).
+  - `sync_sky_and_fog` — writes `ClearColor` + per-camera
+    `FogSettings.color`/`falloff` from the sky + fog strategies.
+- [`plugin.rs`](../crates/atomr-worlds-client/src/render/plugin.rs) —
+  `RenderPlugin` inserts `RenderConfig::default()` + `WorldTime` and
+  chains the three sun systems in `Update`.
+- [`registry.rs`](../crates/atomr-worlds-client/src/render/registry.rs)
+  — `apply_strategy_by_name(cfg, slot, name) -> bool` switch table for
+  the harness `set_strategy` event.
+- [`offscreen.rs`](../crates/atomr-worlds-client/src/render/offscreen.rs)
+  — `OffscreenCapturePlugin` (camera→Image render target),
+  `CaptureQueueHandle`, `CaptureOutcomes`, `image_copy_system` in
+  `RenderApp` at `RenderSet::Cleanup`. Required because xwd on
+  hybrid-GPU Linux yields all-black PNGs; this path copies
+  texture→buffer via wgpu and saves PNG directly. Memory note at
+  `memory/project_harness_offscreen_capture.md`.
+
+### FP-mode wiring
+
+[`crates/atomr-worlds-client/src/modes/fp.rs`](../crates/atomr-worlds-client/src/modes/fp.rs)
+now consumes the spine:
+
+- `MaterialPool` resource — one `StandardMaterial` per palette entry,
+  built from `RenderConfig::palette.palette()` at startup. Water/ice
+  get `AlphaMode::Blend`; glow_rock gets `emissive` ×2.
+- `fp_stream_bricks` calls `greedy_mesh_by_material()` and spawns one
+  anchor entity per brick with N child `PbrBundle`s (one per material
+  id present).
+- `atomr_to_bevy_mesh` bakes AO (from `cfg.ao.bake`) into
+  `ATTRIBUTE_COLOR` as `[ao, ao, ao, 1.0]`; Bevy's `StandardMaterial`
+  multiplies it against `base_color` natively.
+- Camera spawn: `Camera3dBundle { hdr: true, … }` plus `Tonemapping`,
+  `Exposure`, `BloomSettings` (from tonemap strategy), `FogSettings`
+  (driven by `sync_sky_and_fog` each frame).
+- DirectionalLight spawned with `WorldSunMarker`; cascaded shadow
+  config attached from `cfg.shadow.cascade_config()`.
+
+TP mode (`modes/tp.rs`) reuses the FP scene — `WorldSunMarker`,
+`MaterialPool`, `FogSettings`, tonemapping, bloom, shadows all
+inherited. Only the camera transform differs.
+
+### Material palette (view crate)
+
+- [`crates/atomr-worlds-view/src/scene.rs`](../crates/atomr-worlds-view/src/scene.rs)
+  — `MaterialEntry` extended with `emissive: [f32; 3]` and
+  `alpha: f32`.
+- [`crates/atomr-worlds-view/src/render.rs`](../crates/atomr-worlds-view/src/render.rs)
+  — `material_color()` updated to 10-entry RGB table matching the
+  canonical palette. Slice/RTS/overview pick up the new colors
+  transparently.
+- [`crates/atomr-worlds-view/src/mesh.rs`](../crates/atomr-worlds-view/src/mesh.rs)
+  — `Vertex` extended with `ao: f32`; `greedy_mesh_by_material(brick)`
+  emits one `Mesh` per material id present; `bake_ao(mesh, brick)`
+  computes the Minecraft-style corner AO term.
+- [`crates/atomr-worlds-generate/src/material_selection.rs`](../crates/atomr-worlds-generate/src/material_selection.rs)
+  (new) — `MaterialSelectionStrategy` trait;
+  `LegacyBanded` (preserves CUDA byte-equality);
+  `LayeredWithFeatures` (replaces dirt with grass on temperate
+  biomes, sprinkles glow_rock at Worley-noise minima).
+- [`crates/atomr-worlds-generate/src/strategies/terrain.rs`](../crates/atomr-worlds-generate/src/strategies/terrain.rs)
+  — `default_terrain()` attaches `LayeredWithFeatures`. CUDA's `cpu_ref`
+  uses `TerrainGenerator::new` (no strategy), keeping byte-equality.
+
+### Harness DSL
+
+[`crates/atomr-worlds-client/src/harness.rs`](../crates/atomr-worlds-client/src/harness.rs)
+gains three event kinds + the offscreen-capture path:
+
+- `set_time_of_day { hours: f32 }` — writes `ResMut<WorldTime>`.
+- `set_render_preset { preset: "stylized"|"legacy"|"debug" }` — calls
+  `RenderConfig::apply_preset`.
+- `set_strategy { slot: String, strategy: String }` — calls
+  `registry::apply_strategy_by_name`.
+- `drive_screenshots` was rewritten to push `(frame, path)` pairs onto
+  `CaptureQueueHandle` instead of shelling out to `xwd`. A new
+  `drain_capture_outcomes` system reads `CaptureOutcomes` in
+  `PostUpdate` and prints one `HARNESS_SHOT <path>` line per success.
+
+### Scenarios
+
+- [`harness/scenes/lighting_showcase.toml`](../harness/scenes/lighting_showcase.toml)
+  — six time-of-day shots (h=6, 9, 12, 17, 19, 21).
+- [`harness/scenes/strategy_compare.toml`](../harness/scenes/strategy_compare.toml)
+  — A/B preset + per-slot strategy comparison.
+- [`harness/scenes/voxel_material.toml`](../harness/scenes/voxel_material.toml)
+  — four-shot A/B for Step 8 + Step 9: baseline →
+  `PaletteVoxelMaterial` only → `ProceduralDomeSky` only → both.
+
+### Input bindings (shared walk + per-mode axes)
+
+| mode      | move horizontal | mode-specific axis            | look                          | grab     |
+| --------- | --------------- | ----------------------------- | ----------------------------- | -------- |
+| FP        | WASD            | Space/Ctrl up/down            | mouse (locked) / arrow keys   | click    |
+| TP        | WASD            | scroll-wheel distance         | mouse (locked) / arrow keys   | click    |
+| Slice     | WASD            | Q/E or PageUp/PageDown z-band | —                             | —        |
+| RTS       | WASD            | Q/E zoom; Z/X rotate          | —                             | —        |
+| Overview  | WASD pitch/yaw  | Q/E or Equal/Minus extent     | mouse drag (left)             | —        |
+
+Cursor lock: in FP/TP, a **left-click** inside the window grabs the
+cursor (previously the cursor auto-grabbed on any keypress, which was
+awkward). Escape releases it. The FP/TP visibility / streaming pipeline
+is unchanged.
+
+Implementation: WASD is owned by
+[`world_walk_input`](../crates/atomr-worlds-client/src/modes/fp.rs) which
+runs in `Update` for FP/TP/Slice/RTS — it ticks `FpState::walk` with the
+movement axes, while mouse look stays in
+[`fp_input_look`](../crates/atomr-worlds-client/src/modes/fp.rs) (FP
+only). TP's own `tp_input` consumes mouse motion for the orbit;
+slice/RTS center their raster on `fp_state.walk.camera().eye`, so they
+pan automatically when the walk position changes. Overview rotation
+wraps both yaw and pitch through `rem_euclid(2π)` so dragging past the
+poles never resets — previously a `±π/2 − ε` clamp on pitch caused the
+view to lock.
+
+### Step 8 / Step 9 (opt-in custom WGSL)
+
+- [`crates/atomr-worlds-client/src/render/materials.rs`](../crates/atomr-worlds-client/src/render/materials.rs)
+  — `VoxelMaterialExt` (palette storage at binding 100),
+  `VoxelMaterial = ExtendedMaterial<StandardMaterial, VoxelMaterialExt>`,
+  `SkyDomeMaterial` (`Material` impl whose `specialize` flips
+  `cull_mode = Some(Face::Front)`).
+- [`crates/atomr-worlds-client/src/render/sky_dome.rs`](../crates/atomr-worlds-client/src/render/sky_dome.rs)
+  — `SkyDomePlugin`, `ensure_sky_dome` (lazy-spawn the dome as a child
+  of `WorldCamera`), `sync_sky_dome` (toggle visibility +
+  uniform-write per frame).
+- [`crates/atomr-worlds-client/assets/shaders/voxel_material.wgsl`](../crates/atomr-worlds-client/assets/shaders/voxel_material.wgsl),
+  [`crates/atomr-worlds-client/assets/shaders/sky_dome.wgsl`](../crates/atomr-worlds-client/assets/shaders/sky_dome.wgsl)
+  — WGSL fragment shaders.
+- [`crates/atomr-worlds-client/src/main.rs::resolve_asset_root`](../crates/atomr-worlds-client/src/main.rs)
+  — picks an absolute asset path so the shaders load regardless of CWD.
+- [`crates/atomr-worlds-client/src/modes/fp.rs`](../crates/atomr-worlds-client/src/modes/fp.rs)
+  — `VoxelMaterialPool` resource (single shared `VoxelMaterial`
+  handle); `fp_stream_bricks` branches on
+  `RenderConfig::shading.mode()` to spawn either N child `PbrBundle`s
+  (`SplitPerMaterial`) or one `MaterialMeshBundle<VoxelMaterial>` per
+  brick (`PaletteVoxelMaterial`) using the new `merge_by_material`
+  helper.
+
+## Phase 17 follow-up (landed) — Progressive LOD ladder + horizon fog
+
+The 2-tier `near/far` ring in `ChunkStreamer` produced visible
+directional asymmetry while walking: the cube-shaped load region
+extended ~73 % farther along its corner-diagonals than its faces, so
+only some cardinal directions appeared to load new bricks as the
+observer moved. Phase 17 follow-up replaces it with a progressive
+**spherical** ladder and ties the camera's `FogSettings` to the load
+horizon so chunks streaming into the outer tier fade in from mist.
+
+- [`crates/atomr-worlds-client/src/world_stream.rs`](../crates/atomr-worlds-client/src/world_stream.rs)
+  — new `LodTier { lod, outer_radius_m }` and `LodLadder { tiers,
+  bricks_per_tick }`. Default ladder: 4 rungs at L0 / L1 / L2 / L3
+  with radii 128 / 256 / 512 / 1024 m (multiples of the coarsest
+  brick edge so grids tile cleanly across boundaries).
+  `ChunkStreamer::policy` is kept as a cached 2-tier `StreamingPolicy`
+  projection (`near_lod = tier 0`, `far_lod = last tier`) so proto
+  / host / skybox callers don't need to change.
+- `desired_chunks(streamer, observer, horizon_m)` walks the ladder and
+  emits a brick at tier `i` iff its **center** is inside the shell
+  `[prev_outer, this_outer)`. The test is purely radial (3D distance),
+  so the load shape is symmetric under reflection across X and Z and
+  under 90° rotation around the observer's vertical axis. Unit tests:
+  `walk_in_each_cardinal_direction_produces_matching_brick_counts`
+  and `desired_chunks_load_symmetrically_in_all_four_cardinal_directions`
+  pin the regression so the bug can't return.
+- `lod_for_meters` walks the same ladder so slice / RTS LOD selection
+  (per-column) lines up bit-for-bit with the FP/TP brick fetch grid.
+- [`crates/atomr-worlds-client/src/render/strategy.rs`](../crates/atomr-worlds-client/src/render/strategy.rs)
+  — `FogStrategy::fog_settings` gains a `horizon_band_m: Option<(f32,
+  f32)>` parameter. `None` keeps legacy behaviour;
+  `Some((start, end))` lets the strategy switch to linear fog that
+  ramps from clear at `start` to fully opaque at `end`.
+- [`crates/atomr-worlds-client/src/render/defaults.rs`](../crates/atomr-worlds-client/src/render/defaults.rs)
+  — `ExpSquaredSkyTintedFog` honours the band; without it the prior
+  exponential-density fog applies.
+- [`crates/atomr-worlds-client/src/render/sun.rs::sync_sky_and_fog`](../crates/atomr-worlds-client/src/render/sun.rs)
+  reads `ChunkStreamer::fog_band_m()` (defaults: 55 % / 98 % of the
+  outer radius) and forwards it to the strategy each frame. Color
+  still tracks the current sun-curve horizon.
+- `DEFAULT_BRICKS_PER_TICK` bumped from 24 → 128 to keep the larger
+  4-tier sphere populating in roughly the same wall time the 2-tier
+  cube did. The mesh build still only runs for non-empty bricks
+  (≪ 10 % of the total under typical terrain).
+
+## Phase 17.1 (landed) — Per-LOD brick generation
+
+The streaming ladder above asks the host for `(brick_coord, lod)`
+pairs at four tiers. Phase 17 wired the request envelope but not the
+generation side: `WorldRequest::GetBrick { lod }` was discarded before
+reaching the procedural generator and the host's brick cache, and the
+cache keyed only on `brick_coord`. Coarse-LOD requests therefore
+re-used LOD-0 content, which the FP loader then scaled by `2^L` for
+display — visible as huge stretched plateaus at each LOD ring
+boundary.
+
+Touched files:
+
+- [`crates/atomr-worlds-generate/src/brick.rs`](../crates/atomr-worlds-generate/src/brick.rs)
+  — `BrickGenContext.lod: Lod`. `BrickGenContext::legacy` defaults to
+  `Lod::new(0)` so the CUDA accelerator's CPU fallback (and any other
+  two-arg legacy caller) is unchanged.
+- [`crates/atomr-worlds-generate/src/terrain.rs`](../crates/atomr-worlds-generate/src/terrain.rs)
+  — new LOD-agnostic samplers: `surface_height_world(seed, x_m, z_m)`,
+  `is_cave_world(seed, x_m, y_m, z_m)`,
+  `material_at_world(seed, world_xyz_m)`, and
+  `material_at_world_strategy(strategy, …)`. The dispatcher
+  `<TerrainGenerator as BrickGenerator>::generate_brick` branches on
+  `ctx.lod.depth`: depth 0 runs the legacy integer-voxel path
+  (byte-equal to `crates/atomr-worlds-accel/src/cuda_kernel.cu`);
+  depth ≥ 1 samples each voxel at world-meter center `(origin + lx +
+  0.5) * 2^L`.
+- [`crates/atomr-worlds-host/src/local.rs`](../crates/atomr-worlds-host/src/local.rs)
+  — `WorldActor::cache: HashMap<(IVec3, u8), Brick>`. The new
+  `ensure_brick(brick_coord, lod)` / `snapshot(brick_coord, lod)`
+  signatures thread the LOD into both the generator context and the
+  cache key. `WorldRequest::GetBrick` forwards the request LOD;
+  subscription paths (`handle_subscribe_begin`,
+  `update_observer_pos`) pass the subscription's tier LOD. Voxel
+  writes, authored regions, and the user-write overlay stamp only the
+  depth-0 entry (writes are LOD-0 by construction; coarse-LOD bricks
+  stay purely procedural). `BRICK_EDGE`, the `WorldShape` filter, and
+  the brush path are unchanged.
+
+See [LOD.md](LOD.md) for the per-LOD generation contract, the world-
+meter sampling API, the cache-key invariant, and the intrinsic
+discretization characteristics at each tier boundary.

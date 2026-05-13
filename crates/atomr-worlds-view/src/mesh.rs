@@ -15,6 +15,11 @@ pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub material: u16,
+    /// Per-vertex ambient-occlusion factor in `[0, 1]`. `1.0` means
+    /// unobstructed (no corner occlusion); `< 1.0` means the vertex is
+    /// in a concave corner. Set by AO strategies (Minecraft-style corner
+    /// sampling); defaults to `1.0` so meshes without AO render unaffected.
+    pub ao: f32,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -61,6 +66,41 @@ pub fn greedy_mesh(brick: &Brick) -> Mesh {
     mesh
 }
 
+/// Split-by-material variant: run greedy meshing as usual, then bucket
+/// each triangle into a per-material sub-mesh. Used by the client's
+/// `SplitPerMaterial` shading strategy so each material can carry its
+/// own `StandardMaterial` (per-material roughness / metallic / emissive
+/// / alpha) without an explicit ID-keyed shader.
+///
+/// Greedy meshing already never merges across material boundaries (each
+/// quad has a single `material` id, see `emit_quad`), so splitting is a
+/// simple bucket pass — no re-meshing required. Vertices are duplicated
+/// across buckets only when adjacent quads of different materials
+/// happened to share an index, which is rare in practice.
+pub fn greedy_mesh_by_material(brick: &Brick) -> std::collections::HashMap<u16, Mesh> {
+    let merged = greedy_mesh(brick);
+    let mut split: std::collections::HashMap<u16, Mesh> =
+        std::collections::HashMap::new();
+    let mut idx = 0;
+    while idx + 2 < merged.indices.len() {
+        let i0 = merged.indices[idx] as usize;
+        let i1 = merged.indices[idx + 1] as usize;
+        let i2 = merged.indices[idx + 2] as usize;
+        idx += 3;
+        let v0 = merged.vertices[i0];
+        let v1 = merged.vertices[i1];
+        let v2 = merged.vertices[i2];
+        // All three vertices of a greedy quad share the same material; key on v0.
+        let bucket = split.entry(v0.material).or_default();
+        let base = bucket.vertices.len() as u32;
+        bucket.vertices.push(v0);
+        bucket.vertices.push(v1);
+        bucket.vertices.push(v2);
+        bucket.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    split
+}
+
 fn meshing_axis(brick: &Brick, face_idx: usize, mesh: &mut Mesh) {
     let dir = FACE_DIRS[face_idx];
     let axis = if dir[0] != 0 {
@@ -72,11 +112,17 @@ fn meshing_axis(brick: &Brick, face_idx: usize, mesh: &mut Mesh) {
     };
     let positive = dir[axis] > 0;
 
-    // u, v are the in-plane axes (the two non-`axis` axes).
+    // u, v are the in-plane axes; their ordering is picked so
+    // `u × v == +axis` (right-handed). For axis=1 (Y faces) the natural
+    // (0, 2) ordering gives `X × Z = -Y`, which would back-face-cull top
+    // faces — so we use (2, 0) instead to produce `Z × X = +Y`. With
+    // this rule, the positive-axis winding (`p0, p1, p2`) is always CCW
+    // when viewed from outside the face, matching Bevy's default
+    // `FrontFace::Ccw` / `Cull::Back` so all six face directions render.
     let (u_axis, v_axis) = match axis {
-        0 => (1, 2),
-        1 => (0, 2),
-        _ => (0, 1),
+        0 => (1, 2), // Y × Z = +X
+        1 => (2, 0), // Z × X = +Y
+        _ => (0, 1), // X × Y = +Z
     };
 
     for layer in 0..EDGE as i32 {
@@ -177,7 +223,7 @@ fn emit_quad(
         [origin[0] + u_vec[0] + v_vec[0], origin[1] + u_vec[1] + v_vec[1], origin[2] + u_vec[2] + v_vec[2]];
     let p3 = [origin[0] + v_vec[0], origin[1] + v_vec[1], origin[2] + v_vec[2]];
     for p in [p0, p1, p2, p3] {
-        mesh.vertices.push(Vertex { pos: p, normal, material });
+        mesh.vertices.push(Vertex { pos: p, normal, material, ao: 1.0 });
     }
     // Wind so the normal faces "outwards". Flip when the face points along the
     // negative axis so back-face culling stays consistent.
@@ -185,6 +231,71 @@ fn emit_quad(
         mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     } else {
         mesh.indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+    }
+}
+
+/// Post-process a mesh, writing per-vertex AO (Minecraft-style corner
+/// sampling). For each vertex sitting at a quad corner, sample the four
+/// voxels surrounding that corner *on the air side* of the face; the AO
+/// factor is `f(occluded_count)`. The "owner" voxel of the face is by
+/// construction air on its outward side, so at most 3 of the 4 can be
+/// solid. Greedy merging means the merged quad's 4 corners pick up AO
+/// from voxels just outside the quad's extent — the interior of the
+/// quad gets a bilinear gradient via Bevy's vertex-color interpolation.
+///
+/// This is intentionally a separate pass from [`greedy_mesh`] so AO is
+/// opt-in (the [`AoStrategy`](https://docs.rs/) pattern client-side) and
+/// the greedy meshing path stays minimal.
+pub fn bake_ao(mesh: &mut Mesh, brick: &Brick) {
+    for v in &mut mesh.vertices {
+        v.ao = compute_vertex_ao(brick, v);
+    }
+}
+
+fn compute_vertex_ao(brick: &Brick, v: &Vertex) -> f32 {
+    let n = v.normal;
+    let face_axis = if n[0].abs() > 0.5 {
+        0
+    } else if n[1].abs() > 0.5 {
+        1
+    } else {
+        2
+    };
+    let positive = n[face_axis] > 0.0;
+    let (u_axis, v_axis) = match face_axis {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    // The vertex sits at integer brick-local coordinates. The "air
+    // layer" is the voxel layer on the empty side of the face.
+    let layer_air = if positive {
+        v.pos[face_axis] as i32
+    } else {
+        v.pos[face_axis] as i32 - 1
+    };
+    let u_pos = v.pos[u_axis] as i32;
+    let v_pos = v.pos[v_axis] as i32;
+    let sample = |du: i32, dv: i32| -> bool {
+        let mut c = [0i32; 3];
+        c[face_axis] = layer_air;
+        c[u_axis] = u_pos + du;
+        c[v_axis] = v_pos + dv;
+        material_at(brick, c[0], c[1], c[2]) != 0
+    };
+    // The 4 air-side voxels touching this corner. One of them is the
+    // owner's air-side neighbor (always 0 by construction); the others
+    // contribute to occlusion. Max occlusion is 3.
+    let occ = sample(-1, -1) as u8
+        + sample(0, -1) as u8
+        + sample(-1, 0) as u8
+        + sample(0, 0) as u8;
+    match occ {
+        0 => 1.0,
+        1 => 0.78,
+        2 => 0.55,
+        3 => 0.40,
+        _ => 0.40,
     }
 }
 
@@ -225,6 +336,68 @@ mod tests {
         // Six faces, each a 16×16 merged quad (4 vertices, 6 indices) → 24 verts, 36 indices.
         assert_eq!(m.vertices.len(), 24, "expected 6 merged quads, got {} verts", m.vertices.len());
         assert_eq!(m.indices.len(), 36);
+    }
+
+    #[test]
+    fn all_six_face_directions_wind_outward() {
+        // For each of the 6 face directions, build a brick where only
+        // the face along that direction is exposed and verify that the
+        // first triangle's geometric normal (from CCW cross product)
+        // points the same way as the stored vertex normal. Catches the
+        // axis-1 (Y) handedness bug that previously back-face-culled
+        // every top + bottom face under Bevy's default Cull::Back.
+        for face_idx in 0..6 {
+            // Single voxel in the middle so every face is exposed; pick
+            // one face's triangles via the stored normal.
+            let mut b = Brick::new();
+            b.set(IVec3::new(8, 8, 8), Voxel::new(1));
+            let m = greedy_mesh(&b);
+            let target_normal = FACE_DIRS[face_idx];
+            // Locate the first triangle whose v0.normal matches target.
+            let mut found = false;
+            let mut tri = 0;
+            while tri + 2 < m.indices.len() {
+                let v0 = m.vertices[m.indices[tri] as usize];
+                let normal_matches = (v0.normal[0] as i32) == target_normal[0]
+                    && (v0.normal[1] as i32) == target_normal[1]
+                    && (v0.normal[2] as i32) == target_normal[2];
+                if normal_matches {
+                    let v1 = m.vertices[m.indices[tri + 1] as usize];
+                    let v2 = m.vertices[m.indices[tri + 2] as usize];
+                    let e1 = [
+                        v1.pos[0] - v0.pos[0],
+                        v1.pos[1] - v0.pos[1],
+                        v1.pos[2] - v0.pos[2],
+                    ];
+                    let e2 = [
+                        v2.pos[0] - v0.pos[0],
+                        v2.pos[1] - v0.pos[1],
+                        v2.pos[2] - v0.pos[2],
+                    ];
+                    let n = [
+                        e1[1] * e2[2] - e1[2] * e2[1],
+                        e1[2] * e2[0] - e1[0] * e2[2],
+                        e1[0] * e2[1] - e1[1] * e2[0],
+                    ];
+                    let dot = n[0] * (target_normal[0] as f32)
+                        + n[1] * (target_normal[1] as f32)
+                        + n[2] * (target_normal[2] as f32);
+                    assert!(
+                        dot > 0.0,
+                        "face {:?} winding produces back-facing front (dot={}), \
+                         geometric normal {:?} disagrees with stored normal {:?}",
+                        target_normal,
+                        dot,
+                        n,
+                        v0.normal
+                    );
+                    found = true;
+                    break;
+                }
+                tri += 3;
+            }
+            assert!(found, "no triangles with stored normal {:?}", target_normal);
+        }
     }
 
     #[test]

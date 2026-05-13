@@ -21,10 +21,18 @@ use atomr_worlds_view::{render_mesh, Camera, RenderConfig};
 const SEED: u64 = 0xDEAD_BEEF_CAFE_F00D;
 
 /// Pinned FNV-1a hash for the known brick + camera + render config. Updated
-/// in Phase 13f for the reversed-z projection. Bump this and document the
-/// reason whenever the renderer or terrain-generator math intentionally
-/// changes; an unexpected drift is the signal this test is supposed to catch.
-const PINNED_HASH: u64 = 0x71cc_a39a_1edb_1595;
+/// in Phase 13f for the reversed-z projection, again for the
+/// lighting+materials upgrade (10-entry palette), and once more for the
+/// greedy-mesh winding fix: axis=1 (±Y) faces had `u × v = -Y`, so Bevy's
+/// default `Cull::Back` was hiding the top + bottom of every voxel. Fix
+/// (mesh.rs::meshing_axis) swapped u/v to `(2, 0)` for axis=1, which
+/// changes the iteration / merge order on Y-faces too and thus the
+/// rasterised RGB.
+///
+/// Bump this and document the reason whenever the renderer or
+/// terrain-generator math intentionally changes; an unexpected drift is
+/// the signal this test is supposed to catch.
+const PINNED_HASH: u64 = 0xf127_b797_c699_fa45;
 
 fn render_known_brick() -> u64 {
     let gen = TerrainGenerator::new(TerrainConfig::default());

@@ -1,0 +1,28 @@
+# Two screenshots back-to-back at same pose. Diagnoses whether the
+# yaw rotation in yaw_opposite is what's slow, or just two captures.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 360
+output_prefix = "twoshot"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 5
+kind  = "screenshot"
+note  = "shot 0"
+
+[[events]]
+frame = 60
+kind  = "screenshot"
+note  = "shot 1"
+
+[[events]]
+frame = 70
+kind  = "exit"

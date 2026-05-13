@@ -1,0 +1,187 @@
+# Progressive-LOD walkaround.
+#
+# Walks the FP camera through all four cardinal directions, capturing
+# a screenshot at each apex. Visual regression target: each cardinal
+# screenshot should show fresh terrain streaming into the camera's
+# view at the same density — the symmetric counterpart of the old
+# 2-tier cube ring's "only some directions load" bug.
+#
+# The progressive LOD ladder (`world_stream.rs::LodLadder`) makes the
+# 4-direction sweep load the same brick count at each tier regardless
+# of heading; the fog band tied to the outermost tier's radius hides
+# whatever is still streaming so the horizon stays mist-shrouded.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "progressive_streaming"
+
+# --- Baseline ------------------------------------------------------------
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "origin — inner ring populated, mist on horizon"
+
+# --- North (+Z): 60 frames sprint ----------------------------------------
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 65
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 65
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 75
+kind  = "screenshot"
+note  = "after +Z sprint — leading edge loaded, trailing edge despawned"
+
+# --- Back to origin ------------------------------------------------------
+[[events]]
+frame = 80
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 80
+kind  = "key_press"
+key   = "KeyS"
+
+[[events]]
+frame = 140
+kind  = "key_release"
+key   = "KeyS"
+
+[[events]]
+frame = 140
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 150
+kind  = "screenshot"
+note  = "returned to origin — hysteresis cleanup settled"
+
+# --- South (-Z): the mirror direction. Should look symmetric to +Z. -----
+[[events]]
+frame = 155
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 155
+kind  = "key_press"
+key   = "KeyS"
+
+[[events]]
+frame = 215
+kind  = "key_release"
+key   = "KeyS"
+
+[[events]]
+frame = 215
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 225
+kind  = "screenshot"
+note  = "after -Z sprint — terrain loaded behind original origin"
+
+# --- Re-center for east/west sweep ---------------------------------------
+[[events]]
+frame = 230
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 230
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 290
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 290
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# --- East (+X via KeyA — see fp.rs::world_walk_input note) --------------
+# The walk camera's +x_local maps to world -X at the default yaw, so
+# KeyA pushes the observer in +X world meters.
+[[events]]
+frame = 300
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 300
+kind  = "key_press"
+key   = "KeyA"
+
+[[events]]
+frame = 360
+kind  = "key_release"
+key   = "KeyA"
+
+[[events]]
+frame = 360
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 370
+kind  = "screenshot"
+note  = "after +X sprint — east-side ring loaded symmetric to +Z"
+
+# --- West (-X via KeyD) --------------------------------------------------
+[[events]]
+frame = 375
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 375
+kind  = "key_press"
+key   = "KeyD"
+
+[[events]]
+frame = 495
+kind  = "key_release"
+key   = "KeyD"
+
+[[events]]
+frame = 495
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 505
+kind  = "screenshot"
+note  = "after -X sprint — west-side ring loaded symmetric to -Z"
+
+[[events]]
+frame = 520
+kind  = "exit"

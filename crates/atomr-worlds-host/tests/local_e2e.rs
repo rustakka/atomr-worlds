@@ -31,6 +31,47 @@ async fn brick_round_trip() {
     host.shutdown().await.unwrap();
 }
 
+/// Regression for the FP-streamer "only +X+Z loads" bug: bricks at
+/// negative brick coords must generate terrain, not get short-circuited
+/// to an empty Brick by `brick_inside_shape`. Pre-fix, `brick_inside_shape`
+/// offset by `root_size_m/2`, so any brick with a coord ≤ -2 fell outside
+/// the cube and was returned empty. With a 10 M m world that meant ~half
+/// the loaded ring around an origin-anchored observer was empty.
+///
+/// The check here: pull bricks at (-3, 0, -3), (-3, 0, 0), (0, 0, -3),
+/// (3, 0, 3) — all sit on the natural terrain surface — and assert each
+/// has at least one solid voxel. If any side returns an entirely-empty
+/// brick, the asymmetry is back.
+#[tokio::test]
+async fn negative_coord_bricks_generate_terrain() {
+    let host = fresh_host().await;
+    let addr = Address::World(WorldAddr::ROOT);
+    let cases = [
+        IVec3::new(-3, 0, -3),
+        IVec3::new(-3, 0, 0),
+        IVec3::new(0, 0, -3),
+        IVec3::new(3, 0, 3),
+    ];
+    for bc in cases {
+        let env = Envelope::new(
+            0,
+            addr,
+            WorldRequest::GetBrick { addr, brick: bc, lod: Lod::new(0) },
+        );
+        let resp = host.request(env).await.expect("request");
+        let WorldEvent::BrickSnapshot { payload, .. } = resp.body else {
+            panic!("expected BrickSnapshot for {bc:?}");
+        };
+        let b = Brick::from_bytes(&payload).expect("decode");
+        assert!(
+            b.nonempty_count > 0,
+            "brick at {bc:?} returned empty — `brick_inside_shape` likely \
+             rejected it because of a corner-offset coordinate convention"
+        );
+    }
+    host.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn two_hosts_same_seed_produce_identical_bricks() {
     let h1 = fresh_host().await;

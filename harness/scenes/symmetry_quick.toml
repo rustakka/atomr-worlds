@@ -1,0 +1,78 @@
+# Quick symmetry test: stand at spawn, yaw 360° in 4 stops.
+# Generous warmup gives the streamer time to populate the ring
+# (more bricks need generation now that negative-coord bricks
+# no longer short-circuit to empty).
+#
+# All 4 yaw shots should show terrain (with the host fix). Pre-fix
+# they were heavily biased toward +X+Z.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 600
+output_prefix = "symmetry"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Pitch down ~25° to see ground + horizon
+[[events]]
+frame = 2
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 19
+kind  = "key_release"
+key   = "ArrowDown"
+
+[[events]]
+frame = 30
+kind  = "screenshot"
+note  = "yaw 0° (+Z)"
+
+# 90° yaw left = 63 frames at 1.5 rad/s
+[[events]]
+frame = 35
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 98
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 120
+kind  = "screenshot"
+note  = "yaw 90° (+X)"
+
+[[events]]
+frame = 125
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 188
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 210
+kind  = "screenshot"
+note  = "yaw 180° (-Z)"
+
+[[events]]
+frame = 215
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 278
+kind  = "key_release"
+key   = "ArrowLeft"
+[[events]]
+frame = 300
+kind  = "screenshot"
+note  = "yaw 270° (-X)"
+
+[[events]]
+frame = 310
+kind  = "exit"

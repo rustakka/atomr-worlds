@@ -1,0 +1,100 @@
+# Phase 17 skybox refresh: walks the observer past the 5% drift
+# threshold to trigger an ObserverState::should_refresh, then captures
+# before / after. Pairs with three times-of-day to confirm the
+# cubemap re-bakes against the active sun position.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "skybox_refresh"
+
+# --- Dawn baseline (sun rising) ------------------------------------------
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 6.0
+
+[[events]]
+frame = 4
+kind  = "screenshot"
+note  = "dawn — fresh skybox bake"
+
+# Walk ~30 m (5.8% of max_radius=512 m → past the refresh threshold).
+[[events]]
+frame = 10
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 10
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 160
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 160
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 165
+kind  = "screenshot"
+note  = "dawn — observer drifted past refresh threshold; skybox re-baked"
+
+# --- Noon ----------------------------------------------------------------
+[[events]]
+frame = 175
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 180
+kind  = "screenshot"
+note  = "noon — bright daylight on the cubemap"
+
+# Walk 30 m again so the noon-tinted skybox can be re-baked.
+[[events]]
+frame = 185
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 185
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 335
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 335
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 340
+kind  = "screenshot"
+note  = "noon — second bake; crossfade settled"
+
+# --- Dusk ---------------------------------------------------------------
+[[events]]
+frame = 355
+kind  = "set_time_of_day"
+hours = 19.0
+
+[[events]]
+frame = 360
+kind  = "screenshot"
+note  = "dusk — golden tint on the cubemap"
+
+[[events]]
+frame = 370
+kind  = "exit"

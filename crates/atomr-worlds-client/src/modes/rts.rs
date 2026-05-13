@@ -8,10 +8,10 @@
 //! camera's `up` vector around world-Y, which keeps the in-plane
 //! orientation control the user expects.
 
-use atomr_worlds_core::lod::Lod;
+use atomr_worlds_core::coord::DVec3;
+use atomr_worlds_view::derived::surface_raster::build_surface_raster_with_lod_fn;
 use atomr_worlds_view::{
-    build_surface_raster, render_mesh, scene::MaterialPalette, surface_raster_to_mesh, Camera,
-    Projection, RenderConfig,
+    render_mesh, scene::MaterialPalette, surface_raster_to_mesh, Camera, Projection, RenderConfig,
 };
 use bevy::prelude::*;
 
@@ -19,6 +19,7 @@ use crate::modes::blit::{copy_framebuffer_to_image, RasterTarget, RASTER_H, RAST
 use crate::modes::fp::FpState;
 use crate::view_mode::ViewMode;
 use crate::world_runtime::WorldRuntime;
+use crate::world_stream::ChunkStreamer;
 
 const RTS_FOOTPRINT_VOX: u32 = 48;
 
@@ -46,17 +47,22 @@ fn rts_input(mode: Res<ViewMode>, keys: Res<ButtonInput<KeyCode>>, mut state: Re
     if *mode != ViewMode::Rts {
         return;
     }
-    if keys.pressed(KeyCode::KeyQ) {
-        state.rotation_deg += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyE) {
-        state.rotation_deg -= 1.0;
-    }
-    if keys.just_pressed(KeyCode::Equal) {
+    // WASD pans horizontally (handled by `world_walk_input` in fp.rs —
+    // it moves `fp_state.walk`, which `rts_render` centers the raster
+    // on). Q/E zoom in/out. Z/X rotate (moved off Q/E so the zoom
+    // binding matches every other "Q/E zoom" mode in the client).
+    // Equal/Minus stay as alternative zoom bindings for muscle memory.
+    if keys.just_pressed(KeyCode::KeyQ) || keys.just_pressed(KeyCode::Equal) {
         state.scale_m_per_px = (state.scale_m_per_px * 0.9).max(0.02);
     }
-    if keys.just_pressed(KeyCode::Minus) {
+    if keys.just_pressed(KeyCode::KeyE) || keys.just_pressed(KeyCode::Minus) {
         state.scale_m_per_px = (state.scale_m_per_px * 1.1).min(2.0);
+    }
+    if keys.pressed(KeyCode::KeyZ) {
+        state.rotation_deg += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyX) {
+        state.rotation_deg -= 1.0;
     }
 }
 
@@ -65,6 +71,7 @@ fn rts_render(
     runtime: Res<WorldRuntime>,
     fp_state: Res<FpState>,
     state: Res<RtsState>,
+    streamer: Res<ChunkStreamer>,
     target: Res<RasterTarget>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -76,13 +83,20 @@ fn rts_render(
     let center_z = cam.eye[2] as f64;
     let half = (RTS_FOOTPRINT_VOX as f64) * 0.5;
     let origin = [center_x - half, center_z - half];
-    let raster = build_surface_raster(
+    // Per-column LOD comes from the shared streamer. Columns inside the
+    // transition radius scan at `near_lod`; far columns drop to
+    // `far_lod`, matching the FP/TP ring streamer's tier boundary.
+    let observer = fp_state.walk.observer.position;
+    let raster = build_surface_raster_with_lod_fn(
         runtime.query.as_ref(),
         &fp_state.addr,
         origin,
         [RTS_FOOTPRINT_VOX, RTS_FOOTPRINT_VOX],
         1.0,
-        Lod::new(0),
+        |[wx_m, wz_m]| {
+            let p = DVec3::new(wx_m, observer.y, wz_m);
+            streamer.lod_for_meters(observer, p)
+        },
     );
     let palette = MaterialPalette::default();
     let mesh = surface_raster_to_mesh(&raster, &palette);

@@ -20,7 +20,10 @@ use atomr_worlds_voxel::brick::{Brick, BRICK_EDGE};
 use atomr_worlds_voxel::voxel::Voxel;
 
 /// Pinned hash for the fixed (world, camera, config) tuple below.
-const PINNED_HASH: u64 = 0xb22c_ca06_d5ef_57f5;
+/// Updated for the lighting+materials upgrade: `material_color()` was
+/// re-tuned for the new 10-entry palette and the rendered RGB bytes
+/// shift accordingly.
+const PINNED_HASH: u64 = 0x7890_ecb5_5e6d_cb95;
 
 struct FixedWorld {
     bricks: HashMap<IVec3, Arc<Brick>>,

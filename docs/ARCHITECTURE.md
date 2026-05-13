@@ -116,6 +116,27 @@ terrain, systems for orbital mechanics, etc.).
 whose voxel projects to at most `target_px_per_voxel` pixels at the given camera distance — the
 basis for streaming far chunks at lower fidelity than near ones.
 
+The client packages this idea as a **progressive LOD ladder**
+(`crates/atomr-worlds-client/src/world_stream.rs::LodLadder`): an
+ordered list of `LodTier { lod, outer_radius_m }` rungs that together
+form concentric spherical shells around the observer. Tier 0 is the
+high-fidelity inner ring; each successive tier widens the radius and
+drops one LOD step. Loading is radial — a brick is desired iff its
+center is inside one of the shells — which makes the load shape
+symmetric in all four cardinal directions (and rotationally invariant
+around the observer's vertical axis). The outermost tier's radius is
+also the **fog horizon**: `sync_sky_and_fog` feeds it to the
+`FogStrategy` as a linear-fog band so the chunks streaming into the
+outer shell fade in from mist instead of popping.
+
+The brick generator and the host's procedural cache thread the
+streamer's `Lod` end-to-end: `BrickGenContext.lod` and the host's
+`(IVec3, u8)` cache key let each tier discretize the same continuous
+heightfield at its own voxel scale instead of re-using LOD-0 content
+stretched to fit. See [LOD.md](LOD.md) for the per-tier generation
+contract and the world-meter sampling API any future generator (FBM,
+DEM tile pyramid, OSM-vector rasterizer) plugs into.
+
 ## Hosting
 
 A single trait, [`WorldHost`](../crates/atomr-worlds-host/src/host.rs), with two implementations
@@ -248,6 +269,19 @@ hop. [`AddrEither::Closed(Address) | Open(Vec<LevelKey>)`](../crates/atomr-world
 is the variable-depth wrapper — same `derive_child` invariant applies,
 length-prefixed so different depths can't collide.
 
+### Render strategy spine (client)
+
+[`atomr-worlds-client/src/render/`](../crates/atomr-worlds-client/src/render/)
+holds a `RenderConfig` resource with nine `Arc<dyn Trait>` slots
+(mesher, palette, AO, shading, sky, sun curve, shadow, fog, tonemap).
+Each decision in the FP/TP render pipeline is a trait with at least one
+default impl; swapping a strategy is a one-line write to the resource
+or a `set_strategy` event from the harness. The CPU rasterizer modes
+(slice, RTS, overview) consume the palette colors only; their lighting
+remains flat-shaded. Full design — slots, presets, time-of-day clock,
+harness DSL, lessons learned, methodologies — in
+[RENDERING.md](RENDERING.md).
+
 ## Design principles
 
 1. **Pure-data core.** `atomr-worlds-core` has zero dependencies on atomr or async runtimes.
@@ -259,3 +293,6 @@ length-prefixed so different depths can't collide.
    variable depth becomes necessary.
 4. **One codec, one runtime.** Bincode 2 for the wire (same as atomr-remote), tokio + atomr
    actors for hosting (same as everything else in the rustakka ecosystem). No parallel stacks.
+5. **Strategy pattern for render decisions.** Every meaningful render-pipeline decision is a
+   trait + default impl + `RenderConfig` slot. Lets the harness A/B-compare strategies in
+   TOML without recompiling and keeps the experimentation surface wide.

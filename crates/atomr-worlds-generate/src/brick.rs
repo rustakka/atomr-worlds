@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use atomr_worlds_core::coord::IVec3;
-use atomr_worlds_core::lod::MetricScale;
+use atomr_worlds_core::lod::{Lod, MetricScale};
 use atomr_worlds_core::shape::WorldShape;
 use atomr_worlds_voxel::Brick;
 
@@ -20,10 +20,18 @@ use crate::macro_state::WorldMacroState;
 /// `macro_state` is `None` when a generator is invoked without macro pre-
 /// sim (the pre-Phase-13c path); generators must preserve their existing
 /// behavior in that case.
+///
+/// `lod` is the rendering convention LOD (depth 0 = finest, each step
+/// doubles the voxel world-edge to `2^depth` meters). The terrain
+/// generator uses it to sample procedural noise at the correct world
+/// metric so adjacent LOD tiers agree on surface height. Default is
+/// `Lod::new(0)` to preserve byte-for-byte legacy output for callers
+/// (CUDA fallback, voxel writes) that haven't been ported to multi-LOD.
 #[derive(Clone, Debug)]
 pub struct BrickGenContext {
     pub world_seed: u64,
     pub brick_coord: IVec3,
+    pub lod: Lod,
     pub shape: WorldShape,
     pub macro_state: Option<Arc<WorldMacroState>>,
     pub scale: MetricScale,
@@ -36,6 +44,7 @@ impl BrickGenContext {
         Self {
             world_seed,
             brick_coord,
+            lod: Lod::new(0),
             shape: WorldShape::default_world(),
             macro_state: None,
             scale: MetricScale::DEFAULT_WORLD,

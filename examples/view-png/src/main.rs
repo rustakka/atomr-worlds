@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pos: [v.pos[0] + origin[0], v.pos[1] + origin[1], v.pos[2] + origin[2]],
                         normal: v.normal,
                         material: v.material,
+                        ao: v.ao,
                     });
                 }
                 combined.indices.extend(mesh.indices.iter().map(|i| i + base));

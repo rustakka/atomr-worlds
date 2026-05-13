@@ -1,0 +1,87 @@
+# Step 8 / Step 9 visual gate.
+#
+# Frame 0–4: stylized preset (SplitPerMaterial + SkyTinted) — baseline.
+# Frame 10–14: switch to PaletteVoxelMaterial — one draw call per brick.
+# Frame 20–24: switch sky to ProceduralDomeSky — gradient sky + sun disc.
+# Frame 30–34: both at once (PaletteVoxelMaterial + ProceduralDomeSky).
+# Frame 40: exit.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "voxel_material"
+
+# Tilt camera up so the screenshots actually frame the sky for steps 2+3.
+[[events]]
+frame = 0
+kind  = "key_press"
+key   = "ArrowUp"
+
+[[events]]
+frame = 18
+kind  = "key_release"
+key   = "ArrowUp"
+
+# Step 0: baseline (Stylized preset = SplitPerMaterial + SkyTinted).
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 9.0
+
+[[events]]
+frame = 1
+kind  = "set_render_preset"
+preset = "stylized"
+
+[[events]]
+frame = 4
+kind  = "screenshot"
+note  = "baseline — SplitPerMaterial + SkyTinted"
+
+# Step 1: swap shading to PaletteVoxelMaterial (one draw call / brick).
+[[events]]
+frame = 10
+kind  = "set_strategy"
+slot = "shading"
+strategy = "PaletteVoxelMaterial"
+
+[[events]]
+frame = 14
+kind  = "screenshot"
+note  = "PaletteVoxelMaterial — should match baseline visually"
+
+# Step 2: roll shading back, swap sky to ProceduralDomeSky.
+[[events]]
+frame = 20
+kind  = "set_strategy"
+slot = "shading"
+strategy = "LegacyVertexColor"
+
+[[events]]
+frame = 21
+kind  = "set_strategy"
+slot = "sky"
+strategy = "ProceduralDomeSky"
+
+[[events]]
+frame = 24
+kind  = "screenshot"
+note  = "ProceduralDomeSky — gradient sky + sun disc"
+
+# Step 3: both new strategies at once.
+[[events]]
+frame = 30
+kind  = "set_strategy"
+slot = "shading"
+strategy = "PaletteVoxelMaterial"
+
+[[events]]
+frame = 34
+kind  = "screenshot"
+note  = "PaletteVoxelMaterial + ProceduralDomeSky"
+
+[[events]]
+frame = 40
+kind  = "exit"

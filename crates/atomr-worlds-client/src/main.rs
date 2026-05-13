@@ -17,8 +17,10 @@ mod harness;
 mod host_backend;
 mod hud;
 mod modes;
+mod render;
 mod view_mode;
 mod world_runtime;
+mod world_stream;
 
 use std::sync::Arc;
 
@@ -84,22 +86,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: format!("atomr-worlds-client [{:?}]", cli.backend),
-            resolution: window_resolution,
-            // Force FIFO — some drivers report an exotic present mode
-            // (e.g. FIFO_LATEST_READY_EXT = 1000361000) that wgpu 0.19
-            // doesn't recognise.
-            present_mode: PresentMode::Fifo,
-            ..default()
-        }),
-        ..default()
-    }))
+    // Resolve the assets dir relative to the binary so the Step 8 + 9
+    // shaders (`assets/shaders/{voxel_material,sky_dome}.wgsl`) load
+    // regardless of where the binary is invoked from. We try a few
+    // canonical locations (workspace root cwd, exec dir, parent of
+    // exec) and fall back to Bevy's default if none exist.
+    let asset_root = resolve_asset_root();
+    app.add_plugins(
+        DefaultPlugins
+            .set(bevy::asset::AssetPlugin { file_path: asset_root, ..default() })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: format!("atomr-worlds-client [{:?}]", cli.backend),
+                    resolution: window_resolution,
+                    // Force FIFO — some drivers report an exotic present mode
+                    // (e.g. FIFO_LATEST_READY_EXT = 1000361000) that wgpu 0.19
+                    // doesn't recognise.
+                    present_mode: PresentMode::Fifo,
+                    ..default()
+                }),
+                ..default()
+            }),
+    )
         .insert_resource(world_runtime)
         .insert_resource(active)
         .insert_resource(initial_mode)
         .insert_resource(ClearColor(Color::rgb(0.45, 0.65, 0.85)))
+        .add_plugins(render::RenderPlugin)
+        .add_plugins(world_stream::ChunkStreamerPlugin)
         .add_plugins(modes::fp::FpPlugin)
         .add_plugins(modes::tp::TpPlugin)
         .add_plugins(modes::blit::BlitPlugin)
@@ -110,6 +124,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_systems(Update, view_mode_input_system);
 
     if let Some((scenario, out_abs)) = harness_bits {
+        // Offscreen render target + capture plugin sized to the scenario
+        // so the readback PNG is exactly `width x height`. Installed
+        // BEFORE the harness so the offscreen Image asset exists when
+        // FpPlugin's setup_fp_scene runs and points the camera at it.
+        app.add_plugins(render::OffscreenCapturePlugin {
+            width: scenario.width,
+            height: scenario.height,
+        });
         app.insert_resource(harness::HarnessConfig {
             scenario,
             output_dir: out_abs,
@@ -120,4 +142,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.run();
 
     Ok(())
+}
+
+/// Resolve the directory the [`AssetServer`] reads from. Bevy's
+/// `AssetPlugin::file_path` is resolved relative to the binary's
+/// directory (`current_exe().parent()`), so we *return an absolute
+/// path*. We probe a few canonical locations so the same binary works
+/// from the workspace root (`cargo run`), the crate directory, or a
+/// packaged install. Falls back to Bevy's default `"assets"`.
+fn resolve_asset_root() -> String {
+    use std::path::PathBuf;
+    let abs_candidates: Vec<PathBuf> = [
+        // CWD-relative — workspace root invocation
+        std::env::current_dir()
+            .ok()
+            .map(|d| d.join("crates/atomr-worlds-client/assets")),
+        std::env::current_dir().ok().map(|d| d.join("assets")),
+        // Exec-dir relative — packaged install
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("assets"))),
+        // CARGO_MANIFEST_DIR fallback (only set during build, but
+        // still useful for the workspace-resident binary at runtime
+        // because cargo writes target/release in that workspace).
+        option_env!("CARGO_MANIFEST_DIR").map(|m| PathBuf::from(m).join("assets")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for c in &abs_candidates {
+        if c.join("shaders/voxel_material.wgsl").exists() {
+            return c.to_string_lossy().into_owned();
+        }
+    }
+    "assets".into()
 }
