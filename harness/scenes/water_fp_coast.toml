@@ -1,0 +1,78 @@
+# Hydrology overlay — first-person survey from altitude.
+#
+# Climbs well above the terrain and pitches down so ocean coastlines,
+# lakes, and carved river channels are visible across the streamed
+# terrain, then yaws to scan the horizon for water bodies.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "water_fp_coast"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 10.0
+
+# Climb (sprint + jump held) to survey a wide area without washing the
+# frame out from a directly-overhead noon sun.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "Space"
+[[events]]
+frame = 245
+kind  = "key_release"
+key   = "Space"
+[[events]]
+frame = 245
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Pitch down toward the terrain below.
+[[events]]
+frame = 375
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 395
+kind  = "key_release"
+key   = "ArrowDown"
+
+# Let the streamer settle, then screenshot.
+[[events]]
+frame = 600
+kind  = "screenshot"
+note  = "survey from altitude"
+
+# Slow yaw to scan the horizon for water bodies.
+[[events]]
+frame = 610
+kind  = "key_press"
+key   = "ArrowRight"
+[[events]]
+frame = 640
+kind  = "screenshot"
+note  = "yaw +"
+[[events]]
+frame = 700
+kind  = "screenshot"
+note  = "yaw ++"
+[[events]]
+frame = 760
+kind  = "key_release"
+key   = "ArrowRight"
+[[events]]
+frame = 770
+kind  = "screenshot"
+note  = "final survey angle"
+
+[[events]]
+frame = 780
+kind  = "exit"

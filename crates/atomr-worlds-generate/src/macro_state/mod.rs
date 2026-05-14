@@ -22,7 +22,9 @@
 
 pub mod biome;
 pub mod climate;
+pub mod hydrology;
 pub mod plates;
+pub mod relief;
 pub mod surface_grid;
 
 use std::collections::HashMap;
@@ -34,7 +36,12 @@ use atomr_worlds_core::shape::WorldShape;
 
 pub use biome::{biome as biome_id, BiomeMap};
 pub use climate::{ClimateConfig, ClimateField};
+pub use hydrology::{
+    water_kind, HydrologyConfig, HydrologyGenerator, WaterBodyStrategy, WaterField, WaterLayer,
+    NO_FLOW, NO_WATER_SURFACE,
+};
 pub use plates::{ElevationField, PlateConfig, PlateMap};
+pub use relief::ReliefConfig;
 pub use surface_grid::{Face, FaceId, SurfaceGrid, VertexId};
 
 /// Configuration for [`DefaultMacroGenerator`].
@@ -45,7 +52,9 @@ pub struct MacroConfig {
     /// (~2 MB).
     pub grid_level: u8,
     pub plates: PlateConfig,
+    pub relief: ReliefConfig,
     pub climate: ClimateConfig,
+    pub hydrology: HydrologyConfig,
 }
 
 impl Default for MacroConfig {
@@ -53,7 +62,9 @@ impl Default for MacroConfig {
         Self {
             grid_level: 4,
             plates: PlateConfig::default(),
+            relief: ReliefConfig::default(),
             climate: ClimateConfig::default(),
+            hydrology: HydrologyConfig::default(),
         }
     }
 }
@@ -67,6 +78,9 @@ pub struct WorldMacroState {
     pub elevation: ElevationField,
     pub climate: ClimateField,
     pub biomes: BiomeMap,
+    /// Ocean / lake / river overlay — computed strictly after biomes as a
+    /// pure overlay (see [`hydrology`]).
+    pub water: WaterField,
     /// FNV-1a witness over every output array. Same `(seed, shape, config)`
     /// ⇒ same digest, across runs and platforms.
     pub digest: u64,
@@ -74,8 +88,8 @@ pub struct WorldMacroState {
 
 impl WorldMacroState {
     /// Look up the macro state at a world-space direction (unit vector
-    /// from world center). Returns the per-face `(elev_m, temp_c,
-    /// humidity, biome_id)` tuple.
+    /// from world center). Returns the per-face geological + hydrology
+    /// sample.
     pub fn sample(&self, dir: atomr_worlds_core::coord::DVec3) -> MacroSample {
         let f = self.grid.face_for_direction(dir) as usize;
         MacroSample {
@@ -84,6 +98,10 @@ impl WorldMacroState {
             temperature_c: self.climate.temperature_c[f],
             humidity: self.climate.humidity[f],
             biome_id: self.biomes.biome_id[f],
+            water_kind: self.water.water_kind[f],
+            water_surface_m: self.water.water_surface_m[f],
+            flow_dir: self.water.flow_dir[f],
+            flow_accum: self.water.flow_accum[f],
         }
     }
 }
@@ -95,6 +113,14 @@ pub struct MacroSample {
     pub temperature_c: f32,
     pub humidity: f32,
     pub biome_id: u8,
+    /// `water_kind::{NONE,OCEAN,LAKE,RIVER}` at this face.
+    pub water_kind: u8,
+    /// Water surface elevation (m); [`NO_WATER_SURFACE`] where dry.
+    pub water_surface_m: f32,
+    /// Steepest-descent neighbour face for river flow; [`NO_FLOW`] if none.
+    pub flow_dir: FaceId,
+    /// Accumulated upstream flow — drives river channel width/depth.
+    pub flow_accum: f32,
 }
 
 /// Trait for macro-state producers. Pure: `(seed, shape)` ⇒ same state.
@@ -118,10 +144,19 @@ impl DefaultMacroGenerator {
 impl MacroGenerator for DefaultMacroGenerator {
     fn generate(&self, world_seed: u64, shape: WorldShape) -> Arc<WorldMacroState> {
         let grid = SurfaceGrid::new(self.config.grid_level);
-        let (plates_map, elevation) = plates::generate_plates(&grid, world_seed, self.config.plates);
+        let (plates_map, mut elevation) =
+            plates::generate_plates(&grid, world_seed, self.config.plates);
+        // Meso-scale relief refines the piecewise-flat plate elevation so
+        // that climate, biomes, hydrology, and brick-level terrain all see
+        // one coherent field with real drainage gradients and basins.
+        relief::apply_relief(&grid, &mut elevation, world_seed, self.config.relief);
         let climate = climate::generate_climate(&grid, &elevation, self.config.climate);
         let biomes = biome::classify_biomes(&elevation, &climate);
-        let digest = compute_digest(&plates_map, &elevation, &climate, &biomes);
+        // Hydrology runs strictly after biomes as a pure overlay — it
+        // consumes elevation + climate but never feeds back into them.
+        let water = HydrologyGenerator::new(self.config.hydrology)
+            .generate(&grid, &elevation, &climate, world_seed);
+        let digest = compute_digest(&plates_map, &elevation, &climate, &biomes, &water);
         Arc::new(WorldMacroState {
             shape,
             grid,
@@ -129,6 +164,7 @@ impl MacroGenerator for DefaultMacroGenerator {
             elevation,
             climate,
             biomes,
+            water,
             digest,
         })
     }
@@ -139,6 +175,7 @@ fn compute_digest(
     elev: &ElevationField,
     climate: &ClimateField,
     biomes: &BiomeMap,
+    water: &WaterField,
 ) -> u64 {
     let mut h: u64 = 0xCBF2_9CE4_8422_2325;
     let prime: u64 = 0x0000_0100_0000_01B3;
@@ -172,6 +209,19 @@ fn compute_digest(
         fold(&p.to_bits().to_le_bytes());
     }
     fold(&biomes.biome_id);
+    // Hydrology overlay — appended after the biome fold so the existing
+    // digest prefix is unchanged.
+    fold(&water.water_kind);
+    for &s in &water.water_surface_m {
+        fold(&s.to_bits().to_le_bytes());
+    }
+    for &d in &water.flow_dir {
+        fold(&d.to_le_bytes());
+    }
+    for &a in &water.flow_accum {
+        fold(&a.to_bits().to_le_bytes());
+    }
+    fold(&water.sea_level_m.to_bits().to_le_bytes());
     h
 }
 

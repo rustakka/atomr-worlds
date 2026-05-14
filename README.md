@@ -41,7 +41,7 @@ rather than the substrate itself.
 
 ## Status
 
-**Phases 0–17 plus the 17.1 per-LOD brick-generation fix landed.** Phase 0
+**Phases 0–18 landed.** Phase 0
 (primitives), Phase 1 (procedural generators + real `LocalHost` on
 atomr's actor system), Phase 2 (CPU renderer: greedy meshing + software
 rasterizer to PNG), Phase 3 (persistence: `atomr-persistence` Journal/
@@ -63,15 +63,20 @@ server: Bevy-driven interactive client, headless `atomr-worlds-server`
 binary, `atomr-remote`-based `RemoteHost`, and wire-up of
 `ClusterHost`'s cross-node forwarder), Phase 16 (PBR lighting + material
 upgrade; nine pluggable render-strategy slots), Phase 17 (progressive
-4-tier LOD streamer + skybox integration), and Phase 17.1 (per-LOD
+4-tier LOD streamer + skybox integration), Phase 17.1 (per-LOD
 procedural-brick generation, threading `Lod` end-to-end so coarse-LOD
 bricks discretize the same heightfield in world meters instead of
-re-using LOD-0 content) are all implemented and tested end-to-end.
+re-using LOD-0 content), and Phase 18 (hydrology overlay — meso-scale
+elevation relief plus ocean / lake / river water bodies layered on the
+geologic macro pre-sim, with priority-flood basins, drainage-tree river
+networks, and local-seed river-channel carving) are all implemented and
+tested end-to-end.
 
 See [docs/PHASES.md](docs/PHASES.md) for the per-phase history,
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the model,
 [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for module-by-module
-specifics, [docs/RENDERING.md](docs/RENDERING.md) for the strategy-based
+specifics, [docs/HYDROLOGY.md](docs/HYDROLOGY.md) for the water-body
+overlay, [docs/RENDERING.md](docs/RENDERING.md) for the strategy-based
 renderer, [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) for the
 client/server topology, and [docs/LOD.md](docs/LOD.md) for the
 per-tier streaming and generation contract.
@@ -267,10 +272,12 @@ scale }` and returns a `Brick`. The roadmap adds:
   store (`LiteralRegion`, `HeightmapRegion`, `VoxFileRegion`) is the
   manual-stipulation API. Expanding the loaders to glTF, USD, and
   CityGML is on this thread.
-- **Composable strategies** — multi-stage pipelines (terrain →
-  hydrology → vegetation → structures) wired via a small DSL or
-  registry change rather than hand-coding `BrickGenContext`
-  consumers.
+- **Composable strategies** — multi-stage pipelines wired via a small
+  DSL or registry change rather than hand-coding `BrickGenContext`
+  consumers. The macro pre-sim already chains plates → relief →
+  climate → biomes → hydrology (Phase 18); the roadmap item is making
+  the *brick-level* stages (terrain → vegetation → structures)
+  composable the same way.
 
 ### Real-world data feeds
 

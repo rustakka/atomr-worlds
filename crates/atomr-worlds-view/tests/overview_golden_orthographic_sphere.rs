@@ -42,7 +42,11 @@ fn pinned_hash_matches() {
     );
 }
 
-const EXPECTED: u64 = 0xa3ad_ad18_faf8_4993;
+// Re-pinned when the hydrology overlay landed: meso-scale relief refines
+// the plate elevation and ocean / lake / river water bodies are baked into
+// the world summary, both of which change the overview render.
+// `render_is_deterministic` still guards against floating-point drift.
+const EXPECTED: u64 = 0x15cc_cc45_22f8_97aa;
 
 #[test]
 fn corners_remain_background() {

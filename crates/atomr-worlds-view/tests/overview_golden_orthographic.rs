@@ -44,4 +44,8 @@ fn pinned_hash_matches() {
     assert_eq!(h, EXPECTED, "overview-flat digest drifted: got 0x{h:016x}, expected 0x{EXPECTED:016x}");
 }
 
-const EXPECTED: u64 = 0x4f79_c20a_fc61_3027;
+// Re-pinned when the hydrology overlay landed: meso-scale relief refines
+// the plate elevation and ocean / lake / river water bodies are baked into
+// the world summary, both of which change the overview render.
+// `render_is_deterministic` still guards against floating-point drift.
+const EXPECTED: u64 = 0x0b65_4517_d4d1_946c;

@@ -1,0 +1,55 @@
+# Hydrology overlay — overview-mode globe shot.
+#
+# The most reliable visual check for the ocean / lake / river overlay:
+# ocean basins, coastlines, and macro-scale water bodies are all visible
+# at once. Uses the default seed (0xDEADBEEFCAFEF00D), which generates
+# roughly 2200 ocean / 160 lake / 260 river faces at grid_level 4.
+#
+# Two `KeyP` taps cycle the projection OrthographicFlat → Equirectangular
+# → OrthographicSphere (the globe view), matching overview_globe_arrow.
+#
+# NOTE: overview-mode capture under the offscreen/software-GL harness is
+# currently a known issue — the stock overview_globe_arrow.toml also
+# renders an empty sky. This scenario is ready for when that is fixed;
+# until then, use water_fp_coast.toml / water_lod.toml for visual checks.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "overview"
+width = 1280
+height = 720
+warmup_frames = 90
+output_prefix = "water_overview"
+
+[[events]]
+frame = 1
+kind  = "key_tap"
+key   = "KeyP"
+
+[[events]]
+frame = 6
+kind  = "key_tap"
+key   = "KeyP"
+
+[[events]]
+frame = 25
+kind  = "screenshot"
+note  = "globe — oceans and coastlines"
+
+# Pan the globe to bring a different hemisphere into view.
+[[events]]
+frame = 30
+kind  = "key_press"
+key   = "ArrowLeft"
+[[events]]
+frame = 90
+kind  = "key_release"
+key   = "ArrowLeft"
+
+[[events]]
+frame = 100
+kind  = "screenshot"
+note  = "globe rotated — a different set of water bodies"
+
+[[events]]
+frame = 110
+kind  = "exit"

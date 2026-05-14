@@ -1,0 +1,78 @@
+# Hydrology overlay — LOD consistency check.
+#
+# Climbs to altitude and strafes laterally across the streamed terrain so
+# a water body is seen at multiple LOD tiers. The water surface must stay
+# flat and seamless across tier boundaries: the macro water surface is a
+# per-face flat scalar converted with a scale-only `mpv`, independent of
+# the per-LOD voxel size.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "water_lod"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Climb to a moderate altitude — high enough to see several LOD rings.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "Space"
+[[events]]
+frame = 245
+kind  = "key_release"
+key   = "Space"
+[[events]]
+frame = 245
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Pitch modestly below the horizon so terrain and water fill the frame.
+[[events]]
+frame = 255
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 273
+kind  = "key_release"
+key   = "ArrowDown"
+
+[[events]]
+frame = 470
+kind  = "screenshot"
+note  = "settled, before strafe"
+
+# Slow lateral strafe — track a water body across LOD tier boundaries.
+[[events]]
+frame = 480
+kind  = "key_press"
+key   = "KeyD"
+[[events]]
+frame = 540
+kind  = "screenshot"
+note  = "strafe t+1.0s"
+[[events]]
+frame = 600
+kind  = "screenshot"
+note  = "strafe t+2.0s"
+[[events]]
+frame = 660
+kind  = "screenshot"
+note  = "strafe t+3.0s"
+[[events]]
+frame = 720
+kind  = "key_release"
+key   = "KeyD"
+
+[[events]]
+frame = 730
+kind  = "exit"

@@ -23,9 +23,10 @@ pub use authored::{
 pub use brick::{BrickGenContext, BrickGenerator};
 pub use error::GenerateError;
 pub use macro_state::{
-    BiomeMap, ClimateConfig, ClimateField, DefaultMacroGenerator, ElevationField, FaceId,
-    MacroConfig, MacroGenerator, MacroKey, MacroSample, MacroStateCache, PlateConfig, PlateMap,
-    SurfaceGrid, WorldMacroState,
+    water_kind, BiomeMap, ClimateConfig, ClimateField, DefaultMacroGenerator, ElevationField,
+    FaceId, HydrologyConfig, HydrologyGenerator, MacroConfig, MacroGenerator, MacroKey,
+    MacroSample, MacroStateCache, PlateConfig, PlateMap, ReliefConfig, SurfaceGrid, WaterField,
+    WorldMacroState,
 };
 pub use registry::{
     default_registry, strategy_id, BuiltinSelector, GenerationPolicy, GeneratorRegistry,

@@ -1,15 +1,17 @@
-//! Phase 13c determinism gate.
+//! Macro pre-sim determinism gate.
 //!
 //! `WorldMacroState::digest` is a FNV-1a witness over every output array
-//! (plates, elevation, climate, biomes). For a fixed
-//! `(world_seed, config)` it must:
+//! (plates, elevation, climate, biomes, and the hydrology `WaterField`).
+//! For a fixed `(world_seed, config)` it must:
 //! - Be equal across repeated calls (within and across processes).
 //! - Change when the seed changes (avalanche / non-trivial).
 //! - Stay invariant if only the `shape` field changes (digest is shape-
 //!   independent by design — the shape is *stored* but not *digested*).
 //!
-//! The digest is pinned in `PINNED_DIGEST_GRID_2_SEED_DEADBEEF` so that
-//! cross-platform CI catches floating-point drift.
+//! The digest value itself is intentionally *not* pinned to a literal —
+//! these tests assert stability and avalanche relationships, which is what
+//! catches floating-point drift without re-pinning on every legitimate
+//! generation change.
 
 use atomr_worlds_core::shape::WorldShape;
 use atomr_worlds_generate::{DefaultMacroGenerator, MacroConfig, MacroGenerator};
@@ -51,12 +53,18 @@ fn digest_is_shape_independent() {
 }
 
 #[test]
-fn elevation_field_has_one_value_per_face() {
+fn every_field_has_one_value_per_face() {
     let g = small_gen();
     let s = g.generate(SEED_A, EARTH);
-    assert_eq!(s.elevation.elev_m.len(), s.grid.face_count());
-    assert_eq!(s.climate.temperature_c.len(), s.grid.face_count());
-    assert_eq!(s.biomes.biome_id.len(), s.grid.face_count());
+    let n = s.grid.face_count();
+    assert_eq!(s.elevation.elev_m.len(), n);
+    assert_eq!(s.climate.temperature_c.len(), n);
+    assert_eq!(s.biomes.biome_id.len(), n);
+    // Hydrology overlay arrays.
+    assert_eq!(s.water.water_kind.len(), n);
+    assert_eq!(s.water.water_surface_m.len(), n);
+    assert_eq!(s.water.flow_dir.len(), n);
+    assert_eq!(s.water.flow_accum.len(), n);
 }
 
 #[test]
@@ -69,6 +77,11 @@ fn sample_returns_consistent_face_lookup() {
     assert_eq!(a.face, b.face);
     assert_eq!(a.elev_m.to_bits(), b.elev_m.to_bits());
     assert_eq!(a.biome_id, b.biome_id);
+    // Hydrology fields are part of the sample too.
+    assert_eq!(a.water_kind, b.water_kind);
+    assert_eq!(a.water_surface_m.to_bits(), b.water_surface_m.to_bits());
+    assert_eq!(a.flow_dir, b.flow_dir);
+    assert_eq!(a.flow_accum.to_bits(), b.flow_accum.to_bits());
 }
 
 #[test]

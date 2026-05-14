@@ -15,8 +15,8 @@ use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_noise::worley_noise_3d;
 
 use crate::terrain::{
-    MATERIAL_DIRT, MATERIAL_GLOW_ROCK, MATERIAL_GRASS, MATERIAL_ICE, MATERIAL_SAND,
-    MATERIAL_SNOW, MATERIAL_STONE, MATERIAL_WATER,
+    MATERIAL_DIRT, MATERIAL_GLOW_ROCK, MATERIAL_GRASS, MATERIAL_ICE, MATERIAL_SAND, MATERIAL_SNOW,
+    MATERIAL_STONE,
 };
 
 /// Context passed to a material strategy for a single solid voxel.
@@ -24,11 +24,17 @@ use crate::terrain::{
 pub struct MaterialContext {
     pub world_seed: u64,
     pub p: IVec3,
-    /// `surface_y - p.y`, in voxels (positive == below surface).
+    /// `surface_y - p.y`, in voxels (positive == below surface). When a
+    /// river channel is carved, this is the depth below the *carved*
+    /// riverbed surface, so topsoil banding follows the bed.
     pub depth_below_surface_voxels: f32,
     pub dirt_layer: u8,
     /// Macro biome id, or `None` for the legacy non-macro path.
     pub biome_id: Option<u8>,
+    /// `true` when this column's terrain surface sits below a body of
+    /// water (ocean, lake, or carved river channel). Always `false` on
+    /// the non-macro path. Drives the submerged-bed material override.
+    pub under_water: bool,
 }
 
 impl MaterialContext {
@@ -72,7 +78,7 @@ impl MaterialSelectionStrategy for LegacyBanded {
             }
             Some(biome) => {
                 if ctx.is_topsoil() {
-                    biome_legacy_topsoil(biome)
+                    biome_legacy_topsoil(biome, ctx.under_water)
                 } else {
                     MATERIAL_STONE
                 }
@@ -149,7 +155,7 @@ impl MaterialSelectionStrategy for LayeredWithFeatures {
             }
             Some(biome) => {
                 if topsoil {
-                    biome_layered_topsoil(biome, surface)
+                    biome_layered_topsoil(biome, surface, ctx.under_water)
                 } else if deep_glow {
                     MATERIAL_GLOW_ROCK
                 } else {
@@ -160,25 +166,37 @@ impl MaterialSelectionStrategy for LayeredWithFeatures {
     }
 }
 
-fn biome_legacy_topsoil(biome: u8) -> u16 {
+fn biome_legacy_topsoil(biome: u8, under_water: bool) -> u16 {
     use crate::macro_state::biome_id;
+    // A submerged bed reads as sand/silt regardless of the biome above.
+    if under_water {
+        return MATERIAL_SAND;
+    }
     match biome {
         v if v == biome_id::DESERT || v == biome_id::SAVANNA => MATERIAL_SAND,
         v if v == biome_id::ICE || v == biome_id::TUNDRA => MATERIAL_SNOW,
-        v if v == biome_id::OCEAN => MATERIAL_WATER,
+        // Ocean bed is a solid sand floor — the water column itself is
+        // placed by the hydrology overlay, not by topsoil material.
+        v if v == biome_id::OCEAN => MATERIAL_SAND,
         v if v == biome_id::MOUNTAIN => MATERIAL_STONE,
         _ => MATERIAL_DIRT,
     }
 }
 
-fn biome_layered_topsoil(biome: u8, surface: bool) -> u16 {
+fn biome_layered_topsoil(biome: u8, surface: bool, under_water: bool) -> u16 {
     use crate::macro_state::biome_id;
+    // A submerged bed reads as sand/silt regardless of the biome above.
+    if under_water {
+        return MATERIAL_SAND;
+    }
     match biome {
         v if v == biome_id::DESERT || v == biome_id::SAVANNA => MATERIAL_SAND,
         // Ice biome: ice instead of snow, gives a smoother PBR look.
         v if v == biome_id::ICE => MATERIAL_ICE,
         v if v == biome_id::TUNDRA => MATERIAL_SNOW,
-        v if v == biome_id::OCEAN => MATERIAL_WATER,
+        // Ocean bed is a solid sand floor — the water column is placed by
+        // the hydrology overlay, not by topsoil material.
+        v if v == biome_id::OCEAN => MATERIAL_SAND,
         v if v == biome_id::MOUNTAIN => MATERIAL_STONE,
         // Temperate / grassland / forest / rainforest: grass on top,
         // dirt just below. Surface == the topmost voxel.

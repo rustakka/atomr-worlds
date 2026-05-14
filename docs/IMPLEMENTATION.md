@@ -1223,3 +1223,53 @@ Touched files:
 See [LOD.md](LOD.md) for the per-LOD generation contract, the world-
 meter sampling API, the cache-key invariant, and the intrinsic
 discretization characteristics at each tier boundary.
+
+## Phase 18 (landed) — Hydrology overlay: ocean, lake, river
+
+Water bodies layered on the geologic macro pre-sim. See
+[HYDROLOGY.md](HYDROLOGY.md) for the design; this section is the
+file/line map.
+
+- [`crates/atomr-worlds-generate/src/macro_state/relief.rs`](../crates/atomr-worlds-generate/src/macro_state/relief.rs)
+  — `apply_relief(grid, &mut elevation, seed, ReliefConfig)` adds smooth
+  multi-octave FBM relief to the piecewise-flat plate elevation. Runs in
+  `DefaultMacroGenerator::generate` immediately after `generate_plates`
+  and before `generate_climate`, so climate, biomes, hydrology, and
+  brick-level terrain all consume one coherent field. Land takes the
+  full amplitude; the ocean floor a gentler one.
+- [`crates/atomr-worlds-generate/src/macro_state/hydrology/`](../crates/atomr-worlds-generate/src/macro_state/hydrology/)
+  — `mod.rs`: `WaterField` (struct-of-arrays per face: `water_kind`,
+  `water_surface_m`, `flow_dir`, `flow_accum`, `sea_level_m`),
+  `HydrologyConfig`, the `WaterBodyStrategy` trait + `HydrologyInput` /
+  `WaterLayer`, and `HydrologyGenerator` (runs the three strategies in
+  dependency order, aggregates ocean > lake > river). `ocean.rs`:
+  per-face sea-level threshold. `lake.rs`: deterministic priority-flood
+  (a `(level, face)` min-heap ordered by `f32::total_cmp`) seeded from
+  ocean faces; climate-gated lake classification; publishes the flood
+  parent-chain as the layer's `flow_dir`. `river.rs`: flow accumulation
+  over that drainage tree via Kahn's topological sweep; corridors above
+  `river_threshold` become rivers.
+- [`crates/atomr-worlds-generate/src/macro_state/mod.rs`](../crates/atomr-worlds-generate/src/macro_state/mod.rs)
+  — `MacroConfig` gains `relief` + `hydrology`; `WorldMacroState` gains
+  `water: WaterField`; `MacroSample` gains `water_kind`,
+  `water_surface_m`, `flow_dir`, `flow_accum`; `compute_digest` folds
+  the `WaterField` arrays after the biome fold.
+- [`crates/atomr-worlds-generate/src/terrain.rs`](../crates/atomr-worlds-generate/src/terrain.rs)
+  — `TerrainConfig` gains `river_*` channel tunables. `material_at_macro`
+  / `material_at_macro_strategy` call the shared `macro_surface_and_sample`
+  (now also returning `mpv` and the column's world-meter coords), run
+  `river_carve` (FBM-meandered channel anchored on the face centroid,
+  Worley bank jitter, parabolic bed, width/depth ∝ `sqrt(flow_accum)`),
+  fill air below the water surface with `MATERIAL_WATER`, and emit
+  `MATERIAL_SAND` for submerged beds. The non-macro path is untouched —
+  byte-equal to before.
+- [`crates/atomr-worlds-generate/src/material_selection.rs`](../crates/atomr-worlds-generate/src/material_selection.rs)
+  — `MaterialContext` gains `under_water`; `biome_legacy_topsoil` /
+  `biome_layered_topsoil` return `MATERIAL_SAND` for submerged beds and
+  for the `OCEAN` biome (the water column itself is placed by the
+  overlay, not by topsoil material).
+- Tests:
+  [`tests/hydrology.rs`](../crates/atomr-worlds-generate/tests/hydrology.rs)
+  (default-world population + invariants + determinism), per-strategy
+  and per-module unit tests, `terrain.rs` macro-path tests. The three
+  `atomr-worlds-view` overview golden hashes were re-pinned.

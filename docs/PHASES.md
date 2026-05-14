@@ -1151,3 +1151,57 @@ characteristics that motivate the roadmap items below.
   LOD would close this.
 - Finer LOD ladders (sub-meter `LOD−1`, per-mode tier counts) and
   external data-feed generators (see README "Roadmap").
+
+## Phase 18 *(landed)* — Hydrology overlay: ocean, lake, river
+
+A new water-body layer on top of the geologic macro pre-sim. Tectonic
+plates produce a piecewise-flat elevation field — unusable for hydrology
+— so the phase first adds a **relief** layer (smooth multi-octave FBM
+relief refining the plate elevation, run before climate so every
+downstream layer sees one coherent field), then a **hydrology** layer
+that classifies every surface-grid face as ocean / lake / river.
+
+Three `WaterBodyStrategy` impls, run in dependency order and aggregated:
+
+- **Ocean** — per-face threshold against sea level.
+- **Lake** — Barnes-style priority-flood seeded from ocean faces; closed
+  basins become lakes, gated on local humidity (arid basins stay dry).
+  The flood also records a parent-chain drainage forest rooted at the
+  ocean.
+- **River** — flow accumulation over that drainage tree (Kahn's
+  topological sweep), so rivers chain headwater → lake → sea; corridors
+  above a flow threshold become rivers.
+
+The brick generator consumes the per-face `WaterField` (via
+`MacroSample`): ocean / lake fill air below the water surface with
+`MATERIAL_WATER`; river corridors carve a meandering channel with the
+local seed (FBM centerline + Worley bank jitter, width/depth scaling with
+`sqrt(flow_accum)`); submerged beds read as sand. Single shared water
+material, no renderer changes. Water surfaces are LOD-stable by
+construction; river-carve noise is sampled in voxel-centered world meters.
+
+See [HYDROLOGY.md](HYDROLOGY.md) for the full design.
+
+### Verification
+
+- Per-strategy + relief unit tests; brick-level macro-path tests in
+  `terrain.rs` (ocean water over sand bed, water surface at sea level,
+  river carve produces a channel, legacy path unaffected).
+- [`tests/hydrology.rs`](../crates/atomr-worlds-generate/tests/hydrology.rs)
+  — the default world has oceans, lakes, and rivers; `WaterField`
+  invariants hold; the macro digest is deterministic and seed-sensitive.
+- The three overview golden-render hashes in `atomr-worlds-view` were
+  re-pinned (relief + water change the rendered world); the
+  `render_is_deterministic` companion tests are unchanged.
+- Harness scenes `water_overview.toml`, `water_fp_coast.toml`,
+  `water_lod.toml`.
+
+### Out of scope (follow-ups)
+
+- Overview-mode harness capture is a pre-existing issue (stock
+  `overview_globe_arrow.toml` also renders empty sky) — the ideal
+  globe-scale water visualization is blocked on that being fixed.
+- River deltas / estuaries, lake-shore beaches, aquifer / spring
+  sources, and seasonal water-level variation.
+- Feeding hydrology back into climate / biomes (it is a pure overlay
+  today — lakes do not make their surroundings wetter).
