@@ -104,6 +104,11 @@ impl Default for SunState {
     }
 }
 
+/// Maps a [`WorldTime`](crate::render::WorldTime) hour-of-day to a
+/// [`SunState`] plus an ambient `(color, brightness)`. Drives the
+/// directional light, ambient light, sky/fog tint, and skybox
+/// brightness through [`crate::render::sync_sun`] /
+/// [`crate::render::sync_sky_and_fog`] each frame.
 pub trait SunCurveStrategy: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn sun_state(&self, hours: f32) -> SunState;
@@ -115,6 +120,10 @@ pub trait SunCurveStrategy: Send + Sync + 'static {
 // Sky strategy
 // ---------------------------------------------------------------------------
 
+/// Source of the sky's horizon + zenith color (driven by the current
+/// [`SunState`]) and the optional procedural dome toggle. The horizon
+/// color also feeds the sky-tinted fog so atmospheric perspective
+/// stays consistent edge-to-edge.
 pub trait SkyStrategy: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn horizon_color(&self, sun: SunState) -> Color;
@@ -131,6 +140,11 @@ pub trait SkyStrategy: Send + Sync + 'static {
 // Shadow strategy
 // ---------------------------------------------------------------------------
 
+/// Cascade configuration + per-light bias for the sun's
+/// directional-light shadow map. `NoShadows` returns an empty cascade
+/// config and `enabled() == false`; `BasicCascades` wires up Bevy's
+/// `CascadeShadowConfigBuilder` with bounds tuned to the FP streaming
+/// radius.
 pub trait ShadowStrategy: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn enabled(&self) -> bool;
@@ -174,6 +188,10 @@ pub trait FogStrategy: Send + Sync + 'static {
 // Tonemap strategy
 // ---------------------------------------------------------------------------
 
+/// HDR tonemap + camera exposure + optional bloom post-process. Set
+/// once on the FP/TP camera at scene setup; rerun on
+/// `set_render_preset` / `set_strategy` swap. `AcesTonemap` (the
+/// default) returns `BloomSettings` so the HDR path has bloom enabled.
 pub trait TonemapStrategy: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn tonemapping(&self) -> Tonemapping;

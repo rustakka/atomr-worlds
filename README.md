@@ -100,24 +100,26 @@ the same brick-fetch grid.
 
 ### Strategy spine (Phase 16)
 
-Nine `Arc<dyn Trait>` slots on a single `RenderConfig` resource,
+Ten `Arc<dyn Trait>` slots on a single `RenderConfig` resource,
 each with a default and at least one alternative:
 
-| slot         | trait                | default               | other impls today                            |
-| ------------ | -------------------- | --------------------- | -------------------------------------------- |
-| `mesher`     | `MeshStrategy`       | `GreedyFlat`          | —                                            |
-| `palette`    | `PaletteStrategy`    | `HardcodedPalette`    | —                                            |
-| `ao`         | `AoStrategy`         | `MinecraftCornerAo`   | `NoAo`                                       |
-| `shading`    | `ShadingStrategy`    | `LegacyVertexColor`   | `PaletteVoxelMaterial` (custom WGSL)         |
-| `sky`        | `SkyStrategy`        | `SkyTinted`           | `ConstantSky`, `ProceduralDomeSky` (WGSL)    |
-| `sun_curve`  | `SunCurveStrategy`   | `KeyframeLutSun`      | `StaticSun`                                  |
-| `shadow`     | `ShadowStrategy`     | `BasicCascades`       | `NoShadows`                                  |
-| `fog`        | `FogStrategy`        | `ExpSquaredSkyTintedFog` | `NoFog`                                   |
-| `tonemap`    | `TonemapStrategy`    | `AcesTonemap`         | `DefaultTonemap`                             |
+| slot         | trait                | default                  | other impls today                            |
+| ------------ | -------------------- | ------------------------ | -------------------------------------------- |
+| `mesher`     | `MeshStrategy`       | `GreedyFlat`             | —                                            |
+| `palette`    | `PaletteStrategy`    | `HardcodedPalette`       | —                                            |
+| `ao`         | `AoStrategy`         | `MinecraftCornerAo`      | `NoAo`                                       |
+| `shading`    | `ShadingStrategy`    | `LegacyVertexColor`      | `PaletteVoxelMaterial` (custom WGSL)         |
+| `sky`        | `SkyStrategy`        | `ProceduralDomeSky` (WGSL) | `ConstantSky`, `SkyTinted`                 |
+| `sun_curve`  | `SunCurveStrategy`   | `KeyframeLutSun`         | `StaticSun`                                  |
+| `shadow`     | `ShadowStrategy`     | `BasicCascades`          | `NoShadows`                                  |
+| `fog`        | `FogStrategy`        | `ExpSquaredSkyTintedFog` | `NoFog`                                      |
+| `tonemap`    | `TonemapStrategy`    | `AcesTonemap`            | `DefaultTonemap`                             |
+| `coverage`   | `LodCoveragePolicy`  | `NestedSummary`          | `MaskedShells`                               |
 
 `RenderPreset` bundles named looks (`Stylized` / `Legacy` / `Debug`).
-The harness DSL exposes `set_time_of_day` and `set_render_preset`
-events so scenarios can capture A/B comparisons deterministically.
+The harness DSL exposes `set_time_of_day`, `set_render_preset`, and
+`set_strategy` events (the latter takes a `slot` + `strategy` name from
+the registry) so scenarios can capture A/B comparisons deterministically.
 
 ### Lighting and atmosphere (Phase 16)
 
@@ -163,6 +165,18 @@ events so scenarios can capture A/B comparisons deterministically.
   surface height in expectation; the only remaining vertical step
   at a tier boundary is voxel/2 discretization. See
   [docs/LOD.md](docs/LOD.md).
+- **Async brick-gen pipeline** — `BrickGenWorkers` (`brick_gen.rs`)
+  fire-and-forget tokio dispatches per desired brick; each task
+  fetches the brick from the host, then `spawn_blocking`s greedy
+  mesh + AO bake on the blocking pool. The main thread only drains
+  a capped batch of finished payloads each frame to convert into
+  Bevy entities, so neither generation nor meshing ever stalls the
+  frame loop. `MAX_IN_FLIGHT` and `DEFAULT_SPAWN_BUDGET` cap memory
+  / GPU-upload pressure during initial world fill.
+- **View-priority sort** — the desired-set is re-sorted so forward-
+  facing bricks dispatch first; cached + invalidated by an observer-
+  drift / yaw-cone threshold so the per-frame cost stays near zero
+  on quiet motion.
 - **Cubemap skybox** — `SkyboxRuntime` bakes a six-face cubemap
   from the far-ring meshes and re-bakes when the observer drifts
   past a 5 % threshold; `crossfade_t` ramps `Skybox.brightness`

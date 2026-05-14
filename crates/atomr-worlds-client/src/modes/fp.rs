@@ -548,6 +548,9 @@ fn fp_input_look(
     );
 }
 
+/// Copy the FP [`WalkCamera`]'s eye + look-at pose onto the Bevy
+/// camera entity each frame. No-op outside FP mode; the entity's
+/// transform is owned by other view modes' systems then.
 fn fp_sync_camera(
     state: Res<FpState>,
     mode: Res<ViewMode>,
@@ -568,6 +571,23 @@ fn fp_sync_camera(
     }
 }
 
+/// Per-frame streaming loop for the 3D world entities.
+///
+/// 1. Bump the streamer frame counter for hysteresis bookkeeping.
+/// 2. Recompute the desired `(coord, lod)` set when the observer
+///    drifts / turns past the cache-rebuild thresholds (see
+///    [`crate::world_stream::DesiredChunksCache`]); the new policy
+///    parameter from [`RenderConfig::coverage`] controls shell vs
+///    nested-summary shape.
+/// 3. Refresh `last_seen_frame` on every desired entry so the
+///    hysteresis window resets while the brick is in the ring.
+/// 4. Convert stale entries to [`BrickFadeOut`] (instead of immediate
+///    despawn) so the LOD transition has a soft tail; the fade-out
+///    system clears [`LoadedChunks`] when the shrink completes.
+/// 5. Dispatch async fetches for desired-but-not-loaded bricks via
+///    [`BrickGenWorkers`] (capped at `MAX_IN_FLIGHT`).
+/// 6. Drain a per-frame budget of finished payloads into Bevy
+///    entities via [`spawn_brick_entity`].
 #[allow(clippy::too_many_arguments)]
 fn fp_stream_bricks(
     state: Res<FpState>,
@@ -1052,6 +1072,13 @@ fn merge_by_material(
 type WorldEntityVisibilityQuery<'w, 's> =
     Query<'w, 's, &'static mut Visibility, Or<(With<WorldCamera>, With<BrickMesh>)>>;
 
+/// Hide / show the 3D world entities (`WorldCamera` + every
+/// `BrickMesh`) wholesale based on the active [`ViewMode`]. FP and TP
+/// share the same scene, so both leave the entities visible; the
+/// raster modes (slice / RTS / overview) blit a 2D framebuffer and
+/// would otherwise render the brick meshes underneath. Distinct from
+/// [`fp_update_lod_visibility`], which decides per-brick visibility
+/// inside the FP scene.
 fn fp_visibility_toggle(mode: Res<ViewMode>, mut q: WorldEntityVisibilityQuery) {
     let want = matches!(*mode, ViewMode::Fp | ViewMode::Tp);
     let vis = if want { Visibility::Inherited } else { Visibility::Hidden };

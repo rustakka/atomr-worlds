@@ -38,10 +38,13 @@ pub struct RenderConfig {
 }
 
 impl Default for RenderConfig {
-    /// Strategy spine ships in pre-upgrade behaviour: greedy meshing, no
-    /// AO, legacy vertex-color shading, the previous static sun and flat
-    /// sky, no shadows, no fog, Bevy's stock tonemap. Each subsequent
-    /// step (1–9) flips one or more of these to the upgraded strategy.
+    /// Ships the upgraded look that's the focus of this build: greedy
+    /// meshing, Minecraft-style corner AO, the keyframe-LUT sun curve,
+    /// cascaded shadows, a procedural sky dome, exp²-fog tinted by the
+    /// sky horizon, ACES tonemapping, and the nested-summary LOD
+    /// coverage that crossfades through tier transitions. Legacy
+    /// (pre-upgrade) behaviour is still reachable via
+    /// `RenderPreset::Legacy`.
     fn default() -> Self {
         Self {
             mesher:    Arc::new(GreedyFlat),

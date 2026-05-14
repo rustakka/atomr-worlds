@@ -20,6 +20,11 @@ use super::strategy::*;
 // Mesh — greedy (today's path)
 // ---------------------------------------------------------------------------
 
+/// Greedy meshing: coalesces coplanar same-material voxel faces into the
+/// largest axis-aligned rectangles that share material id, dramatically
+/// reducing triangle count vs naive 6-quads-per-voxel meshing. Backed by
+/// [`atomr_worlds_view::greedy_mesh`]. Default — and currently the only —
+/// [`MeshStrategy`].
 #[derive(Default)]
 pub struct GreedyFlat;
 
@@ -109,6 +114,10 @@ impl PaletteStrategy for HardcodedPalette {
 // AO — disabled in v1 (step 6 lands the corner sampler)
 // ---------------------------------------------------------------------------
 
+/// No-op ambient-occlusion strategy: leaves every vertex at AO = 1.0
+/// (no shading change). Matches pre-upgrade behaviour and the lighter
+/// `RenderPreset::Legacy` / `Debug` bundles; used as a baseline for
+/// performance work where AO bake time matters.
 #[derive(Default)]
 pub struct NoAo;
 
@@ -374,11 +383,24 @@ impl ShadowStrategy for NoShadows {
 }
 
 /// Cascaded shadow maps tuned to the FP streaming radius (~48 m).
+///
+/// Drives Bevy's `CascadeShadowConfigBuilder`; the defaults bias the
+/// near cascade tight to the camera so foreground voxel edges get
+/// crisp shadows while the far cascade still covers the LOD-1 ring.
+/// All fields map 1:1 to the Bevy builder methods.
 pub struct BasicCascades {
+    /// Number of cascade splits. 4 is the practical sweet spot for the
+    /// FP load horizon — fewer leaves visible seams at mid-range.
     pub num_cascades: usize,
+    /// Near plane of the first cascade, in world meters.
     pub minimum_distance: f32,
+    /// Far plane of the outermost cascade, in world meters.
     pub maximum_distance: f32,
+    /// Far bound of the first cascade. Smaller → sharper shadows on
+    /// near voxels at the cost of more frequent cascade transitions.
     pub first_cascade_far_bound: f32,
+    /// Fraction of overlap between adjacent cascades; smooths the
+    /// transition at cascade boundaries.
     pub overlap_proportion: f32,
 }
 
