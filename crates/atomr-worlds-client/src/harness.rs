@@ -384,7 +384,12 @@ impl Plugin for HarnessPlugin {
             })
             .insert_resource(HarnessActive)
             .add_systems(First, tick_clock)
-            .add_systems(PreUpdate, drive_input_events)
+            // Must run *after* Bevy's input systems: `keyboard_input_system`
+            // clears `just_pressed`/`just_released` each `PreUpdate`, so a
+            // synthetic `keys.press()` that lands before it would have its
+            // `just_pressed` flag wiped — breaking `key_tap`-driven actions
+            // that read `just_pressed` (view-mode switches, z-band cycling).
+            .add_systems(PreUpdate, drive_input_events.after(bevy::input::InputSystem))
             .add_systems(PostUpdate, drive_screenshots)
             .add_systems(Last, (drain_capture_outcomes, drive_exit).chain());
     }

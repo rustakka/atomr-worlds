@@ -6,7 +6,7 @@
 //! `Send + Sync + 'static` so they can live inside `Arc<dyn Trait>`
 //! fields of the [`RenderConfig`](super::RenderConfig) resource.
 
-use atomr_worlds_view::{MaterialPalette, Mesh};
+use atomr_worlds_view::{Framebuffer, MaterialPalette, Mesh, SliceCamera, SliceConfig, SliceTable};
 use atomr_worlds_voxel::Brick;
 use bevy::core_pipeline::bloom::BloomSettings;
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -233,4 +233,35 @@ pub trait LodCoveragePolicy: Send + Sync + 'static {
     /// `false` → behave like `NestedSummary` (keep — parent stays loaded
     /// as a fallback summary).
     fn mask_finer_covered(&self) -> bool;
+}
+
+// ---------------------------------------------------------------------------
+// Slice-view render strategy
+// ---------------------------------------------------------------------------
+
+/// Everything the slice-view raster needs for one frame. The
+/// [`SliceTable`] is built by the `slice_render` system (which owns the
+/// world-host handle); the strategy only decides how to turn it into
+/// pixels.
+#[derive(Debug)]
+pub struct SliceRenderInputs<'a> {
+    pub table: &'a SliceTable,
+    pub cam: &'a SliceCamera,
+    pub palette: &'a MaterialPalette,
+    /// Base config — the strategy overrides `shading` / `light_dir_xz_y`
+    /// and leaves the rest (dimensions, tile size, roof alpha) intact.
+    pub base_cfg: SliceConfig,
+    /// Sun direction FROM the sun INTO the scene, world space — the same
+    /// value the FP view's directional light uses, so the slice's relief
+    /// shading stays consistent with the 3D scene.
+    pub sun_dir: Vec3,
+}
+
+/// How the Dwarf-Fortress slice view turns a [`SliceTable`] into a
+/// [`Framebuffer`]. Mirrors the other render strategies: a small trait
+/// with swappable impls (`FlatSlice`, `HillshadeSlice`) selected through
+/// [`RenderConfig`](super::RenderConfig).
+pub trait SliceRenderStrategy: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    fn render(&self, inputs: &SliceRenderInputs<'_>) -> Framebuffer;
 }

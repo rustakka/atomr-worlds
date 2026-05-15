@@ -1,7 +1,7 @@
-# Input smoke test: confirms WASD now drives the world walk position in
-# all walk-based modes (FP, TP, Slice, RTS). Each pair of shots brackets
-# a `W`-held interval; the second shot should differ from the first
-# because the camera anchor moved.
+# Input smoke test: confirms WASD pans the view in every walk-based mode.
+# FP / TP / RTS move the shared world walk anchor; Slice pans its own
+# yaw-independent center. Each pair of shots brackets a `W`-held interval;
+# the second shot should differ from the first because the view moved.
 
 seed = "0xDEADBEEFCAFEF00D"
 mode = "fp"

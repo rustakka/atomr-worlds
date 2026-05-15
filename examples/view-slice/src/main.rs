@@ -103,6 +103,7 @@ fn main() {
         stipple_thin_features: true,
         roof_alpha: 0.25,
         background: [20, 20, 28, 255],
+        ..SliceConfig::default()
     };
 
     // Cycle three z-bands. Each band is 3 voxels thick: 2 m of "open air"

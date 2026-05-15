@@ -1205,3 +1205,82 @@ See [HYDROLOGY.md](HYDROLOGY.md) for the full design.
   sources, and seasonal water-level variation.
 - Feeding hydrology back into climate / biomes (it is a pure overlay
   today — lakes do not make their surroundings wetter).
+
+## Phase 19 *(landed)* — Slice view: FP-aligned orientation + hillshade relief
+
+A rework of the Dwarf-Fortress slice view (`ViewMode::Slice`) so it reads
+as the same world as the first-person view and scrolls predictably. Three
+problems are addressed:
+
+- **Directional misalignment.** `render_slice` mapped world `+X` to
+  screen-right and `+Z` to screen-down, but the FP camera (which faces
+  world `+Z`) has screen-right at world `-X` — the slice was mirrored.
+  The renderer's pixel mapping now negates `(world - center)` on both
+  axes: world `+Z` is up on screen, world `-X` is to the right, matching
+  FP.
+- **Yaw-coupled scrolling.** Slice reused `world_walk_input`, which
+  rotates WASD by the FP camera's yaw — so after looking around in FP,
+  `W` no longer scrolled a consistent direction. Slice now owns its
+  panning: `SliceState` carries its own `center_xz`, seeded from the FP
+  eye on entry, and WASD pans it in fixed screen-aligned directions.
+  `world_walk_input` no longer touches slice mode. Q/E, Space/Ctrl, and
+  PageUp/PageDown all shift the z-band; the band is seeded from the
+  ground height at the FP position on entry so the view opens on surface
+  terrain rather than blank underground.
+- **Flat, unshaded look.** `render_slice` filled each column with the
+  palette's flat `base_color`. A new `SliceShading::Hillshade` mode
+  derives a per-column surface normal from the neighbouring columns'
+  `top_z` height field and lights it with the FP sun direction, so
+  vertical terrain reads as 3D relief. No slice-table data change — the
+  `top_z` field already existed.
+
+The renderer is selected through a `SliceRenderStrategy` trait
+(`FlatSlice`, `HillshadeSlice`) on `RenderConfig`, mirroring the existing
+strategy spine — harness scenes can A/B them with `set_strategy
+slot="slice"`. The horizontal footprint widened from 32 to 64 voxels
+(4×4 chunks) at 4 px per tile, filling the 256-px raster exactly.
+
+Three harness gaps surfaced and were fixed so the harness can actually
+exercise the slice view:
+
+- The blit `Camera2d` rendered to the window, but the harness captures
+  the FP camera's offscreen image — so slice / RTS / overview were never
+  in any screenshot. The blit camera now targets the same offscreen
+  image when the harness is active.
+- With every camera then targeting the offscreen image, `ui_layout_system`
+  could no longer resolve a default UI camera and panicked; the world
+  camera is now explicitly marked `IsDefaultUiCamera`.
+- `drive_input_events` ran in `PreUpdate` with no ordering, so Bevy's
+  `keyboard_input_system` could clear `just_pressed` after the harness
+  set it — `key_tap` never triggered `just_pressed`-based actions
+  (view-mode switches, z-band cycling). It now runs after `InputSystem`.
+
+See [RENDERING.md](RENDERING.md) for the renderer architecture.
+
+### Verification
+
+- `atomr-worlds-view`: `slice_golden.rs` re-pinned for the flipped pixel
+  mapping, plus a second pinned golden for the hillshade path and a
+  `hillshade_differs_from_flat` sanity check; `modes/slice.rs` unit
+  tests updated for the new mapping, with a `hillshade_factor` direction
+  test (sun-facing slope brighter than shadowed).
+- `atomr-worlds-client`: full test suite green; `view-slice` example
+  still builds.
+- Harness scene [`slice_align.toml`](../harness/scenes/slice_align.toml):
+  rotates the FP camera, switches to slice, then brackets each of
+  W/S/A/D and cycles the z-band via Q/E and Space/Ctrl. Confirmed in
+  capture: slice renders as a top-down raster of surface terrain with
+  visible relief; W pans toward `+Z` (up), A pans screen-left; W+S and
+  A+D cancel; Q/E and Space/Ctrl produce identical deterministic z-band
+  results.
+
+### Out of scope (follow-ups)
+
+- The per-column LOD selector still keys off the FP player position, not
+  the slice pan center — columns coarsen if you pan far from where you
+  entered the view.
+- Slice panning does not write back to the FP position; switching back
+  to FP returns you to where you left it (this was the chosen design,
+  noted here as a known behaviour).
+- The HUD is drawn by the world camera, so the fullscreen slice raster
+  covers it in slice / RTS / overview modes.

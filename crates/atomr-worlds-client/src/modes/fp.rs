@@ -349,6 +349,11 @@ fn setup_fp_scene(
             ..default()
         },
         WorldCamera,
+        // Pin the HUD / UI to this camera. Without an explicit default,
+        // `ui_layout_system` resolves the UI camera by heuristic — which
+        // breaks (panics) in harness mode, where every camera targets the
+        // offscreen image and none targets the primary window.
+        bevy::ui::IsDefaultUiCamera,
     ));
     if let Some(bloom) = render_cfg.tonemap.bloom() {
         camera_ent.insert(bloom);
@@ -435,11 +440,13 @@ fn grab_cursor(
     }
 }
 
-/// WASD / Space / Ctrl / Shift — drives [`FpState::walk`] in any view
-/// mode that uses the world walk position (FP, TP, Slice, RTS). TP
-/// orbits this anchor; Slice / RTS center their raster on it. The
-/// mouse-look + arrow-key look part stays in [`fp_input_look`] which is
-/// FP-only (TP handles its own orbit, slice/RTS don't look).
+/// WASD / Space / Ctrl / Shift — drives [`FpState::walk`] in the view
+/// modes that anchor on the world walk position (FP, TP, RTS). TP orbits
+/// this anchor; RTS centers its raster on it; FP walks with it. Slice
+/// mode is deliberately excluded — it has its own yaw-independent pan
+/// (see [`crate::modes::slice`]) so its WASD scrolling doesn't inherit
+/// the FP camera's heading. The mouse-look + arrow-key look part stays
+/// in [`fp_input_look`] which is FP-only.
 pub fn world_walk_input(
     mode: Res<ViewMode>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -449,9 +456,9 @@ pub fn world_walk_input(
     if !state.ready {
         return;
     }
-    // Slice and RTS pan their view by moving the walk position; TP
-    // orbits it; FP walks with it. Overview has its own state.
-    if !matches!(*mode, ViewMode::Fp | ViewMode::Tp | ViewMode::Slice | ViewMode::Rts) {
+    // RTS pans its view by moving the walk position; TP orbits it; FP
+    // walks with it. Slice has its own pan state; Overview has its own.
+    if !matches!(*mode, ViewMode::Fp | ViewMode::Tp | ViewMode::Rts) {
         return;
     }
     let dt = time.delta_seconds().min(0.05);

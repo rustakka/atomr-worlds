@@ -30,6 +30,10 @@ pub struct RenderConfig {
     /// transitions, ~15 % more bricks) or are masked out
     /// (`MaskedShells` — historical, one tier per shell).
     pub coverage:  Arc<dyn LodCoveragePolicy>,
+    /// How the Dwarf-Fortress slice view rasterizes a slice table —
+    /// `HillshadeSlice` (the default — relief-shaded) or `FlatSlice`
+    /// (historical flat fill).
+    pub slice:     Arc<dyn SliceRenderStrategy>,
     /// If true, [`super::WorldTime`] advances each frame; if false (the
     /// default), it only moves when the harness or user code sets it.
     pub time_advances_automatically: bool,
@@ -57,6 +61,7 @@ impl Default for RenderConfig {
             fog:       Arc::new(ExpSquaredSkyTintedFog::default()),
             tonemap:   Arc::new(AcesTonemap),
             coverage:  Arc::new(NestedSummary),
+            slice:     Arc::new(HillshadeSlice::default()),
             time_advances_automatically: false,
             seconds_per_hour: 60.0,
         }
@@ -82,6 +87,7 @@ impl RenderConfig {
                 self.fog = Arc::new(NoFog);
                 self.tonemap = Arc::new(DefaultTonemap);
                 self.coverage = Arc::new(MaskedShells);
+                self.slice = Arc::new(FlatSlice);
             }
             RenderPreset::Stylized => {
                 self.ao = Arc::new(MinecraftCornerAo);
@@ -90,6 +96,7 @@ impl RenderConfig {
                 self.fog = Arc::new(ExpSquaredSkyTintedFog::default());
                 self.sky = Arc::new(SkyTinted);
                 self.tonemap = Arc::new(AcesTonemap);
+                self.slice = Arc::new(HillshadeSlice::default());
             }
             RenderPreset::Debug => {
                 // No fog, no shadows, static sun. Useful for inspecting
@@ -100,6 +107,7 @@ impl RenderConfig {
                 self.fog = Arc::new(NoFog);
                 self.sky = Arc::new(ConstantSky);
                 self.tonemap = Arc::new(DefaultTonemap);
+                self.slice = Arc::new(FlatSlice);
             }
         }
     }

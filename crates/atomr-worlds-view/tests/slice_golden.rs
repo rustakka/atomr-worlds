@@ -15,15 +15,25 @@ use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_core::lod::Lod;
 use atomr_worlds_proto::{WorldEvent, AABB};
 use atomr_worlds_view::scene::MaterialPalette;
-use atomr_worlds_view::{build_slice_table, render_slice, SliceCamera, SliceConfig, WorldQuery};
+use atomr_worlds_view::{
+    build_slice_table, render_slice, SliceCamera, SliceConfig, SliceShading, WorldQuery,
+};
 use atomr_worlds_voxel::brick::{Brick, BRICK_EDGE};
 use atomr_worlds_voxel::voxel::Voxel;
 
-/// Pinned hash for the fixed (world, camera, config) tuple below.
-/// Updated for the lighting+materials upgrade: `material_color()` was
-/// re-tuned for the new 10-entry palette and the rendered RGB bytes
-/// shift accordingly.
-const PINNED_HASH: u64 = 0x7890_ecb5_5e6d_cb95;
+/// Pinned hash for the fixed (world, camera, config) tuple below, with
+/// flat shading. Re-pinned when the slice raster was reoriented to match
+/// the first-person view: `render_slice`'s px/py mapping now negates
+/// `(world - center)` on both axes, so the rendered pixel layout shifts.
+const PINNED_HASH: u64 = 0x6b01_51f0_2134_b695;
+
+/// Pinned hash for the same fixture rendered with [`SliceShading::Hillshade`]
+/// and a fixed light direction. Guards the relief-shading math.
+const PINNED_HILLSHADE_HASH: u64 = 0x800e_195f_26f5_7685;
+
+/// Fixed light direction for the hillshade golden — FROM sun INTO scene,
+/// packed as `[world_x, world_z, world_y]`.
+const HILLSHADE_LIGHT: [f32; 3] = [-0.5, -0.3, -0.8];
 
 struct FixedWorld {
     bricks: HashMap<IVec3, Arc<Brick>>,
@@ -75,7 +85,7 @@ fn build_fixture_world() -> FixedWorld {
     w
 }
 
-fn render_golden() -> u64 {
+fn render_golden_with(shading: SliceShading) -> u64 {
     let world = build_fixture_world();
     let addr = WorldAddr::ROOT;
     let table = build_slice_table(&world, &addr, [-1, -1], [10, 10], 3, 3);
@@ -93,10 +103,20 @@ fn render_golden() -> u64 {
         stipple_thin_features: true,
         roof_alpha: 0.25,
         background: [20, 20, 28, 255],
+        shading,
+        light_dir_xz_y: HILLSHADE_LIGHT,
     };
     let pal = MaterialPalette::default();
     let fb = render_slice(&table, &cam, &pal, &cfg);
     fb.pixels_fnv1a()
+}
+
+fn render_golden() -> u64 {
+    render_golden_with(SliceShading::Flat)
+}
+
+fn render_hillshade_golden() -> u64 {
+    render_golden_with(SliceShading::Hillshade { ambient: 0.35, relief_strength: 1.0 })
 }
 
 #[test]
@@ -104,10 +124,33 @@ fn slice_renders_deterministically_across_runs() {
     let h1 = render_golden();
     let h2 = render_golden();
     assert_eq!(h1, h2, "slice render must be deterministic");
+    let g1 = render_hillshade_golden();
+    let g2 = render_hillshade_golden();
+    assert_eq!(g1, g2, "hillshade slice render must be deterministic");
 }
 
 #[test]
 fn slice_golden_pinned_hash_matches() {
     let h = render_golden();
     assert_eq!(h, PINNED_HASH, "slice render hash drifted: got {h:#018x}, expected {PINNED_HASH:#018x}");
+}
+
+#[test]
+fn slice_hillshade_golden_pinned_hash_matches() {
+    let h = render_hillshade_golden();
+    assert_eq!(
+        h, PINNED_HILLSHADE_HASH,
+        "hillshade slice render hash drifted: got {h:#018x}, expected {PINNED_HILLSHADE_HASH:#018x}"
+    );
+}
+
+#[test]
+fn hillshade_differs_from_flat() {
+    // The fixture has a diagonal staircase, so relief shading must change
+    // at least some pixels — a sanity check that the branch is wired up.
+    assert_ne!(
+        render_golden(),
+        render_hillshade_golden(),
+        "hillshade shading should change the rendered pixels vs flat fill"
+    );
 }

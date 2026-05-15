@@ -1,0 +1,167 @@
+# Slice-view alignment + panning smoke test.
+#
+# Verifies the reworked slice view:
+#  * orientation matches FP (world +Z up on screen, world -X to the right);
+#  * WASD pans the slice's own center, independent of the FP camera yaw
+#    (we rotate the FP camera first, then check W/S/A/D still pan true);
+#  * Q/E and Space/Ctrl both shift the visible z-band.
+#
+# Captures an FP reference shot first, then a slice shot per pan/band
+# action. Compare slice_align_0000 (FP) against slice_align_0001 (slice
+# baseline): the same terrain should appear, +Z up / -X right.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "slice_align"
+
+# --- FP reference --------------------------------------------------------
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 9.0
+
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "FP reference — compare orientation to the slice shots"
+
+# Rotate the FP camera so the slice WASD test below proves panning is
+# decoupled from the FP heading.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ArrowRight"
+
+[[events]]
+frame = 35
+kind  = "key_release"
+key   = "ArrowRight"
+
+# --- Enter slice view ----------------------------------------------------
+[[events]]
+frame = 40
+kind  = "key_tap"
+key   = "Digit3"
+
+[[events]]
+frame = 44
+kind  = "screenshot"
+note  = "slice baseline — center seeded from the FP eye"
+
+# --- W: pan toward world +Z (up on screen) -------------------------------
+[[events]]
+frame = 50
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 90
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 92
+kind  = "screenshot"
+note  = "after W — view panned toward world +Z (up)"
+
+# --- S: pan back toward world -Z (down) — should ~return to baseline -----
+[[events]]
+frame = 96
+kind  = "key_press"
+key   = "KeyS"
+
+[[events]]
+frame = 136
+kind  = "key_release"
+key   = "KeyS"
+
+[[events]]
+frame = 138
+kind  = "screenshot"
+note  = "after S — view panned toward world -Z (down)"
+
+# --- A: pan screen-left (world +X) ---------------------------------------
+[[events]]
+frame = 142
+kind  = "key_press"
+key   = "KeyA"
+
+[[events]]
+frame = 182
+kind  = "key_release"
+key   = "KeyA"
+
+[[events]]
+frame = 184
+kind  = "screenshot"
+note  = "after A — view panned screen-left"
+
+# --- D: pan screen-right (world -X) --------------------------------------
+[[events]]
+frame = 188
+kind  = "key_press"
+key   = "KeyD"
+
+[[events]]
+frame = 228
+kind  = "key_release"
+key   = "KeyD"
+
+[[events]]
+frame = 230
+kind  = "screenshot"
+note  = "after D — view panned screen-right"
+
+# --- Z-band: Q (up) / E (down) -------------------------------------------
+[[events]]
+frame = 234
+kind  = "key_tap"
+key   = "KeyQ"
+
+[[events]]
+frame = 238
+kind  = "screenshot"
+note  = "z-band up via Q"
+
+[[events]]
+frame = 242
+kind  = "key_tap"
+key   = "KeyE"
+
+[[events]]
+frame = 244
+kind  = "key_tap"
+key   = "KeyE"
+
+[[events]]
+frame = 248
+kind  = "screenshot"
+note  = "z-band down via E x2"
+
+# --- Z-band: Space (up) / Ctrl (down) — should match Q/E -----------------
+[[events]]
+frame = 252
+kind  = "key_tap"
+key   = "Space"
+
+[[events]]
+frame = 256
+kind  = "screenshot"
+note  = "z-band up via Space (alias for Q) — band 5->6, matches shot 0005"
+
+[[events]]
+frame = 260
+kind  = "key_tap"
+key   = "ControlLeft"
+
+[[events]]
+frame = 264
+kind  = "screenshot"
+note  = "z-band down via Ctrl (alias for E) — band 6->5, matches shot 0007"
+
+[[events]]
+frame = 270
+kind  = "exit"

@@ -43,7 +43,7 @@ pub use iso::{boundary_skirt, crossfade_overlap, surface_mesh, MeshMode, SmoothC
 pub use mesh::{bake_ao, greedy_mesh, greedy_mesh_by_material, Mesh, Quad, Vertex};
 pub use modes::fp::{build_fp_scene, render_fp, FpScene, MeshCacheKey, WalkCamera, WalkInput};
 pub use modes::rts::{render_rts, ObliqueCamera};
-pub use modes::slice::{render_slice, render_slice_cached, SliceCamera, SliceConfig};
+pub use modes::slice::{render_slice, render_slice_cached, SliceCamera, SliceConfig, SliceShading};
 pub use modes::tp::{render_tp, ChaseCamera};
 pub use modes::view_mode::ViewMode;
 pub use observer::{ObserverState, SkyboxRefreshPolicy};

@@ -7,9 +7,11 @@
 
 use atomr_worlds_view::Framebuffer;
 use bevy::prelude::*;
+use bevy::render::camera::RenderTarget;
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::render::OffscreenTarget;
 use crate::view_mode::ViewMode;
 
 /// Fixed render-target size for the CPU rasterizer. Bevy scales the sprite
@@ -40,7 +42,11 @@ impl Plugin for BlitPlugin {
     }
 }
 
-fn setup_blit(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn setup_blit(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    offscreen: Option<Res<OffscreenTarget>>,
+) {
     let mut image = Image::new_fill(
         Extent3d { width: RASTER_W, height: RASTER_H, depth_or_array_layers: 1 },
         TextureDimension::D2,
@@ -51,9 +57,19 @@ fn setup_blit(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     image.data = vec![0u8; (RASTER_W * RASTER_H * 4) as usize];
     let handle = images.add(image);
 
+    // When the harness is active the FP camera renders to an offscreen
+    // image (see `render::offscreen`). The blit overlay must target that
+    // same image — otherwise the slice / rts / overview raster, drawn by
+    // this Camera2d, would never show up in harness screenshots. The
+    // `order: 1` keeps it compositing on top of the (cleared) 3D camera.
+    let camera_target = offscreen
+        .as_deref()
+        .map(|t| RenderTarget::Image(t.image.clone()))
+        .unwrap_or_default();
+
     commands.spawn((
         Camera2dBundle {
-            camera: Camera { order: 1, is_active: false, ..default() },
+            camera: Camera { order: 1, is_active: false, target: camera_target, ..default() },
             ..default()
         },
         BlitCamera,

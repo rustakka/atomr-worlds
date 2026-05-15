@@ -1273,3 +1273,69 @@ file/line map.
   (default-world population + invariants + determinism), per-strategy
   and per-module unit tests, `terrain.rs` macro-path tests. The three
   `atomr-worlds-view` overview golden hashes were re-pinned.
+
+## Phase 19 (landed) — Slice view: FP-aligned orientation + hillshade relief
+
+Rework of the Dwarf-Fortress slice view so it is oriented like the FP
+view, scrolls independently of the FP camera yaw, and shades terrain as
+3D relief. See [PHASES.md](PHASES.md) for the design; this section is the
+file/line map.
+
+- [`crates/atomr-worlds-view/src/modes/slice.rs`](../crates/atomr-worlds-view/src/modes/slice.rs)
+  — `render_slice`'s pixel mapping now negates `(world - center)` on both
+  axes (world `+Z` up, world `-X` right — matches the FP view).
+  `SliceCamera::to_camera` `up` flipped to `[0, 0, -1]` to stay
+  consistent. New `SliceShading` enum (`Flat` / `Hillshade { ambient,
+  relief_strength }`) and `SliceConfig` fields `shading` +
+  `light_dir_xz_y`; the render loop derives a per-column normal from the
+  4 axis-neighbour `top_z` values (`hillshade_factor`) and multiplies the
+  column colour by it (`shade_rgb`). Unit tests updated for the new
+  mapping; `hillshade_factor` direction test added.
+- [`crates/atomr-worlds-view/src/lib.rs`](../crates/atomr-worlds-view/src/lib.rs)
+  — re-exports `SliceShading`.
+- [`crates/atomr-worlds-view/tests/slice_golden.rs`](../crates/atomr-worlds-view/tests/slice_golden.rs)
+  — `PINNED_HASH` re-pinned for the flipped mapping; new
+  `PINNED_HILLSHADE_HASH` golden + `hillshade_differs_from_flat` check.
+- [`crates/atomr-worlds-client/src/render/strategy.rs`](../crates/atomr-worlds-client/src/render/strategy.rs)
+  — `SliceRenderStrategy` trait + `SliceRenderInputs<'a>` (table, camera,
+  palette, base `SliceConfig`, sun direction → `Framebuffer`).
+- [`crates/atomr-worlds-client/src/render/defaults.rs`](../crates/atomr-worlds-client/src/render/defaults.rs)
+  — `FlatSlice` (preserves the historical flat fill) and `HillshadeSlice
+  { ambient, relief_strength }` (default; sets `light_dir_xz_y` from the
+  sun direction, packed `[world_x, world_z, world_y]`).
+- [`crates/atomr-worlds-client/src/render/config.rs`](../crates/atomr-worlds-client/src/render/config.rs)
+  — `RenderConfig` gains a `slice: Arc<dyn SliceRenderStrategy>` field
+  (`HillshadeSlice` default; `FlatSlice` under the `Legacy` / `Debug`
+  presets).
+- [`crates/atomr-worlds-client/src/render/registry.rs`](../crates/atomr-worlds-client/src/render/registry.rs)
+  — `"slice"` slot for `set_strategy` (`FlatSlice` / `HillshadeSlice`).
+- [`crates/atomr-worlds-client/src/modes/slice.rs`](../crates/atomr-worlds-client/src/modes/slice.rs)
+  — `SliceState` gains `center_xz`; `slice_input` seeds `center_xz` from
+  the FP eye and `z_band_top` from the host ground height on entry (a
+  `Local<Option<ViewMode>>` detects the transition), pans `center_xz`
+  with yaw-independent WASD, and cycles the z-band on Q/E + Space/Ctrl +
+  PageUp/PageDown. `slice_render` centers on `state.center_xz`, builds a
+  `SliceRenderInputs` (palette from `RenderConfig`, sun direction from the
+  sun-curve strategy at the current `WorldTime`), and calls
+  `render_cfg.slice.render(...)`. Footprint widened to 64 voxels (4×4
+  chunks) at `SLICE_TILE_PX = 4`.
+- [`crates/atomr-worlds-client/src/modes/fp.rs`](../crates/atomr-worlds-client/src/modes/fp.rs)
+  — `world_walk_input` no longer matches `ViewMode::Slice` (slice owns
+  its pan). The world camera is tagged `bevy::ui::IsDefaultUiCamera` so
+  `ui_layout_system` has a resolvable UI camera once every camera targets
+  the harness offscreen image.
+- [`crates/atomr-worlds-client/src/modes/blit.rs`](../crates/atomr-worlds-client/src/modes/blit.rs)
+  — `setup_blit` points the blit `Camera2d` at the `OffscreenTarget`
+  image when the harness is active, so slice / RTS / overview rasters
+  land in harness screenshots (previously the Camera2d only drew to the
+  window, which the harness never captures).
+- [`crates/atomr-worlds-client/src/harness.rs`](../crates/atomr-worlds-client/src/harness.rs)
+  — `drive_input_events` runs `.after(bevy::input::InputSystem)` so a
+  synthetic `keys.press()` keeps its `just_pressed` flag (Bevy's
+  `keyboard_input_system` clears it each `PreUpdate`); without this
+  `key_tap` never fired `just_pressed`-based actions.
+- [`harness/scenes/slice_align.toml`](../harness/scenes/slice_align.toml)
+  — new scenario: rotates the FP camera, switches to slice, brackets
+  W/S/A/D, cycles the z-band via Q/E and Space/Ctrl.
+- [`examples/view-slice/src/main.rs`](../examples/view-slice/src/main.rs)
+  — `SliceConfig` literal updated for the two new fields.

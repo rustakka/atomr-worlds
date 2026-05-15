@@ -34,6 +34,7 @@ pub use skybox::{
 };
 pub use strategy::{
     AoStrategy, FogStrategy, LodCoveragePolicy, MeshStrategy, PaletteStrategy, ShadingMode,
-    ShadingStrategy, ShadowStrategy, SkyStrategy, SunCurveStrategy, SunState, TonemapStrategy,
+    ShadingStrategy, ShadowStrategy, SkyStrategy, SliceRenderInputs, SliceRenderStrategy, SunCurveStrategy,
+    SunState, TonemapStrategy,
 };
 pub use sun::{advance_world_time, sync_sky_and_fog, sync_sun, WorldSunMarker, WorldTime};

@@ -115,6 +115,17 @@ pub fn apply_strategy_by_name(cfg: &mut RenderConfig, slot: &str, name: &str) ->
             }
             _ => false,
         },
+        "slice" => match name {
+            "FlatSlice" => {
+                cfg.slice = Arc::new(FlatSlice);
+                true
+            }
+            "HillshadeSlice" => {
+                cfg.slice = Arc::new(HillshadeSlice::default());
+                true
+            }
+            _ => false,
+        },
         _ => false,
     }
 }

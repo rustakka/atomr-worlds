@@ -4,7 +4,10 @@
 
 use std::f32::consts::PI;
 
-use atomr_worlds_view::{bake_ao, greedy_mesh, MaterialEntry, MaterialPalette, Mesh};
+use atomr_worlds_view::{
+    bake_ao, greedy_mesh, render_slice, Framebuffer, MaterialEntry, MaterialPalette, Mesh,
+    SliceShading,
+};
 use atomr_worlds_voxel::Brick;
 use bevy::core_pipeline::bloom::BloomSettings;
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -597,6 +600,64 @@ impl LodCoveragePolicy for NestedSummary {
     }
     fn mask_finer_covered(&self) -> bool {
         false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slice-view render strategy
+// ---------------------------------------------------------------------------
+
+/// Flat-fill slice raster — each column is the palette's `base_color`
+/// with no relief shading. Preserves the pre-rework slice look; reachable
+/// via `RenderPreset::Legacy` / `Debug`.
+#[derive(Default)]
+pub struct FlatSlice;
+
+impl SliceRenderStrategy for FlatSlice {
+    fn name(&self) -> &'static str {
+        "FlatSlice"
+    }
+    fn render(&self, inputs: &SliceRenderInputs<'_>) -> Framebuffer {
+        let mut cfg = inputs.base_cfg;
+        cfg.shading = SliceShading::Flat;
+        render_slice(inputs.table, inputs.cam, inputs.palette, &cfg)
+    }
+}
+
+/// Hillshade-relief slice raster. Derives a per-column surface normal
+/// from the neighbouring columns' `top_z` height field and lights it
+/// with the FP view's sun direction, so vertical terrain reads as 3D
+/// relief consistent with the first-person scene. Default slice strategy.
+pub struct HillshadeSlice {
+    /// Unlit floor brightness — `0.0` is black shadows, `1.0` removes all
+    /// shading.
+    pub ambient: f32,
+    /// Scales the height gradient before the normal is built; higher
+    /// exaggerates relief.
+    pub relief_strength: f32,
+}
+
+impl Default for HillshadeSlice {
+    fn default() -> Self {
+        Self { ambient: 0.35, relief_strength: 1.0 }
+    }
+}
+
+impl SliceRenderStrategy for HillshadeSlice {
+    fn name(&self) -> &'static str {
+        "HillshadeSlice"
+    }
+    fn render(&self, inputs: &SliceRenderInputs<'_>) -> Framebuffer {
+        let mut cfg = inputs.base_cfg;
+        cfg.shading = SliceShading::Hillshade {
+            ambient: self.ambient,
+            relief_strength: self.relief_strength,
+        };
+        // `SliceConfig` packs the light as [world_x, world_z, world_y] so
+        // it lines up with the slice's (x, z) tile plane.
+        let d = inputs.sun_dir;
+        cfg.light_dir_xz_y = [d.x, d.z, d.y];
+        render_slice(inputs.table, inputs.cam, inputs.palette, &cfg)
     }
 }
 
