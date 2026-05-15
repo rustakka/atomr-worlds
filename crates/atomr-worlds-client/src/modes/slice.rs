@@ -160,9 +160,15 @@ fn slice_render(
     // sample at near_lod; everything beyond falls back to far_lod. Voxel
     // size in slice mode is 1 m per voxel, so XZ voxel coords already line
     // up with the meter-space the streamer expects. The LOD observer is
-    // still the FP player position — far columns coarsen if you pan well
-    // away from where you entered the view.
-    let observer = fp_state.walk.observer.position;
+    // the slice's own pan center (lifted to the active z-band so the LOD
+    // ring sits on the visible plane), so panning the slice always keeps
+    // the high-detail ring under the visible footprint instead of leaving
+    // it stuck where the FP camera last stood.
+    let lod_observer = DVec3::new(
+        center_x as f64,
+        state.z_band_top as f64,
+        center_z as f64,
+    );
     let table = build_slice_table_with_lod_fn(
         runtime.query.as_ref(),
         &fp_state.addr,
@@ -171,8 +177,8 @@ fn slice_render(
         state.z_band_top,
         Z_BAND_THICKNESS,
         |[wx, wz]| {
-            let p = DVec3::new(wx as f64, observer.y, wz as f64);
-            streamer.lod_for_meters(observer, p)
+            let p = DVec3::new(wx as f64, lod_observer.y, wz as f64);
+            streamer.lod_for_meters(lod_observer, p)
         },
     );
     let cam = SliceCamera {

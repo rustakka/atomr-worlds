@@ -491,27 +491,45 @@ impl WorldActor {
                     let _ = store.apply_all(brick_coord, BRICK_EDGE as i64, &mut b);
                 }
             }
-            // Apply any user-write overlay falling inside this brick.
-            // Overlays are LOD-0 voxel writes; only stamp them on the
-            // LOD-0 cache entry so coarse-LOD bricks stay purely
-            // procedural (and writes don't get mis-stamped 1-for-1 at
-            // larger voxel scales).
-            if lod.depth == 0 {
-                let edge = BRICK_EDGE as i64;
-                let origin =
-                    IVec3::new(brick_coord.x * edge, brick_coord.y * edge, brick_coord.z * edge);
-                for (pos, voxel) in &self.overlay {
-                    if pos.x >= origin.x
-                        && pos.x < origin.x + edge
-                        && pos.y >= origin.y
-                        && pos.y < origin.y + edge
-                        && pos.z >= origin.z
-                        && pos.z < origin.z + edge
-                    {
-                        let lc = IVec3::new(pos.x - origin.x, pos.y - origin.y, pos.z - origin.z);
-                        b.set(lc, *voxel);
-                    }
+            // Apply user-write overlay falling inside this brick. At
+            // LOD 0 the overlay is voxel-resolution: writes (including
+            // EMPTY) overwrite cells one-for-one. At coarser LODs each
+            // brick cell represents a `2^L` cube of LOD-0 voxels, so a
+            // single user write maps to one cell — we re-stamp non-empty
+            // writes (this Phase 17.1 follow-up) so a built voxel still
+            // shows up after the observer crosses past the LOD transition
+            // radius. EMPTY writes (carving) are left to the LOD-0 path:
+            // a single LOD-0 hole shouldn't blank the whole coarse cell
+            // when 2^(3L)-1 other LOD-0 voxels in the cell are still
+            // procedurally solid; the carved hole reappears when the
+            // observer returns to the near ring.
+            let lod_scale = 1i64 << lod.depth;
+            let edge = BRICK_EDGE as i64;
+            let edge_world = edge * lod_scale;
+            let origin = IVec3::new(
+                brick_coord.x * edge_world,
+                brick_coord.y * edge_world,
+                brick_coord.z * edge_world,
+            );
+            for (pos, voxel) in &self.overlay {
+                if pos.x < origin.x
+                    || pos.x >= origin.x + edge_world
+                    || pos.y < origin.y
+                    || pos.y >= origin.y + edge_world
+                    || pos.z < origin.z
+                    || pos.z >= origin.z + edge_world
+                {
+                    continue;
                 }
+                if lod.depth > 0 && *voxel == Voxel::EMPTY {
+                    continue;
+                }
+                let lc = IVec3::new(
+                    (pos.x - origin.x).div_euclid(lod_scale),
+                    (pos.y - origin.y).div_euclid(lod_scale),
+                    (pos.z - origin.z).div_euclid(lod_scale),
+                );
+                b.set(lc, *voxel);
             }
             self.cache.insert(key, b);
         }
@@ -523,6 +541,34 @@ impl WorldActor {
         let bc = IVec3::new(p.x.div_euclid(edge), p.y.div_euclid(edge), p.z.div_euclid(edge));
         let lc = IVec3::new(p.x.rem_euclid(edge), p.y.rem_euclid(edge), p.z.rem_euclid(edge));
         (bc, lc)
+    }
+
+    /// Drop every cached coarse-LOD brick whose world-voxel footprint
+    /// contains `pos`. The next access to that brick re-runs the
+    /// generator and re-applies the (now-updated) overlay through
+    /// `ensure_brick`, so a write made inside the near ring is reflected
+    /// the moment the observer crosses past the LOD transition radius.
+    /// LOD-0 entries are left alone — the in-place `set` on the LOD-0
+    /// brick keeps them coherent without a refetch. Phase 17.1 follow-up.
+    fn invalidate_coarse_caches_for(&mut self, pos: IVec3) {
+        let edge = BRICK_EDGE as i64;
+        self.cache.retain(|(bc, depth), _| {
+            if *depth == 0 {
+                return true;
+            }
+            let lod_scale = 1i64 << *depth;
+            let edge_world = edge * lod_scale;
+            let lo_x = bc.x * edge_world;
+            let lo_y = bc.y * edge_world;
+            let lo_z = bc.z * edge_world;
+            let inside = pos.x >= lo_x
+                && pos.x < lo_x + edge_world
+                && pos.y >= lo_y
+                && pos.y < lo_y + edge_world
+                && pos.z >= lo_z
+                && pos.z < lo_z + edge_world;
+            !inside
+        });
     }
 
     fn snapshot(&mut self, brick_coord: IVec3, lod: Lod) -> bytes::Bytes {
@@ -566,6 +612,10 @@ impl WorldActor {
                 } else {
                     self.overlay.insert(pos, voxel);
                 }
+                // Phase 17.1 follow-up: drop any cached coarse-LOD bricks
+                // that contained `pos` so the next coarse fetch picks up
+                // the new overlay (re-stamped via `ensure_brick`).
+                self.invalidate_coarse_caches_for(pos);
                 self.fan_out_delta(addr, pos, before, voxel);
                 self.maybe_save_snapshot().await?;
                 Ok(Envelope::new(corr, from, WorldEvent::Ack { addr }))
@@ -685,6 +735,10 @@ impl WorldActor {
                                     self.overlay.insert(pos, voxel);
                                 }
                                 journaled.push((pos, before));
+                                // Phase 17.1 follow-up: invalidate coarse-LOD
+                                // entries containing `pos` so they regenerate
+                                // with the new overlay on next access.
+                                self.invalidate_coarse_caches_for(pos);
                             }
                         }
                     }

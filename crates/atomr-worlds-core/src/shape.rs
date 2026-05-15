@@ -185,6 +185,38 @@ impl WorldShape {
         }
     }
 
+    /// Altitude of an observer at world-space position `p` above the
+    /// shape's surface, measured along the surface normal at the observer's
+    /// foot point. Negative values (observer below surface) clamp to `0`.
+    ///
+    /// - **Cube**: `0` (the cube has no canonical "altitude"; horizon math
+    ///   short-circuits to infinity for cubes regardless).
+    /// - **Sphere**: `|p| - radius_m`.
+    /// - **Cylinder**: lateral distance from axis minus radius — vertical
+    ///   distance is irrelevant for the small-angle horizon approximation.
+    #[inline]
+    pub fn altitude_m_at(self, p: DVec3) -> f64 {
+        match self {
+            Self::Cube { .. } => 0.0,
+            Self::Sphere { radius_m } => {
+                let r = (p.x * p.x + p.y * p.y + p.z * p.z).sqrt();
+                (r - radius_m).max(0.0)
+            }
+            Self::Cylinder { radius_m, .. } => {
+                let r = (p.x * p.x + p.z * p.z).sqrt();
+                (r - radius_m).max(0.0)
+            }
+        }
+    }
+
+    /// Convenience: geometric horizon distance for an observer at world
+    /// position `p`. Equivalent to
+    /// `self.horizon_distance_m(self.altitude_m_at(p))`.
+    #[inline]
+    pub fn horizon_at_m(self, p: DVec3) -> f64 {
+        self.horizon_distance_m(self.altitude_m_at(p))
+    }
+
     /// Coordinate wrapping. Identity for sphere and cube (the inscribed-
     /// sphere design uses render-side local-origin rebasing rather than
     /// in-storage modulo arithmetic — see plan 13a). Cylinder wraps the
@@ -341,6 +373,52 @@ mod tests {
     fn cube_has_infinite_horizon() {
         let s = WorldShape::Cube { edge_m: 1.0e7 };
         assert_eq!(s.horizon_distance_m(100.0), f64::INFINITY);
+    }
+
+    #[test]
+    fn altitude_at_sphere_surface_is_zero() {
+        let s = WorldShape::Sphere { radius_m: 6.371e6 };
+        let on_surface = DVec3::new(s.radius_m(), 0.0, 0.0);
+        assert!(s.altitude_m_at(on_surface).abs() < 1e-6);
+    }
+
+    #[test]
+    fn altitude_at_sphere_above_surface_is_radius_diff() {
+        let s = WorldShape::Sphere { radius_m: 6.371e6 };
+        // 1km above the +X surface point.
+        let p = DVec3::new(s.radius_m() + 1000.0, 0.0, 0.0);
+        let alt = s.altitude_m_at(p);
+        assert!((alt - 1000.0).abs() < 1e-6, "got alt = {alt}");
+    }
+
+    #[test]
+    fn altitude_inside_sphere_clamps_to_zero() {
+        let s = WorldShape::Sphere { radius_m: 1000.0 };
+        let p = DVec3::new(500.0, 0.0, 0.0); // inside the sphere
+        assert_eq!(s.altitude_m_at(p), 0.0);
+    }
+
+    #[test]
+    fn cube_altitude_is_zero_everywhere() {
+        let s = WorldShape::Cube { edge_m: 1.0e7 };
+        assert_eq!(s.altitude_m_at(DVec3::new(123.0, 4567.0, 89.0)), 0.0);
+    }
+
+    #[test]
+    fn horizon_at_m_matches_altitude_then_horizon() {
+        let s = WorldShape::Sphere { radius_m: 6.371e6 };
+        let p = DVec3::new(s.radius_m() + 1000.0, 0.0, 0.0);
+        let h_combined = s.horizon_at_m(p);
+        let h_split = s.horizon_distance_m(s.altitude_m_at(p));
+        assert_eq!(h_combined, h_split);
+        // And it matches the documented Earth-class result at 1km.
+        assert!((h_combined - 112_884.897).abs() < 1.0);
+    }
+
+    #[test]
+    fn cube_horizon_at_m_is_infinite() {
+        let s = WorldShape::Cube { edge_m: 1.0e7 };
+        assert!(s.horizon_at_m(DVec3::new(0.0, 100.0, 0.0)).is_infinite());
     }
 
     #[test]

@@ -11,6 +11,7 @@
 //! - Precipitation = humidity attenuation per face (the amount lost in
 //!   the advection step).
 
+use super::hydrology::water_kind;
 use super::plates::ElevationField;
 use super::surface_grid::SurfaceGrid;
 
@@ -29,6 +30,18 @@ pub struct ClimateConfig {
     pub humidity_iters: u8,
     pub humidity_decay: f32,    // multiplier per advection step (0..1)
     pub precip_scale: f32,
+    /// Phase 18 follow-up: how many extra humidity-diffusion iterations to
+    /// run *after* hydrology has identified lake / river faces. Each
+    /// iteration uses the same neighbour-max diffusion as the initial
+    /// pass, so freshwater bodies act as humidity sources alongside the
+    /// ocean. `0` disables the feedback (preserves the pre-feedback
+    /// digest); the default `2` is enough for one or two faces of bleed
+    /// without flooding inland deserts.
+    pub hydrology_feedback_iters: u8,
+    /// Humidity value seeded at lake / river faces during the feedback
+    /// pass. Defaults to `1.0` so freshwater behaves identically to the
+    /// ocean seed.
+    pub hydrology_feedback_seed: f32,
 }
 
 impl Default for ClimateConfig {
@@ -40,6 +53,8 @@ impl Default for ClimateConfig {
             humidity_iters: 4,
             humidity_decay: 0.85,
             precip_scale: 600.0,
+            hydrology_feedback_iters: 2,
+            hydrology_feedback_seed: 1.0,
         }
     }
 }
@@ -95,6 +110,68 @@ pub fn generate_climate(
     }
 
     ClimateField { temperature_c, humidity, precipitation_mm }
+}
+
+/// Phase 18 follow-up: bleed humidity outward from lake / river faces.
+///
+/// Mutates the supplied [`ClimateField`] in place. Lake and river faces
+/// are stamped to `cfg.hydrology_feedback_seed`, then `cfg.hydrology_feedback_iters`
+/// extra neighbour-max diffusion steps run with the same `humidity_decay`
+/// as the initial advection pass. Precipitation receives the same delta
+/// accounting so downstream "is it wet here?" consumers see the bleed.
+///
+/// `kinds` must be `water_kind::*` per face — the function reads it and
+/// expects `OCEAN` faces to remain at humidity `1.0` from the initial
+/// pass (no second seed required).
+///
+/// `iters == 0` is a no-op so callers can preserve the pre-Phase-18-feedback
+/// digest by setting [`ClimateConfig::hydrology_feedback_iters`] to `0`.
+pub fn apply_hydrology_humidity_feedback(
+    grid: &SurfaceGrid,
+    climate: &mut ClimateField,
+    kinds: &[u8],
+    cfg: &ClimateConfig,
+) {
+    if cfg.hydrology_feedback_iters == 0 {
+        return;
+    }
+    let n_faces = grid.face_count();
+    debug_assert_eq!(climate.humidity.len(), n_faces);
+    debug_assert_eq!(kinds.len(), n_faces);
+
+    // Seed lake / river faces. Ocean already sits at 1.0 from the initial
+    // pass; freshwater bodies didn't exist when that pass ran.
+    let seed = cfg.hydrology_feedback_seed;
+    for f in 0..n_faces {
+        let k = kinds[f];
+        if k == water_kind::LAKE || k == water_kind::RIVER {
+            if climate.humidity[f] < seed {
+                climate.humidity[f] = seed;
+            }
+        }
+    }
+
+    // Re-run the diffusion `iters` times, accumulating precipitation the
+    // same way `generate_climate` does so the field stays consistent with
+    // its documented semantics.
+    for _ in 0..cfg.hydrology_feedback_iters {
+        let prev = climate.humidity.clone();
+        for f in 0..n_faces {
+            let mut best = prev[f];
+            for n in grid.neighbours_of(f as super::surface_grid::FaceId) {
+                if n == super::surface_grid::FaceId::MAX {
+                    continue;
+                }
+                let v = prev[n as usize] * cfg.humidity_decay;
+                if v > best {
+                    best = v;
+                }
+            }
+            let delta = (best - prev[f]).max(0.0);
+            climate.precipitation_mm[f] += delta * cfg.precip_scale;
+            climate.humidity[f] = best;
+        }
+    }
 }
 
 #[cfg(test)]

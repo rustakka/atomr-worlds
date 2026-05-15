@@ -1069,11 +1069,28 @@ because its viewing distance is body-scale.
   `crates/atomr-worlds-client/tests/skybox_runtime.rs` exercises
   `SkyboxRuntime` end-to-end (no Bevy app).
 
-### Out of scope for Phase 17
+### Follow-ups landed
 
-- Body-aware spherical horizon clamp (uses `f64::INFINITY` for now;
-  spherical worlds will pass surface horizon meters once
-  `ContainingFrame`-based body geometry plumbing lands).
+- **Body-aware spherical horizon clamp.**
+  [`WorldShape::altitude_m_at`](../crates/atomr-worlds-core/src/shape.rs)
+  + [`WorldShape::horizon_at_m`](../crates/atomr-worlds-core/src/shape.rs)
+  collapse the altitude lookup + `sqrt(2*R*h + h²)` into one call.
+  [`ActiveWorld`](../crates/atomr-worlds-client/src/world_runtime.rs)
+  carries a `WorldShape` (defaults to
+  `WorldShape::default_world()` — the historical cube), and
+  [`fp_stream_bricks`](../crates/atomr-worlds-client/src/modes/fp.rs)
+  passes `active.shape.horizon_at_m(observer)` instead of `INFINITY`.
+  Cube worlds short-circuit to `INFINITY` so the default load behaviour
+  is byte-equal to before; sphere worlds clamp the outer ring at the
+  geometric horizon. Coverage:
+  [`shape::tests::altitude_*`](../crates/atomr-worlds-core/src/shape.rs)
+  +
+  [`world_stream::tests::horizon_clamp_drops_far_tiers`](../crates/atomr-worlds-client/src/world_stream.rs),
+  `horizon_infinity_matches_unclamped`, and
+  `shape_horizon_at_m_drives_streamer_clamp`.
+
+### Out of scope for Phase 17 (still)
+
 - LOD selection beyond two tiers — `StreamingPolicy` exposes only
   `near_lod` and `far_lod`; a screen-space pyramid (Phase 18) would
   evaluate `MetricScale::lod_for_screen` per-brick.
@@ -1141,14 +1158,32 @@ See [LOD.md](LOD.md) for the per-tier generation contract, the
 world-meter sampling API, and the intrinsic-discretization
 characteristics that motivate the roadmap items below.
 
-### Out of scope (follow-ups)
+### Follow-ups landed
+
+- **Coarse-LOD overlay re-stamping.**
+  [`WorldActor::ensure_brick`](../crates/atomr-worlds-host/src/local.rs)
+  now applies the user-write overlay at every LOD depth, mapping each
+  LOD-0 voxel position into the matching coarse cell (one cell per
+  write — last-writer-wins inside a cell, which is acceptable for the
+  sparse-edit workload). The `WriteVoxel` and `WriteRegion` paths call
+  the new `WorldActor::invalidate_coarse_caches_for(pos)` so any
+  previously-cached coarse brick containing the write is dropped and
+  regenerated with the new overlay on next access. Carving (writing
+  `Voxel::EMPTY`) is a deliberate exception — it stamps only at
+  LOD 0, since blanking a whole `2^(3L)` coarse cell from a single
+  LOD-0 hole would erase otherwise-solid neighbours; the carved hole
+  reappears once the observer returns to the near ring. Coverage:
+  [`tests/coarse_lod_restamp.rs`](../crates/atomr-worlds-host/tests/coarse_lod_restamp.rs).
+
+### Out of scope (still)
 
 - Transition meshes (Transvoxel) to remove the ≤ voxel/2 height step
   at LOD ring boundaries.
-- Coarse-LOD overlay re-stamping — voxel writes currently update only
-  the depth-0 cache entry, so edited regions appear smoothed once the
-  observer crosses past the depth-3 ring. A downsampling pass per
-  LOD would close this.
+- True downsampled coarse-LOD overlays — current re-stamping picks the
+  most-recently-written LOD-0 voxel per coarse cell. A pass that
+  averages all LOD-0 voxels in the cell would produce smoother
+  transitions when many adjacent LOD-0 cells are edited together,
+  at the cost of an extra `2^(3L)`-voxel scan per write.
 - Finer LOD ladders (sub-meter `LOD−1`, per-mode tier counts) and
   external data-feed generators (see README "Roadmap").
 
@@ -1196,15 +1231,30 @@ See [HYDROLOGY.md](HYDROLOGY.md) for the full design.
 - Harness scenes `water_overview.toml`, `water_fp_coast.toml`,
   `water_lod.toml`.
 
-### Out of scope (follow-ups)
+### Follow-ups landed
+
+- **Hydrology feeds back into climate + biomes.** The macro pipeline
+  now runs hydrology *before* biomes, then
+  [`apply_hydrology_humidity_feedback`](../crates/atomr-worlds-generate/src/macro_state/climate.rs)
+  seeds humidity at lake / river faces and re-runs
+  `ClimateConfig::hydrology_feedback_iters` (default 2) extra
+  diffusion steps before biomes are classified. Lake- and river-side
+  faces land in wetter biomes (forest / grassland) instead of the arid
+  baseline that the pre-feedback pass produced. Setting
+  `hydrology_feedback_iters = 0` reverts to the pre-feedback pipeline
+  and digest. Coverage:
+  [`tests/hydrology.rs`](../crates/atomr-worlds-generate/tests/hydrology.rs)
+  — `lake_and_river_faces_are_humid_with_feedback_enabled`,
+  `disabling_feedback_drops_some_freshwater_humidity`,
+  `feedback_can_change_biomes_around_freshwater`.
+
+### Out of scope (still)
 
 - Overview-mode harness capture is a pre-existing issue (stock
   `overview_globe_arrow.toml` also renders empty sky) — the ideal
   globe-scale water visualization is blocked on that being fixed.
 - River deltas / estuaries, lake-shore beaches, aquifer / spring
   sources, and seasonal water-level variation.
-- Feeding hydrology back into climate / biomes (it is a pure overlay
-  today — lakes do not make their surroundings wetter).
 
 ## Phase 19 *(landed)* — Slice view: FP-aligned orientation + hillshade relief
 
@@ -1274,13 +1324,28 @@ See [RENDERING.md](RENDERING.md) for the renderer architecture.
   A+D cancel; Q/E and Space/Ctrl produce identical deterministic z-band
   results.
 
-### Out of scope (follow-ups)
+### Follow-ups landed (after Phase 19)
 
-- The per-column LOD selector still keys off the FP player position, not
-  the slice pan center — columns coarsen if you pan far from where you
-  entered the view.
+- **Per-column LOD now keys off the slice pan center.** The LOD observer
+  passed into `build_slice_table_with_lod_fn` is built from
+  `state.center_xz` (lifted to the current `z_band_top` for the
+  vertical), so panning the slice keeps the high-detail ring centred
+  under the visible footprint rather than leaving it pinned at the FP
+  eye. See
+  [`crates/atomr-worlds-client/src/modes/slice.rs`](../crates/atomr-worlds-client/src/modes/slice.rs)
+  (`slice_render`).
+- **HUD now renders on top of the slice / RTS / overview blit.** A
+  dedicated `HudCamera` (Bevy `Camera2d`) lives in
+  [`crates/atomr-worlds-client/src/hud.rs`](../crates/atomr-worlds-client/src/hud.rs)
+  with `Camera::order = 10` (above the blit's `1`), `clear_color =
+  ClearColorConfig::None`, and `RenderLayers::layer(HUD_LAYER)` so it
+  composites the UI on top without picking up world meshes. The HUD UI
+  nodes use `TargetCamera(hud_camera)` and the `IsDefaultUiCamera`
+  marker moves off the FP world camera onto the HudCamera so
+  `bevy_ui`'s default-camera resolver still succeeds in harness mode.
+
+### Out of scope (still)
+
 - Slice panning does not write back to the FP position; switching back
   to FP returns you to where you left it (this was the chosen design,
   noted here as a known behaviour).
-- The HUD is drawn by the world camera, so the fullscreen slice raster
-  covers it in slice / RTS / overview modes.

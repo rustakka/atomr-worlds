@@ -51,7 +51,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let world_runtime = WorldRuntime::new(runtime, host);
-    let active = ActiveWorld { addr: WorldAddr::ROOT, seed: cli.seed };
+    let active = ActiveWorld {
+        addr: WorldAddr::ROOT,
+        seed: cli.seed,
+        shape: atomr_worlds_core::shape::WorldShape::default_world(),
+    };
 
     // Load harness scenario (if any) early so we can size the window
     // before the swapchain is created — resizing later on some drivers

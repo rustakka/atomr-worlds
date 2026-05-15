@@ -150,12 +150,26 @@ impl MacroGenerator for DefaultMacroGenerator {
         // that climate, biomes, hydrology, and brick-level terrain all see
         // one coherent field with real drainage gradients and basins.
         relief::apply_relief(&grid, &mut elevation, world_seed, self.config.relief);
-        let climate = climate::generate_climate(&grid, &elevation, self.config.climate);
-        let biomes = biome::classify_biomes(&elevation, &climate);
-        // Hydrology runs strictly after biomes as a pure overlay — it
-        // consumes elevation + climate but never feeds back into them.
+        let mut climate = climate::generate_climate(&grid, &elevation, self.config.climate);
+        // Hydrology runs against the initial climate field (ocean-only
+        // humidity) to identify ocean / lake / river faces.
         let water = HydrologyGenerator::new(self.config.hydrology)
             .generate(&grid, &elevation, &climate, world_seed);
+        // Phase 18 follow-up — feed hydrology back into climate + biomes.
+        // Lake and river faces become humidity sources; a few extra
+        // diffusion steps bleed that into neighbouring faces. Biomes are
+        // *then* classified so freshwater shores read as forest /
+        // grassland rather than the arid baseline that the pre-hydrology
+        // humidity would have produced. With
+        // `hydrology_feedback_iters == 0` this is a no-op and the
+        // pre-feedback digest is preserved.
+        climate::apply_hydrology_humidity_feedback(
+            &grid,
+            &mut climate,
+            &water.water_kind,
+            &self.config.climate,
+        );
+        let biomes = biome::classify_biomes(&elevation, &climate);
         let digest = compute_digest(&plates_map, &elevation, &climate, &biomes, &water);
         Arc::new(WorldMacroState {
             shape,

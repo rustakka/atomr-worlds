@@ -349,11 +349,10 @@ fn setup_fp_scene(
             ..default()
         },
         WorldCamera,
-        // Pin the HUD / UI to this camera. Without an explicit default,
-        // `ui_layout_system` resolves the UI camera by heuristic — which
-        // breaks (panics) in harness mode, where every camera targets the
-        // offscreen image and none targets the primary window.
-        bevy::ui::IsDefaultUiCamera,
+        // The HUD owns `IsDefaultUiCamera` on a dedicated higher-order
+        // `HudCamera` (see `crate::hud`). Pinning it there instead of on
+        // the world camera keeps the HUD layered above the slice / rts /
+        // overview blit (order 1) instead of being covered by it.
     ));
     if let Some(bloom) = render_cfg.tonemap.bloom() {
         camera_ent.insert(bloom);
@@ -598,6 +597,7 @@ fn fp_sync_camera(
 #[allow(clippy::too_many_arguments)]
 fn fp_stream_bricks(
     state: Res<FpState>,
+    active: Res<crate::world_runtime::ActiveWorld>,
     pool: Res<MaterialPool>,
     voxel_pool: Res<VoxelMaterialPool>,
     render_cfg: Res<RenderConfig>,
@@ -641,7 +641,13 @@ fn fp_stream_bricks(
     // costs ms on the default 4-tier ladder — caching it lets quiet
     // frames spend almost no time in the streamer.
     if plan_cache.should_rebuild(observer, forward) {
-        let horizon_m = f64::INFINITY;
+        // Body-aware horizon: sphere/cylinder worlds clamp the streamer's
+        // outer radius to the geometric horizon at the observer's
+        // altitude (`sqrt(2*R*h + h²)`). Cube worlds short-circuit to
+        // `f64::INFINITY` and the streamer's full ladder reach is used
+        // unchanged — preserves the pre-Phase-17.x behaviour for the
+        // default cube world.
+        let horizon_m = active.shape.horizon_at_m(observer);
         let mut plan =
             desired_chunks(&streamer, observer, horizon_m, render_cfg.coverage.as_ref());
         prioritize_view(&mut plan, observer, forward);

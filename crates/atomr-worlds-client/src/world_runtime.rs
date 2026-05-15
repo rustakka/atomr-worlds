@@ -40,9 +40,18 @@ impl std::fmt::Debug for WorldRuntime {
 
 /// World we're currently rendering. For now the client shows a single
 /// `WorldAddr::ROOT` instance; multi-world is a follow-up.
+///
+/// `shape` lets the streamer compute a body-aware horizon (sphere worlds
+/// clamp the far-ring radius to `sqrt(2*R*h + h²)`; cube worlds keep the
+/// `f64::INFINITY` no-op behaviour). It defaults to
+/// [`WorldShape::default_world`] (cube), preserving prior behaviour for
+/// callers that don't override it — only the overview mode currently
+/// hardcodes a sphere shape, and that path doesn't go through the FP
+/// streamer.
 #[derive(Resource, Copy, Clone, Debug)]
 pub struct ActiveWorld {
     pub addr: atomr_worlds_core::addr::WorldAddr,
     #[allow(dead_code)]
     pub seed: u64,
+    pub shape: atomr_worlds_core::shape::WorldShape,
 }

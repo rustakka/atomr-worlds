@@ -1249,4 +1249,69 @@ mod tests {
             }
         }
     }
+
+    // -----------------------------------------------------------------
+    // Body-aware horizon clamp (Phase 17 follow-up)
+    // -----------------------------------------------------------------
+
+    /// A horizon below the streamer's outer ring drops every brick whose
+    /// near corner lies past the horizon. With a hard 100 m clamp the
+    /// outer ladder must shrink — only the small ring of bricks
+    /// straddling the observer's local cell can survive (depth-3 bricks
+    /// are 128 m on a side, so the cell containing the observer always
+    /// passes the near-corner test even when the band is empty).
+    #[test]
+    fn horizon_clamp_drops_far_tiers() {
+        let s = streamer();
+        let obs = DVec3::ZERO;
+        let unbounded = desired_chunks(&s, obs, f64::INFINITY, &masked());
+        let clamped = desired_chunks(&s, obs, 100.0, &masked());
+        assert!(
+            clamped.len() < unbounded.len() / 4,
+            "horizon clamp didn't shrink the plan enough: clamped={} unbounded={}",
+            clamped.len(),
+            unbounded.len()
+        );
+        // The depth-3 outer tier should drop from its original ring count
+        // (hundreds) to at most a handful of straddling bricks.
+        let far_count = clamped.iter().filter(|(_, l)| l.depth == 3).count();
+        let unbounded_far = unbounded.iter().filter(|(_, l)| l.depth == 3).count();
+        assert!(
+            far_count * 8 <= unbounded_far,
+            "depth-3 ring barely shrunk under 100 m clamp: clamped={far_count} unbounded={unbounded_far}"
+        );
+    }
+
+    /// `f64::INFINITY` (cube worlds) is the no-clamp baseline.
+    #[test]
+    fn horizon_infinity_matches_unclamped() {
+        let s = streamer();
+        let obs = DVec3::ZERO;
+        let inf = desired_chunks(&s, obs, f64::INFINITY, &masked());
+        let huge = desired_chunks(&s, obs, 1.0e9, &masked());
+        assert_eq!(inf.len(), huge.len());
+    }
+
+    /// Sphere shape's `horizon_at_m` clamps at low altitude; cube does not.
+    /// This locks in the WorldShape integration the FP streamer relies on.
+    #[test]
+    fn shape_horizon_at_m_drives_streamer_clamp() {
+        use atomr_worlds_core::shape::WorldShape;
+        let earth = WorldShape::Sphere { radius_m: 6.371e6 };
+        let cube = WorldShape::Cube { edge_m: 1.0e7 };
+        // Observer at ~10 m above the +Y surface of an Earth-class sphere.
+        let p = DVec3::new(0.0, earth.radius_m() + 10.0, 0.0);
+        let earth_h = earth.horizon_at_m(p);
+        let cube_h = cube.horizon_at_m(p);
+        assert!(earth_h.is_finite());
+        assert!(earth_h < 12_000.0, "10 m altitude → horizon ≈ 11.3 km, got {earth_h}");
+        assert!(cube_h.is_infinite());
+
+        // Streamer plan respects the horizon.
+        let s = streamer();
+        let plan = desired_chunks(&s, p, earth_h, &masked());
+        // The plan must be a (strict) subset of the unclamped plan.
+        let unclamped = desired_chunks(&s, p, f64::INFINITY, &masked());
+        assert!(plan.len() <= unclamped.len());
+    }
 }
