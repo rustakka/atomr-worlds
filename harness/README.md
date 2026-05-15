@@ -19,6 +19,14 @@ DISPLAY=:1 ./target/release/atomr-worlds-client \
 Stdout prints one `HARNESS_SHOT <abs-path>` line per captured frame. Stderr
 carries Bevy/wgpu logs.
 
+The harness still creates a real OS window (the X11/hybrid-GPU presentation
+path needs one alongside the offscreen render target), but it spawns
+unfocused — it sits in the background instead of stealing focus from
+whatever you were doing. `WinitSettings` is pinned to `Continuous` updates
+for both the focused and unfocused states so the scenario plays out at the
+same cadence regardless of which window is active. Interactive runs (no
+`--harness`) keep Bevy's default focus behavior.
+
 ## Scenario schema
 
 | field           | required | notes                                                                  |

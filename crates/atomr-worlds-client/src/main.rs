@@ -28,6 +28,7 @@ use std::sync::Arc;
 use atomr_worlds_core::addr::WorldAddr;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, WindowResolution};
+use bevy::winit::{UpdateMode, WinitSettings};
 use clap::Parser;
 
 use crate::cli::Cli;
@@ -108,6 +109,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // (e.g. FIFO_LATEST_READY_EXT = 1000361000) that wgpu 0.19
                     // doesn't recognise.
                     present_mode: PresentMode::Fifo,
+                    // In harness mode, request the window be created
+                    // unfocused so it doesn't steal focus from whatever the
+                    // user is doing. We still create a visible window (the
+                    // X11/hybrid-GPU presentation path needs one to exist
+                    // alongside the offscreen render target) — it just sits
+                    // in the background. Interactive runs keep the default
+                    // (focused) behavior.
+                    focused: harness_bits.is_none(),
                     ..default()
                 }),
                 ..default()
@@ -143,6 +152,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output_dir: out_abs,
         });
         app.add_plugins(harness::HarnessPlugin);
+        // The window is created `focused: false` in harness mode so it
+        // doesn't steal focus from whatever the user is doing — but
+        // Bevy's default `WinitSettings::game()` throttles unfocused
+        // windows to `ReactiveLowPower`, which starves the brick
+        // streamer and produces sky-only PNGs. Force continuous updates
+        // so the scenario plays out at the same cadence whether or not
+        // the harness window happens to be the active one.
+        app.insert_resource(WinitSettings {
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::Continuous,
+        });
     }
 
     app.run();

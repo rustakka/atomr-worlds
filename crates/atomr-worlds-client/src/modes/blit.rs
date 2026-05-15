@@ -80,8 +80,9 @@ fn setup_blit(
                 // the WorldCamera last rendered. With WorldCamera also
                 // toggled inactive in raster modes, this clear owns the
                 // entire offscreen / window target before the sprite
-                // and the HudCamera (order 10, no clear) composite on
-                // top.
+                // and the routed HUD UI composite on top (see
+                // `hud::route_hud_target` — UI follows the active camera,
+                // so it lands above the sprite in this mode).
                 clear_color: ClearColorConfig::Custom(Color::BLACK),
                 ..default()
             },

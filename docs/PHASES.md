@@ -1438,15 +1438,21 @@ See [RENDERING.md](RENDERING.md) for the renderer architecture.
   eye. See
   [`crates/atomr-worlds-client/src/modes/slice.rs`](../crates/atomr-worlds-client/src/modes/slice.rs)
   (`slice_render`).
-- **HUD now renders on top of the slice / RTS / overview blit.** A
-  dedicated `HudCamera` (Bevy `Camera2d`) lives in
+- **HUD renders on top of every view, including the slice / RTS /
+  overview blit.** No dedicated HUD camera: a `Camera2d` and a
+  `Camera3d` both actively targeting the same offscreen `Image` cause
+  Bevy 0.13 to drop the 3D output (FP/TP harness PNGs went transparent
+  with only the HUD overlay). Instead,
   [`crates/atomr-worlds-client/src/hud.rs`](../crates/atomr-worlds-client/src/hud.rs)
-  with `Camera::order = 10` (above the blit's `1`), `clear_color =
-  ClearColorConfig::None`, and `RenderLayers::layer(HUD_LAYER)` so it
-  composites the UI on top without picking up world meshes. The HUD UI
-  nodes use `TargetCamera(hud_camera)` and the `IsDefaultUiCamera`
-  marker moves off the FP world camera onto the HudCamera so
-  `bevy_ui`'s default-camera resolver still succeeds in harness mode.
+  spawns the HUD UI root with a `HudUiRoot` marker and the
+  `route_hud_target` system reassigns its `TargetCamera` each frame:
+  `WorldCamera` in FP/TP, `BlitCamera` in slice/RTS/overview. UI is
+  rendered as part of the active camera's render graph (Bevy 0.13's
+  `ui_pass` is registered into both `Core2d` and `Core3d` and runs after
+  the main pass), so the HUD lands above 3D meshes in FP/TP and above
+  the blit sprite in raster modes — without ever pairing a Camera2d
+  with a Camera3d on the same target. `IsDefaultUiCamera` stays on the
+  `WorldCamera` for the startup-frame default-camera resolution.
 
 ### Out of scope (still)
 

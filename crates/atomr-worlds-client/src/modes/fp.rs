@@ -349,10 +349,18 @@ fn setup_fp_scene(
             ..default()
         },
         WorldCamera,
-        // The HUD owns `IsDefaultUiCamera` on a dedicated higher-order
-        // `HudCamera` (see `crate::hud`). Pinning it there instead of on
-        // the world camera keeps the HUD layered above the slice / rts /
-        // overview blit (order 1) instead of being covered by it.
+        // `IsDefaultUiCamera` keeps `bevy_ui`'s default-camera resolver
+        // from panicking on frame 0, before `hud::route_hud_target` has
+        // had a chance to attach an explicit `TargetCamera` to the HUD
+        // root. WorldCamera is spawned at Startup and never despawned, so
+        // the marker is always live regardless of view mode. Once the
+        // router runs, UI follows whichever of WorldCamera / BlitCamera
+        // is `is_active` for the current mode — so the HUD lands above
+        // the 3D scene in FP/TP and above the blit sprite in raster
+        // modes, without ever pairing a Camera2d with a Camera3d on the
+        // same offscreen target (which Bevy 0.13 mishandles by dropping
+        // the 3D output).
+        bevy::ui::IsDefaultUiCamera,
     ));
     if let Some(bloom) = render_cfg.tonemap.bloom() {
         camera_ent.insert(bloom);
