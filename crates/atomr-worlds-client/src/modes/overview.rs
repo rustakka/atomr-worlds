@@ -136,11 +136,12 @@ fn overview_render(
         return;
     }
     if cache.seed != Some(active.seed) {
-        // Bake the pyramid on first entry. ~seconds at grid_level 3 — this
-        // synchronously blocks the Update schedule, so any harness capture
-        // that fires on the same frame as the first overview entry sees a
-        // pre-bake (background-only) image. Trace + debug logs let an
-        // interactive debugger correlate "empty sky" captures with this.
+        // Bake the pyramid on first entry. ~seconds at grid_level 3 — runs
+        // synchronously and blocks the Update schedule. The harness hands
+        // each scenario a `warmup_frames` budget (`overview_globe_arrow.toml`
+        // sets 60), which absorbs the bake before any screenshot fires.
+        // The elapsed_ms log is kept so harness operators can budget
+        // warmup correctly when raising `grid_level` or changing seeds.
         let t0 = std::time::Instant::now();
         tracing::info!(seed = active.seed, "baking macro-state pyramid for overview");
         let generator =

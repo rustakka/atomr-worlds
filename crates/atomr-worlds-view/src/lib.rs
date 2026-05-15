@@ -39,7 +39,10 @@ pub use derived::surface_raster::{
     build_surface_raster, surface_raster_to_mesh, SurfaceKey, SurfaceRaster,
 };
 pub use frustum::{Frustum, Plane};
-pub use iso::{boundary_skirt, crossfade_overlap, surface_mesh, MeshMode, SmoothConfig};
+pub use iso::{
+    boundary_skirt, crossfade_overlap, face_height_profile, lod_transition_strip, surface_mesh,
+    MeshMode, SmoothConfig,
+};
 pub use mesh::{bake_ao, greedy_mesh, greedy_mesh_by_material, Mesh, Quad, Vertex};
 pub use modes::fp::{build_fp_scene, render_fp, FpScene, MeshCacheKey, WalkCamera, WalkInput};
 pub use modes::rts::{render_rts, ObliqueCamera};

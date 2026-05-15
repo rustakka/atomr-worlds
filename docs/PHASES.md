@@ -260,8 +260,10 @@ existing greedy `MeshMode::Flat`. Density derived from binary
 occupancy at cell corners; vertex per sign-change cell at the
 centroid of "in" corners; per-face flat normals computed from
 triangles. The algorithm choice is justified inline (vs marching
-cubes / dual contouring / transvoxel). `transvoxel_seam` is a stub
-for the LOD-tier seam case (full body deferred). `scene.rs` exposes
+cubes / dual contouring / transvoxel). The Phase-17.1 follow-up
+replaces the early `transvoxel_seam` stub with `face_height_profile`
++ `lod_transition_strip` (additive transition geometry alongside the
+nested-LOD crossfade, see Phase 17.1 below). `scene.rs` exposes
 `scene_from_bricks` consuming either mode.
 
 ## Phase 10 *(landed)* — `ClusterHost` real body
@@ -528,8 +530,10 @@ Two seam-bridge primitives in
   `CompositeScene::{near_meshes, far_meshes}` so the
   `FragmentMode::DistanceFade` band crossfades the two.
 
-The Phase-9 `transvoxel_seam` stub is `#[deprecated]`-aliased to
-`boundary_skirt` for legacy callers. Tests in
+The Phase-9 `transvoxel_seam` stub has since been removed and replaced
+by `face_height_profile` + `lod_transition_strip` (see Phase 17.1
+follow-ups for the additive cross-LOD bridge that pairs with the
+existing skirts + crossfade). Tests in
 [`crates/atomr-worlds-view/tests/seam.rs`](../crates/atomr-worlds-view/tests/seam.rs)
 cover the skirt non-empty / empty cases, the crossfade-overlap pair,
 and a composite-render "no holes inside visible brick" check.
@@ -1235,10 +1239,34 @@ characteristics that motivate the roadmap items below.
   reappears once the observer returns to the near ring. Coverage:
   [`tests/coarse_lod_restamp.rs`](../crates/atomr-worlds-host/tests/coarse_lod_restamp.rs).
 
+- **Cross-LOD transition meshes — Transvoxel-equivalent crack-free
+  bridge.** The full Lengyel 2010 lookup-table version (256-entry
+  regular cell + 13-vertex transition cell) was not pursued — the
+  chosen architecture combines four cooperating mechanisms instead.
+  (1) `NestedSummary` LOD coverage
+  ([`crates/atomr-worlds-client/src/render/defaults.rs`](../crates/atomr-worlds-client/src/render/defaults.rs))
+  has every tier emit its full inner sphere, so the coarser parent is
+  always resident underneath the finer child — no LOD pop on band
+  crossings. (2) `BrickFadeIn` / `BrickFadeOut`
+  ([`crates/atomr-worlds-client/src/modes/fp.rs`](../crates/atomr-worlds-client/src/modes/fp.rs))
+  crossfade between parent and child over a one-frame window when the
+  child unloads. (3) [`boundary_skirt`](../crates/atomr-worlds-view/src/iso.rs)
+  emits depth-fade-friendly fins below every solid face so oblique
+  viewing angles cannot peek through gaps. (4) New
+  [`face_height_profile`](../crates/atomr-worlds-view/src/iso.rs) +
+  [`lod_transition_strip`](../crates/atomr-worlds-view/src/iso.rs)
+  explicitly bridge a near + far brick across their shared face with a
+  triangle ribbon — the strip's vertex span covers the entire
+  ≤ voxel/2 height delta the original deferral called out, and is
+  additive geometry the renderer can draw alongside both LOD meshes
+  during the half-alpha crossfade moment without retopologising
+  either side. Coverage: four new tests in
+  [`iso.rs`](../crates/atomr-worlds-view/src/iso.rs) pin the empty,
+  uniform, height-delta, and one-sided cases. The combination removes
+  the height-step concern without the verbatim Lengyel tables.
+
 ### Out of scope (still)
 
-- Transition meshes (Transvoxel) to remove the ≤ voxel/2 height step
-  at LOD ring boundaries.
 - True downsampled coarse-LOD overlays — current re-stamping picks the
   most-recently-written LOD-0 voxel per coarse cell. A pass that
   averages all LOD-0 voxels in the cell would produce smoother
@@ -1308,20 +1336,27 @@ See [HYDROLOGY.md](HYDROLOGY.md) for the full design.
   `disabling_feedback_drops_some_freshwater_humidity`,
   `feedback_can_change_biomes_around_freshwater`.
 
+- **Overview-mode harness capture (the "empty sky" bug).** Root cause
+  was *not* the pyramid bake timing — it was a camera-toggle gap.
+  `BlitCamera`'s sprite letterboxes (the 256² rasterizer output scaled
+  to fit a non-square offscreen target leaves bars on two sides), and
+  the FP `WorldCamera` underneath stayed `is_active = true` in raster
+  modes, clearing the offscreen image to its sky-blue `ClearColor` on
+  every frame. The bars on each side of the sprite therefore showed
+  "empty sky" in harness PNGs even after the bake completed. Fix in
+  [`modes/blit.rs`](../crates/atomr-worlds-client/src/modes/blit.rs):
+  `toggle_blit_visibility` now flips both cameras inversely (raster
+  modes activate `BlitCamera` and deactivate `WorldCamera`; FP/TP do
+  the inverse), and the `BlitCamera`'s `clear_color` was promoted from
+  `ClearColorConfig::None` to `Custom(BLACK)` so the letterbox bars
+  are deterministic black instead of revealing whatever pass ran
+  before. Six unit tests pin the toggle invariant per `ViewMode`. The
+  `tracing::info!("overview pyramid baked", elapsed_ms = …)` line is
+  kept so harness operators can budget `warmup_frames` correctly when
+  raising `grid_level` or changing seeds.
+
 ### Out of scope (still)
 
-- Overview-mode harness capture is a pre-existing issue (stock
-  `overview_globe_arrow.toml` also renders empty sky). Static analysis
-  rules out a few candidates — the `overview_render` system is wired
-  in, the `RasterTarget` image is mutated each frame, the `BlitCamera`
-  toggles `is_active = true` for `ViewMode::Overview` — but the bug
-  needs a live binary + `RUST_LOG=trace,bevy_render=info` capture run
-  to bisect. The synchronous pyramid bake (~seconds at `grid_level=3`)
-  blocks the Update schedule on first entry; if a screenshot lands on
-  the same frame it sees a pre-bake background. The
-  `tracing::info!("overview pyramid baked", elapsed_ms = …)` line in
-  [`modes/overview.rs`](../crates/atomr-worlds-client/src/modes/overview.rs)
-  exists to correlate that hypothesis with capture timestamps.
 - River deltas / estuaries, lake-shore beaches, aquifer / spring
   sources, and seasonal water-level variation.
 

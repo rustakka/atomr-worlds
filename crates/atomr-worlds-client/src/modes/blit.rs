@@ -7,10 +7,11 @@
 
 use atomr_worlds_view::Framebuffer;
 use bevy::prelude::*;
-use bevy::render::camera::RenderTarget;
+use bevy::render::camera::{ClearColorConfig, RenderTarget};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::modes::fp::WorldCamera;
 use crate::render::OffscreenTarget;
 use crate::view_mode::ViewMode;
 
@@ -69,7 +70,21 @@ fn setup_blit(
 
     commands.spawn((
         Camera2dBundle {
-            camera: Camera { order: 1, is_active: false, target: camera_target, ..default() },
+            camera: Camera {
+                order: 1,
+                is_active: false,
+                target: camera_target,
+                // Solid black clear so the letterbox bars around the
+                // 1:1 raster sprite (256² scaled into a non-square
+                // target) are deterministic instead of showing whatever
+                // the WorldCamera last rendered. With WorldCamera also
+                // toggled inactive in raster modes, this clear owns the
+                // entire offscreen / window target before the sprite
+                // and the HudCamera (order 10, no clear) composite on
+                // top.
+                clear_color: ClearColorConfig::Custom(Color::BLACK),
+                ..default()
+            },
             ..default()
         },
         BlitCamera,
@@ -92,15 +107,24 @@ fn setup_blit(
 
 fn toggle_blit_visibility(
     mode: Res<ViewMode>,
-    mut cameras: Query<&mut Camera, With<BlitCamera>>,
+    mut blit_cameras: Query<&mut Camera, (With<BlitCamera>, Without<WorldCamera>)>,
+    mut world_cameras: Query<&mut Camera, (With<WorldCamera>, Without<BlitCamera>)>,
     mut sprites: Query<&mut Visibility, With<BlitSprite>>,
 ) {
-    let active = matches!(
-        *mode,
-        ViewMode::Slice | ViewMode::Rts | ViewMode::Overview
-    );
-    if let Ok(mut cam) = cameras.get_single_mut() {
+    let active = raster_mode_active(*mode);
+    if let Ok(mut cam) = blit_cameras.get_single_mut() {
         cam.is_active = active;
+    }
+    // Disable the FP/TP world camera in raster modes. `Visibility::Hidden`
+    // on a Bevy 0.13 Camera entity hides only its rendered geometry
+    // descendants, not the camera's clear+render pass — without this
+    // toggle, the world camera (order 0) would still clear the offscreen
+    // image to its sky-blue ClearColor every frame, and any portion of
+    // the target the BlitCamera's letterboxed sprite doesn't cover would
+    // show that sky color in harness PNGs (the original "overview shows
+    // empty sky" symptom).
+    if let Ok(mut cam) = world_cameras.get_single_mut() {
+        cam.is_active = !active;
     }
     if let Ok(mut vis) = sprites.get_single_mut() {
         *vis = if active { Visibility::Visible } else { Visibility::Hidden };
@@ -112,7 +136,7 @@ fn fit_sprite_to_window(
     mode: Res<ViewMode>,
     mut q: Query<&mut Sprite, With<BlitSprite>>,
 ) {
-    if !matches!(*mode, ViewMode::Slice | ViewMode::Rts | ViewMode::Overview) {
+    if !raster_mode_active(*mode) {
         return;
     }
     let Ok(win) = windows.get_single() else { return };
@@ -121,6 +145,12 @@ fn fit_sprite_to_window(
     let h = win.height();
     let scale = (w / RASTER_W as f32).min(h / RASTER_H as f32);
     sprite.custom_size = Some(Vec2::new(RASTER_W as f32 * scale, RASTER_H as f32 * scale));
+}
+
+/// True when [`ViewMode`] should activate the BlitCamera and (correspondingly)
+/// deactivate the WorldCamera. Single source of truth for the toggle.
+pub(crate) fn raster_mode_active(mode: ViewMode) -> bool {
+    matches!(mode, ViewMode::Slice | ViewMode::Rts | ViewMode::Overview)
 }
 
 /// Copy a [`Framebuffer`] into the shared [`RasterTarget`] image. Mode
@@ -137,5 +167,95 @@ pub fn copy_framebuffer_to_image(images: &mut Assets<Image>, target: &RasterTarg
             expected = RASTER_W * RASTER_H * 4,
             "framebuffer size mismatch — dropping frame"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Camera-toggle correctness. The original "overview shows empty
+    //! sky" harness bug was the WorldCamera staying active while the
+    //! BlitCamera's letterboxed sprite covered only part of the offscreen
+    //! target — the world's sky ClearColor bled through the bars. These
+    //! tests pin the invariant that *exactly one* of the two cameras is
+    //! active per `ViewMode`.
+    use super::*;
+    use crate::view_mode::ViewMode;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+
+    fn setup_world(mode: ViewMode) -> World {
+        let mut world = World::new();
+        // Spawn stand-ins for the two cameras the toggle queries. We
+        // start the BlitCamera *active* and the WorldCamera *inactive*
+        // so a stale "active" flag from before the toggle ran can't
+        // accidentally satisfy the assertion.
+        world.spawn((
+            Camera { is_active: true, ..default() },
+            BlitCamera,
+        ));
+        world.spawn((
+            Camera { is_active: false, ..default() },
+            WorldCamera,
+        ));
+        world.insert_resource(mode);
+        world
+    }
+
+    fn camera_active<F: Component>(world: &mut World) -> bool {
+        let mut q = world.query_filtered::<&Camera, With<F>>();
+        q.single(world).is_active
+    }
+
+    #[test]
+    fn fp_mode_activates_world_camera_and_deactivates_blit() {
+        let mut world = setup_world(ViewMode::Fp);
+        world.run_system_once(toggle_blit_visibility);
+        assert!(camera_active::<WorldCamera>(&mut world), "FP mode keeps the world camera active");
+        assert!(!camera_active::<BlitCamera>(&mut world), "FP mode disables the blit camera");
+    }
+
+    #[test]
+    fn tp_mode_activates_world_camera_and_deactivates_blit() {
+        let mut world = setup_world(ViewMode::Tp);
+        world.run_system_once(toggle_blit_visibility);
+        assert!(camera_active::<WorldCamera>(&mut world));
+        assert!(!camera_active::<BlitCamera>(&mut world));
+    }
+
+    #[test]
+    fn overview_mode_disables_world_camera_and_enables_blit() {
+        let mut world = setup_world(ViewMode::Overview);
+        world.run_system_once(toggle_blit_visibility);
+        assert!(
+            !camera_active::<WorldCamera>(&mut world),
+            "overview mode must disable the world camera so its sky-blue clear \
+             does not bleed through the BlitCamera's letterbox bars",
+        );
+        assert!(camera_active::<BlitCamera>(&mut world));
+    }
+
+    #[test]
+    fn slice_mode_disables_world_camera_and_enables_blit() {
+        let mut world = setup_world(ViewMode::Slice);
+        world.run_system_once(toggle_blit_visibility);
+        assert!(!camera_active::<WorldCamera>(&mut world));
+        assert!(camera_active::<BlitCamera>(&mut world));
+    }
+
+    #[test]
+    fn rts_mode_disables_world_camera_and_enables_blit() {
+        let mut world = setup_world(ViewMode::Rts);
+        world.run_system_once(toggle_blit_visibility);
+        assert!(!camera_active::<WorldCamera>(&mut world));
+        assert!(camera_active::<BlitCamera>(&mut world));
+    }
+
+    #[test]
+    fn raster_mode_active_classifies_every_view_mode() {
+        assert!(!raster_mode_active(ViewMode::Fp));
+        assert!(!raster_mode_active(ViewMode::Tp));
+        assert!(raster_mode_active(ViewMode::Slice));
+        assert!(raster_mode_active(ViewMode::Rts));
+        assert!(raster_mode_active(ViewMode::Overview));
     }
 }
