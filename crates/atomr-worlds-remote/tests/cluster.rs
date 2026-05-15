@@ -16,8 +16,9 @@ use atomr_core::actor::{ActorSystem, Props};
 use atomr_remote::{RemoteSettings, RemoteSystem};
 use atomr_worlds_core::addr::{Address, WorldAddr};
 use atomr_worlds_core::coord::IVec3;
+use atomr_worlds_core::lod::Lod;
 use atomr_worlds_host::{ClusterHost, ClusterHostConfig, LocalHostConfig, WorldExtractor, WorldHost};
-use atomr_worlds_proto::{Envelope, WorldEvent, WorldRequest};
+use atomr_worlds_proto::{Envelope, WorldEvent, WorldRequest, AABB};
 use atomr_worlds_remote::{
     install_cluster_remote_forwarder, WireReply, WireRequest, WorldGateway, GATEWAY_ACTOR_NAME,
 };
@@ -118,4 +119,65 @@ async fn cross_node_request_routes_via_forwarder() {
     node_a.sys.terminate().await;
     node_b.sys.terminate().await;
     let _ = node_a.region_id; // referenced for clarity
+}
+
+/// Phase 15 follow-up — cross-node subscription routing.
+///
+/// Two ClusterHosts on the loopback. Pin the shard for `WorldAddr::ROOT`
+/// to node B; from node A, subscribe to a region on that address. The
+/// Subscribe envelope must hop A → forwarder → B's gateway → B's local
+/// host. B's gateway streams `BrickSnapshot` events back as
+/// `WireReply::Event { sub_id, … }`, which A's cluster reply inbox
+/// routes through the per-`sub_id` subs map registered by
+/// `ClusterHost::subscribe`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn cross_node_subscribe_streams_events_back() {
+    let coordinator = Arc::new(ShardCoordinator::new());
+
+    let node_a = boot_node("alpha-sub", 0xABCD, coordinator.clone()).await;
+    let node_b = boot_node("beta-sub", 0xCDEF, coordinator.clone()).await;
+
+    let root_shard = WorldExtractor::shard_id_for(&Address::World(WorldAddr::ROOT));
+    coordinator.rebalance(&root_shard, "beta-sub");
+
+    let mut members_a = HashMap::new();
+    members_a.insert("beta-sub".to_string(), node_b.gateway_path.clone());
+    install_cluster_remote_forwarder(&node_a.cluster, node_a.remote.clone(), members_a).unwrap();
+    let mut members_b = HashMap::new();
+    members_b.insert("alpha-sub".to_string(), node_a.gateway_path.clone());
+    install_cluster_remote_forwarder(&node_b.cluster, node_b.remote.clone(), members_b).unwrap();
+
+    let addr = Address::World(WorldAddr::ROOT);
+    let sub_id = 42u64;
+    let region = AABB::new(IVec3::new(0, 0, 0), IVec3::new(16, 16, 16));
+    let subscribe = Envelope::new(
+        0,
+        addr,
+        WorldRequest::Subscribe { addr, region, lod: Lod::new(0), sub_id },
+    );
+    let mut rx = node_a
+        .cluster
+        .subscribe(subscribe)
+        .await
+        .expect("cross-node subscribe");
+
+    // The first event must be a BrickSnapshot streamed back from beta
+    // through the cluster reply inbox. Time-out generously to avoid
+    // flakes on a busy CI box.
+    let snap = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for brick snapshot")
+        .expect("subscription channel closed");
+    assert!(
+        matches!(snap.body, WorldEvent::BrickSnapshot { .. }),
+        "expected BrickSnapshot, got {:?}",
+        snap.body
+    );
+
+    let _ = node_a.cluster.shutdown().await;
+    let _ = node_b.cluster.shutdown().await;
+    node_a.remote.shutdown().await;
+    node_b.remote.shutdown().await;
+    node_a.sys.terminate().await;
+    node_b.sys.terminate().await;
 }

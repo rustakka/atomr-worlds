@@ -873,10 +873,23 @@ backwards compatibility.
   works against both `LocalHost` and `RemoteHost` (headless; no Bevy
   app launched).
 
+### Follow-ups landed
+
+- **Cross-node subscription routing.**
+  [`ClusterHost::subscribe`](../crates/atomr-worlds-host/src/cluster.rs)
+  now consults the coordinator: locally-owned shards still take the
+  direct `LocalHost` path; remote shards register a `sub_id → mpsc::Sender`
+  in the new `ClusterSubs` map and forward the Subscribe envelope
+  through `ShardRegion::deliver`. The peer's
+  [`WorldGateway`](../crates/atomr-worlds-remote/src/gateway.rs)
+  already streamed `WireReply::Event { sub_id, env }` back; the
+  [`ClusterReplyInbox`](../crates/atomr-worlds-remote/src/cluster_forwarder.rs)
+  was extended to route those events through the subs map (it dropped
+  them on the floor before). Coverage:
+  [`atomr-worlds-remote/tests/cluster.rs::cross_node_subscribe_streams_events_back`](../crates/atomr-worlds-remote/tests/cluster.rs).
+
 ### Out of scope (see `docs/CLIENT_SERVER.md`)
 
-- Cross-node subscription routing. The wire format carries `sub_id`
-  but the cluster reply inbox only handles one-shot `Reply` today.
 - `atomr-view` UI bridge — same upstream blockers as Phase 14.
 - Gossip / persistent membership for the cluster. `--peer` is a static
   hand-rolled map.

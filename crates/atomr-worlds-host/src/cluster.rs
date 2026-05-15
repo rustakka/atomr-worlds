@@ -4,9 +4,8 @@
 //! Phase 10 wires up the real `ShardRegion`-backed routing in single-node
 //! mode: the host owns the region, the extractor, and a per-entity handler
 //! that constructs an in-process [`LocalHost`] under the hood. Cross-node
-//! remote forwarding requires bridging `atomr_remote`'s codec to the
-//! `RemoteForwarder` hook; that wiring is left as a documented TODO since
-//! it depends on upstream API stability that isn't pinned for this drop.
+//! remote forwarding for one-shot requests bridges through
+//! `atomr_worlds_remote::install_cluster_remote_forwarder`.
 //!
 //! ## Replies
 //!
@@ -17,27 +16,37 @@
 //!
 //! ## Subscriptions
 //!
-//! `ClusterHost::subscribe` runs the entity handler synchronously to obtain
-//! the initial brick stream and then continues to receive deltas in-band via
-//! the same channel that the local actor uses.
+//! `ClusterHost::subscribe` consults the coordinator: when the target
+//! shard's owner is this node, it delegates straight to the underlying
+//! [`LocalHost`]. When the owner is a peer, it registers a `sub_id` route
+//! in [`ClusterHost::subs_map`] and forwards the Subscribe envelope via
+//! the region; the peer's [`crate::WorldGateway`](../../atomr-worlds-remote/struct.WorldGateway.html)
+//! recognises the subscription and streams events back through the
+//! cluster reply inbox, which routes them to the registered receiver.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use atomr_cluster_sharding::{ShardCoordinator, ShardRegion};
+use atomr_cluster_sharding::{MessageExtractor, ShardCoordinator, ShardRegion};
 use atomr_worlds_proto::{Envelope, WorldEvent, WorldRequest};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::HostError;
+use crate::extractor::WorldExtractor;
 use crate::host::WorldHost;
 use crate::local::{LocalHost, LocalHostConfig};
-use crate::extractor::WorldExtractor;
 
 /// Per-corr-id reply registry. Exposed so `atomr-worlds-remote` can
 /// install a cross-node forwarder that feeds replies back through it.
 pub type PendingReplies = Arc<Mutex<HashMap<u64, oneshot::Sender<Envelope<WorldEvent>>>>>;
+
+/// Per-`sub_id` subscription-event sender registry. The cluster reply
+/// inbox installed by `install_cluster_remote_forwarder` routes
+/// `WireReply::Event { sub_id, … }` payloads back through this map. The
+/// receiver lives on whoever called [`ClusterHost::subscribe`].
+pub type ClusterSubs = Arc<Mutex<HashMap<u64, mpsc::Sender<Envelope<WorldEvent>>>>>;
 
 /// Configuration for a cluster host. Caller pre-builds the [`ShardRegion`]
 /// and (in the cross-node case) installs a remote forwarder via
@@ -64,6 +73,10 @@ pub struct ClusterHost {
     local: Arc<LocalHost>,
     region: Arc<ShardRegion<WorldExtractor>>,
     pending: PendingReplies,
+    subs: ClusterSubs,
+    /// Per-subscription channel capacity, mirrored from
+    /// [`LocalHostConfig::subscriber_capacity`].
+    subscriber_capacity: usize,
 }
 
 impl std::fmt::Debug for ClusterHost {
@@ -111,7 +124,9 @@ impl ClusterHost {
             handler_factory,
         );
 
-        Ok(Self { config, local, region, pending })
+        let subscriber_capacity = config.local_config.subscriber_capacity;
+        let subs = Arc::new(Mutex::new(HashMap::new()));
+        Ok(Self { config, local, region, pending, subs, subscriber_capacity })
     }
 
     /// Access the underlying [`ShardRegion`] for cross-node wiring (e.g. to
@@ -126,6 +141,15 @@ impl ClusterHost {
     /// [`Self::request`] can unblock.
     pub fn pending_map(&self) -> &PendingReplies {
         &self.pending
+    }
+
+    /// Access the per-`sub_id` subscription-event sender registry. The
+    /// cluster reply inbox installed by
+    /// [`atomr-worlds-remote::install_cluster_remote_forwarder`](https://docs.rs/atomr-worlds-remote)
+    /// routes `WireReply::Event` payloads through this map; the receiver
+    /// lives on whoever called [`Self::subscribe`].
+    pub fn subs_map(&self) -> &ClusterSubs {
+        &self.subs
     }
 
     /// In-process actor system the host runs on. Useful when external
@@ -160,11 +184,41 @@ impl WorldHost for ClusterHost {
         &self,
         envelope: Envelope<WorldRequest>,
     ) -> Result<mpsc::Receiver<Envelope<WorldEvent>>, HostError> {
-        // Subscriptions go directly through the underlying LocalHost — the
-        // initial snapshot and subsequent deltas stream through the mpsc the
-        // local host returns. When cross-node sharding lands, the bridging
-        // actor described in PHASES.md replaces this direct dispatch.
-        self.local.subscribe(envelope).await
+        // Cross-node subscription routing (Phase 15 follow-up). Locally-
+        // owned shards still take the direct LocalHost path; remote
+        // shards register a `sub_id → mpsc::Sender` route and dispatch
+        // the Subscribe envelope through `ShardRegion::deliver`, which
+        // calls the installed remote forwarder. The peer's gateway
+        // recognises the Subscribe and streams `WireReply::Event` back
+        // to this node's cluster reply inbox, which routes events
+        // through `subs_map()` to the receiver returned here.
+        let shard_id = WorldExtractor.shard_id(&envelope);
+        let owner = self.config.coordinator.region_for(&shard_id);
+        let local_owner = match owner {
+            Some(o) => o == self.config.region_id,
+            None => true, // unallocated → first call assigns to self via deliver()
+        };
+        if local_owner {
+            return self.local.subscribe(envelope).await;
+        }
+        let sub_id = match &envelope.body {
+            WorldRequest::Subscribe { sub_id, .. } => *sub_id,
+            WorldRequest::SubscribeMetric { sub_id, .. } => *sub_id,
+            other => {
+                return Err(HostError::Sys(format!(
+                    "subscribe expects Subscribe/SubscribeMetric, got {other:?}"
+                )))
+            }
+        };
+        let (tx, rx) = mpsc::channel(self.subscriber_capacity);
+        self.subs.lock().await.insert(sub_id, tx);
+        // Remote forwarder is installed by `install_cluster_remote_forwarder`
+        // — without it the deliver call drops the message and the
+        // subscription will never produce events. The forwarder ships
+        // a `WireRequest` to the peer's gateway, which the peer
+        // already handles for subscribes (see `WorldGateway::handle`).
+        self.region.deliver(envelope);
+        Ok(rx)
     }
 
     async fn shutdown(&self) -> Result<(), HostError> {

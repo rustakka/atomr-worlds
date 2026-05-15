@@ -6,12 +6,8 @@
 //! `Envelope<WorldRequest>` in a [`WireRequest`] addressed to the
 //! destination node's [`WorldGateway`](crate::WorldGateway), and a
 //! local `ClusterReplyInbox` actor routes the resulting
-//! [`WireReply::Reply`]s back into [`ClusterHost::pending_map`].
-//!
-//! Cross-node *subscription* routing is out of scope today —
-//! [`ClusterHost::subscribe`] still passes through to the underlying
-//! `LocalHost`, so subscribers only see events emitted on the node that
-//! received the subscribe (`ClusterHost` rustdoc documents this).
+//! [`WireReply::Reply`]s back into [`ClusterHost::pending_map`] and
+//! [`WireReply::Event`]s back into [`ClusterHost::subs_map`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,9 +15,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use atomr_core::actor::{Actor, Context, Props};
 use atomr_remote::RemoteSystem;
-use atomr_worlds_host::{ClusterHost, HostError};
+use atomr_worlds_host::{ClusterHost, ClusterSubs, HostError};
 use atomr_worlds_proto::{Envelope, WorldEvent, WorldRequest};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::wire::{WireReply, WireRequest};
 
@@ -47,11 +43,16 @@ pub fn install_cluster_remote_forwarder(
     remote.register_bincode::<WireReply>();
 
     let pending = cluster.pending_map().clone();
+    let subs = cluster.subs_map().clone();
     let sys = cluster.actor_system();
     let pending_for_actor = pending.clone();
+    let subs_for_actor = subs.clone();
     let inbox_ref = sys
         .actor_of(
-            Props::create(move || ClusterReplyInbox { pending: pending_for_actor.clone() }),
+            Props::create(move || ClusterReplyInbox {
+                pending: pending_for_actor.clone(),
+                subs: subs_for_actor.clone(),
+            }),
             CLUSTER_REPLY_INBOX_NAME,
         )
         .map_err(|e| HostError::Sys(format!("spawn cluster reply inbox: {e:?}")))?;
@@ -84,6 +85,7 @@ pub fn install_cluster_remote_forwarder(
 
 struct ClusterReplyInbox {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Envelope<WorldEvent>>>>>,
+    subs: ClusterSubs,
 }
 
 #[async_trait]
@@ -101,11 +103,24 @@ impl Actor for ClusterReplyInbox {
                     tracing::debug!(corr_id = corr, "cluster inbox: no pending entry");
                 }
             }
-            WireReply::Event { .. } => {
-                // Subscription cross-node routing is deferred. The
-                // local-passthrough path in ClusterHost::subscribe still
-                // covers same-node subscribers.
-                tracing::debug!("cluster inbox: dropped streaming event (not yet supported)");
+            WireReply::Event { sub_id, env } => {
+                // Phase 15 follow-up: cross-node subscription routing.
+                // ClusterHost::subscribe registered an mpsc sender for
+                // this sub_id when it forwarded the Subscribe envelope
+                // to the owning peer. The peer's gateway streams events
+                // back as WireReply::Event keyed by that sub_id, and we
+                // forward them through the registered sender.
+                let sender: Option<mpsc::Sender<Envelope<WorldEvent>>> =
+                    self.subs.lock().await.get(&sub_id).cloned();
+                if let Some(tx) = sender {
+                    if tx.send(env).await.is_err() {
+                        // Receiver dropped — reap the route so we stop
+                        // accumulating dead state.
+                        self.subs.lock().await.remove(&sub_id);
+                    }
+                } else {
+                    tracing::debug!(sub_id, "cluster inbox: no subscription route for event");
+                }
             }
         }
     }
