@@ -40,6 +40,11 @@ pub struct StandaloneConfig {
     pub bind: SocketAddr,
     pub system_name: String,
     pub root_seed: u64,
+    /// Optional pre-shared bearer token required on every inbound
+    /// `WireRequest`. `None` accepts anonymous traffic (fine on
+    /// loopback / private networks). Phase 15 follow-up — pair with
+    /// `RemoteHostConfig::auth_token` on the client side.
+    pub auth_token: Option<String>,
 }
 
 impl Default for StandaloneConfig {
@@ -48,6 +53,7 @@ impl Default for StandaloneConfig {
             bind: "0.0.0.0:7800".parse().unwrap(),
             system_name: "atomr-worlds-server".into(),
             root_seed: 0xDEAD_BEEF_CAFE_F00D,
+            auth_token: None,
         }
     }
 }
@@ -104,10 +110,15 @@ pub async fn run_standalone(cfg: StandaloneConfig) -> Result<StandaloneServer, S
 
     let host_for_actor = host.clone();
     let remote_for_actor = remote.clone();
+    let auth_token = cfg.auth_token.clone();
     let gateway_ref = sys
         .actor_of(
             Props::create(move || {
-                WorldGateway::new(host_for_actor.clone(), remote_for_actor.clone())
+                let mut g = WorldGateway::new(host_for_actor.clone(), remote_for_actor.clone());
+                if let Some(t) = &auth_token {
+                    g = g.with_auth_token(t.clone());
+                }
+                g
             }),
             GATEWAY_ACTOR_NAME,
         )
@@ -116,7 +127,11 @@ pub async fn run_standalone(cfg: StandaloneConfig) -> Result<StandaloneServer, S
 
     let local_address = remote.local_address.to_string();
     let server_path = format!("{}/user/{}", local_address, GATEWAY_ACTOR_NAME);
-    tracing::info!(server_path = %server_path, "atomr-worlds-server listening");
+    tracing::info!(
+        server_path = %server_path,
+        auth_required = cfg.auth_token.is_some(),
+        "atomr-worlds-server listening"
+    );
 
     Ok(StandaloneServer {
         sys,
@@ -140,6 +155,25 @@ pub struct ClusterConfig {
     /// `atomr://NAME@host:port/user/world-gateway` path.
     pub peers: HashMap<String, String>,
     pub request_timeout: Duration,
+    /// Optional pre-shared bearer token. Required by both the local
+    /// gateway (rejects unauthenticated inbound requests) and the
+    /// outbound cluster forwarder (stamps every cross-node
+    /// `WireRequest`). Phase 15 follow-up.
+    pub auth_token: Option<String>,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            bind: "0.0.0.0:7800".parse().unwrap(),
+            system_name: "atomr-worlds-server".into(),
+            root_seed: 0xDEAD_BEEF_CAFE_F00D,
+            region_id: "default-region".into(),
+            peers: HashMap::new(),
+            request_timeout: Duration::from_secs(10),
+            auth_token: None,
+        }
+    }
 }
 
 /// A running cluster node. Drop or call [`Self::shutdown`] to stop.
@@ -209,10 +243,16 @@ pub async fn run_cluster_with(
 
     let cluster_for_gateway: Arc<dyn WorldHost> = cluster.clone();
     let remote_for_gateway = remote.clone();
+    let gateway_auth_token = cfg.auth_token.clone();
     let gateway_ref = sys
         .actor_of(
             Props::create(move || {
-                WorldGateway::new(cluster_for_gateway.clone(), remote_for_gateway.clone())
+                let mut g =
+                    WorldGateway::new(cluster_for_gateway.clone(), remote_for_gateway.clone());
+                if let Some(t) = &gateway_auth_token {
+                    g = g.with_auth_token(t.clone());
+                }
+                g
             }),
             GATEWAY_ACTOR_NAME,
         )
@@ -223,7 +263,12 @@ pub async fn run_cluster_with(
     // to wire peers later (typical multi-node test pattern where both
     // nodes must boot before either knows the other's gateway path).
     if !cfg.peers.is_empty() {
-        install_cluster_remote_forwarder(&cluster, remote.clone(), cfg.peers.clone())?;
+        atomr_worlds_remote::install_cluster_remote_forwarder_with_auth(
+            &cluster,
+            remote.clone(),
+            cfg.peers.clone(),
+            cfg.auth_token.clone(),
+        )?;
     }
 
     let local_address = remote.local_address.to_string();

@@ -37,6 +37,15 @@ struct Cli {
     ///   `--peer beta=atomr://atomr-worlds-server@host:7801/user/world-gateway`
     #[arg(long, value_parser = parse_peer)]
     peer: Vec<(String, String)>,
+
+    /// Optional pre-shared bearer token. When set, the gateway only
+    /// accepts requests whose `WireRequest::auth_token` matches; the
+    /// outbound cluster forwarder stamps every cross-node request with
+    /// the same value. Pair with `RemoteHostConfig::auth_token` on the
+    /// client side. Tokens travel in plaintext until upstream
+    /// `atomr-remote` lands the TLS handshake. Phase 15 follow-up.
+    #[arg(long)]
+    auth_token: Option<String>,
 }
 
 fn parse_seed(s: &str) -> Result<u64, String> {
@@ -69,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bind: cli.bind,
                 system_name: cli.system_name,
                 root_seed: cli.seed,
+                auth_token: cli.auth_token,
             })
             .await?;
             println!("server_path: {}", server.server_path);
@@ -85,6 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 region_id: cli.region_id,
                 peers,
                 request_timeout: std::time::Duration::from_secs(10),
+                auth_token: cli.auth_token,
             })
             .await?;
             println!("server_path: {}", server.server_path);

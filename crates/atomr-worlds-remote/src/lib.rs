@@ -22,7 +22,10 @@ pub mod gateway;
 pub mod remote_host;
 pub mod wire;
 
-pub use cluster_forwarder::{install_cluster_remote_forwarder, CLUSTER_REPLY_INBOX_NAME};
+pub use cluster_forwarder::{
+    install_cluster_remote_forwarder, install_cluster_remote_forwarder_with_auth,
+    CLUSTER_REPLY_INBOX_NAME,
+};
 pub use gateway::{WorldGateway, WorldGatewayConfig};
 pub use remote_host::{RemoteHost, RemoteHostConfig};
 pub use wire::{WireReply, WireRequest, GATEWAY_ACTOR_NAME, REPLY_INBOX_ACTOR_NAME};

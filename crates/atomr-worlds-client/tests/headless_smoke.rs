@@ -50,6 +50,7 @@ fn remote_backend_returns_a_brick() {
             bind: "127.0.0.1:0".parse().unwrap(),
             system_name: "client-smoke-server".into(),
             root_seed: 0xCAFE,
+            ..StandaloneConfig::default()
         })
         .await
         .unwrap();

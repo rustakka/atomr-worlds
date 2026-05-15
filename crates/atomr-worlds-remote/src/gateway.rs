@@ -35,20 +35,39 @@ impl fmt::Debug for WorldGatewayConfig {
 /// each event as [`WireReply::Event`] until the client disconnects (the
 /// remote `tell` becomes a no-op when the endpoint dies, which lets the
 /// forwarder task exit on the next event).
+///
+/// `expected_auth_token`: pre-shared bearer token the requester must
+/// echo back in `WireRequest::auth_token`. `None` (the default) accepts
+/// anonymous requests — fine for trusted networks, dev / loopback
+/// scenarios. `Some("…")` rejects any request whose token doesn't
+/// match (silent drop with a `tracing::warn!`). Tokens travel in
+/// plaintext until upstream `atomr-remote` lands TLS — see
+/// `RemoteSettings::with_tls` and the `TlsConfig` rustdoc.
 pub struct WorldGateway {
     pub(crate) host: Arc<dyn WorldHost>,
     pub(crate) remote: Arc<RemoteSystem>,
+    pub(crate) expected_auth_token: Option<String>,
 }
 
 impl fmt::Debug for WorldGateway {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WorldGateway").finish_non_exhaustive()
+        f.debug_struct("WorldGateway")
+            .field("auth_required", &self.expected_auth_token.is_some())
+            .finish_non_exhaustive()
     }
 }
 
 impl WorldGateway {
     pub fn new(host: Arc<dyn WorldHost>, remote: Arc<RemoteSystem>) -> Self {
-        Self { host, remote }
+        Self { host, remote, expected_auth_token: None }
+    }
+
+    /// Require the supplied bearer token on every inbound `WireRequest`.
+    /// Mismatched / missing tokens are dropped (with a `tracing::warn!`
+    /// log) and never reach the underlying [`WorldHost`].
+    pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
+        self.expected_auth_token = Some(token.into());
+        self
     }
 }
 
@@ -59,6 +78,19 @@ impl Actor for WorldGateway {
     async fn handle(&mut self, _ctx: &mut Context<Self>, msg: WireRequest) {
         let host = self.host.clone();
         let remote = self.remote.clone();
+        // Auth check: if the gateway is configured with an expected
+        // token, every incoming request must echo it back. Mismatches
+        // are dropped to avoid leaking host availability to scanners.
+        if let Some(expected) = &self.expected_auth_token {
+            if msg.auth_token.as_deref() != Some(expected.as_str()) {
+                tracing::warn!(
+                    corr_id = msg.env.corr_id,
+                    auth_provided = msg.auth_token.is_some(),
+                    "gateway: dropped request with bad/missing auth token"
+                );
+                return;
+            }
+        }
         let reply_path = msg.reply_path;
         let env = msg.env;
 

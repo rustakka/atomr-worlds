@@ -32,6 +32,7 @@ pub async fn build_backend(cli: &Cli) -> Result<Arc<dyn WorldHost>, String> {
                 system_name: "atomr-worlds-client".into(),
                 request_timeout: Duration::from_secs(10),
                 subscriber_capacity: 256,
+                ..RemoteHostConfig::default()
             })
             .await
             .map_err(|e| format!("RemoteHost: {e}"))?;
@@ -53,6 +54,7 @@ pub async fn build_backend(cli: &Cli) -> Result<Arc<dyn WorldHost>, String> {
                 system_name: "atomr-worlds-client".into(),
                 request_timeout: Duration::from_secs(10),
                 subscriber_capacity: 256,
+                ..RemoteHostConfig::default()
             })
             .await
             .map_err(|e| format!("RemoteHost (cluster): {e}"))?;

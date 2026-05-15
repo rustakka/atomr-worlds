@@ -30,6 +30,18 @@ pub struct RemoteHostConfig {
     pub request_timeout: Duration,
     /// Bound for per-subscription mpsc channels.
     pub subscriber_capacity: usize,
+    /// Bearer token to attach to every outbound `WireRequest` so the
+    /// gateway can validate authorisation (Phase 15 follow-up). Pair
+    /// with `WorldGateway::with_auth_token(...)` on the server. `None`
+    /// leaves requests anonymous. Travels in plaintext until upstream
+    /// `atomr-remote` lands TLS handshakes — see `RemoteSettings::tls`.
+    pub auth_token: Option<String>,
+    /// `atomr-remote` TLS configuration. `None` (the default) keeps the
+    /// pre-existing plaintext transport. Once upstream wires the TLS
+    /// handshake into `TcpTransport` (see `atomr_remote::tls` rustdoc),
+    /// supplying a config here transparently encrypts the link without
+    /// further code changes here.
+    pub tls: Option<atomr_remote::TlsConfig>,
 }
 
 impl Default for RemoteHostConfig {
@@ -40,6 +52,8 @@ impl Default for RemoteHostConfig {
             system_name: "atomr-worlds-client".into(),
             request_timeout: Duration::from_secs(10),
             subscriber_capacity: 256,
+            auth_token: None,
+            tls: None,
         }
     }
 }
@@ -56,6 +70,8 @@ pub struct RemoteHost {
     subs: SubsMap,
     request_timeout: Duration,
     subscriber_capacity: usize,
+    /// Pre-shared bearer token attached to every outbound `WireRequest`.
+    auth_token: Option<String>,
     /// Cached typed handle to the server gateway. `actor_selection` allocates
     /// a fresh serializer on each call, so we keep one around per RemoteHost.
     server_ref: ActorRef<WireRequest>,
@@ -81,8 +97,15 @@ impl RemoteHost {
         let sys = ActorSystem::create(cfg.system_name.clone(), atomr_config::Config::reference())
             .await
             .map_err(|e| HostError::Sys(format!("{e}")))?;
+        // Plumb TLS through to atomr-remote when the caller supplies a
+        // config — the actual handshake activates once upstream wires
+        // it (see `atomr_remote::tls`). Today this is a no-op pass-through.
+        let mut remote_settings = RemoteSettings::default();
+        if let Some(tls) = cfg.tls.clone() {
+            remote_settings = remote_settings.with_tls(tls);
+        }
         let remote = Arc::new(
-            RemoteSystem::start(sys.clone(), cfg.bind, RemoteSettings::default())
+            RemoteSystem::start(sys.clone(), cfg.bind, remote_settings)
                 .await
                 .map_err(|e| HostError::Sys(format!("{e}")))?,
         );
@@ -120,8 +143,17 @@ impl RemoteHost {
             subs,
             request_timeout: cfg.request_timeout,
             subscriber_capacity: cfg.subscriber_capacity,
+            auth_token: cfg.auth_token,
             server_ref,
         })
+    }
+
+    fn build_request(&self, env: Envelope<WorldRequest>) -> WireRequest {
+        let mut wire = WireRequest::new(self.reply_path.clone(), env);
+        if let Some(tok) = &self.auth_token {
+            wire.auth_token = Some(tok.clone());
+        }
+        wire
     }
 
     /// Local actor path (for tests / diagnostics).
@@ -142,8 +174,7 @@ impl WorldHost for RemoteHost {
             let mut guard = self.pending.lock().await;
             guard.insert(corr, tx);
         }
-        self.server_ref
-            .tell(WireRequest { reply_path: self.reply_path.clone(), env });
+        self.server_ref.tell(self.build_request(env));
         match tokio::time::timeout(self.request_timeout, rx).await {
             Ok(Ok(env)) => Ok(env),
             Ok(Err(_)) => {
@@ -165,8 +196,7 @@ impl WorldHost for RemoteHost {
             .ok_or_else(|| HostError::Sys("subscribe requires Subscribe/SubscribeMetric".into()))?;
         let (tx, rx) = mpsc::channel(self.subscriber_capacity);
         self.subs.lock().await.insert(sub_id, tx);
-        self.server_ref
-            .tell(WireRequest { reply_path: self.reply_path.clone(), env });
+        self.server_ref.tell(self.build_request(env));
         Ok(rx)
     }
 

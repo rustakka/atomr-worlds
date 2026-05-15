@@ -33,10 +33,26 @@ pub const CLUSTER_REPLY_INBOX_NAME: &str = "world-cluster-reply-inbox";
 /// `members` maps `region_id → gateway actor path` for every peer node
 /// (excluding `self`). Returns the path of this node's reply inbox so
 /// callers can publish it elsewhere if needed.
+///
+/// Calls [`install_cluster_remote_forwarder_with_auth`] with no token —
+/// peers must run with `expected_auth_token = None` on their gateways.
 pub fn install_cluster_remote_forwarder(
     cluster: &ClusterHost,
     remote: Arc<RemoteSystem>,
     members: HashMap<String, String>,
+) -> Result<String, HostError> {
+    install_cluster_remote_forwarder_with_auth(cluster, remote, members, None)
+}
+
+/// Same as [`install_cluster_remote_forwarder`] plus an outbound bearer
+/// token attached to every forwarded `WireRequest`. Pair with
+/// `WorldGateway::with_auth_token(token)` on every peer; mismatched
+/// tokens are silently dropped on the receiver side.
+pub fn install_cluster_remote_forwarder_with_auth(
+    cluster: &ClusterHost,
+    remote: Arc<RemoteSystem>,
+    members: HashMap<String, String>,
+    auth_token: Option<String>,
 ) -> Result<String, HostError> {
     // Codecs are idempotent — atomr-remote keys by TypeId.
     remote.register_bincode::<WireRequest>();
@@ -63,6 +79,7 @@ pub fn install_cluster_remote_forwarder(
     let members = Arc::new(members);
     let remote_for_fwd = remote.clone();
     let reply_path_for_fwd = reply_path.clone();
+    let auth_token = Arc::new(auth_token);
     let forwarder: Forwarder = Arc::new(
         move |owner: &str, env: Envelope<WorldRequest>| {
             let Some(target_path) = members.get(owner) else {
@@ -73,10 +90,11 @@ pub fn install_cluster_remote_forwarder(
                 tracing::warn!(target = %target_path, "cluster forwarder: bad actor_selection");
                 return;
             };
-            target.tell(WireRequest {
-                reply_path: reply_path_for_fwd.clone(),
-                env,
-            });
+            let mut wire = WireRequest::new(reply_path_for_fwd.clone(), env);
+            if let Some(tok) = auth_token.as_ref().as_deref() {
+                wire.auth_token = Some(tok.to_string());
+            }
+            target.tell(wire);
         },
     );
     cluster.region().set_remote_forwarder(forwarder);

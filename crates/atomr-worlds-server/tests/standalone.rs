@@ -17,6 +17,7 @@ async fn server_round_trips_a_write_and_read() {
         bind: "127.0.0.1:0".parse().unwrap(),
         system_name: "test-server-standalone".into(),
         root_seed: 0xABCD,
+        ..StandaloneConfig::default()
     })
     .await
     .expect("server boot");

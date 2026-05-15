@@ -888,12 +888,35 @@ backwards compatibility.
   them on the floor before). Coverage:
   [`atomr-worlds-remote/tests/cluster.rs::cross_node_subscribe_streams_events_back`](../crates/atomr-worlds-remote/tests/cluster.rs).
 
-### Out of scope (see `docs/CLIENT_SERVER.md`)
+- **Pre-shared bearer-token auth on the wire.** `WireRequest` carries
+  an optional `auth_token` field;
+  [`WorldGateway::with_auth_token(...)`](../crates/atomr-worlds-remote/src/gateway.rs)
+  validates inbound requests against an expected value and silently
+  drops mismatches with a `tracing::warn!`. Both `RemoteHostConfig` and
+  `StandaloneConfig` / `ClusterConfig` grow an `auth_token: Option<String>`,
+  the cluster forwarder gains
+  [`install_cluster_remote_forwarder_with_auth`](../crates/atomr-worlds-remote/src/cluster_forwarder.rs)
+  for cross-node stamping, and the server CLI exposes `--auth-token`.
+  Coverage:
+  [`atomr-worlds-remote/tests/loopback.rs::gateway_rejects_requests_with_wrong_or_missing_token`](../crates/atomr-worlds-remote/tests/loopback.rs).
+- **TLS plumbing primed for upstream.** `RemoteHostConfig::tls`
+  accepts an [`atomr_remote::TlsConfig`](https://docs.rs/atomr-remote)
+  and threads it into `RemoteSystem::start` via `RemoteSettings::with_tls`.
+  `atomr-remote` 0.9.2 only exposes the typed config today (the
+  handshake itself is "deferred" per its own rustdoc); when upstream
+  wires `TcpTransport`, this layer is ready with no further code
+  changes. **Bearer tokens travel in plaintext until that lands** — the
+  `WorldGateway::with_auth_token` rustdoc and `RemoteHostConfig::auth_token`
+  rustdoc both call this out.
+
+### Out of scope (still — see `docs/CLIENT_SERVER.md`)
 
 - `atomr-view` UI bridge — same upstream blockers as Phase 14.
 - Gossip / persistent membership for the cluster. `--peer` is a static
   hand-rolled map.
-- TLS / auth on the wire.
+- True TLS encryption on the wire — blocked on `atomr-remote`'s
+  `TcpTransport` actually performing the rustls handshake (see
+  [`atomr_remote::tls`](https://docs.rs/atomr-remote) rustdoc).
 
 ## Phase 16 — Lighting + materials upgrade *(landed)*
 

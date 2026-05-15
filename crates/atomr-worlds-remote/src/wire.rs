@@ -15,10 +15,36 @@ pub const REPLY_INBOX_ACTOR_NAME: &str = "world-reply-inbox";
 
 /// Wire request: a [`WorldRequest`] envelope plus the actor path the
 /// server should send the reply (or streaming events) back to.
+///
+/// `auth_token` carries a pre-shared bearer token for the simple
+/// shared-secret auth path (Phase 15 follow-up). The gateway validates
+/// the token against its configured expected value and silently drops
+/// requests that don't match. `None` means "no token sent" — gateways
+/// configured with `expected_auth_token = None` accept that, gateways
+/// configured with a token reject. **Tokens travel in plaintext until
+/// the upstream `atomr-remote` TLS handshake lands**; treat as a
+/// defense-in-depth knob on trusted networks, not a substitute for
+/// transport encryption.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WireRequest {
     pub reply_path: String,
     pub env: Envelope<WorldRequest>,
+    #[serde(default)]
+    pub auth_token: Option<String>,
+}
+
+impl WireRequest {
+    /// Construct a request without auth (legacy / open-network path).
+    pub fn new(reply_path: String, env: Envelope<WorldRequest>) -> Self {
+        Self { reply_path, env, auth_token: None }
+    }
+
+    /// Attach a bearer token; the gateway will reject the request if
+    /// its configured `expected_auth_token` doesn't match.
+    pub fn with_auth(mut self, token: impl Into<String>) -> Self {
+        self.auth_token = Some(token.into());
+        self
+    }
 }
 
 /// Wire reply. One-shot replies match by `env.corr_id`; streaming events

@@ -29,6 +29,7 @@ async fn two_node_cluster_routes_via_owning_shard() {
             region_id: "alpha".into(),
             peers: HashMap::new(),
             request_timeout: Duration::from_secs(5),
+            ..ClusterConfig::default()
         },
         coordinator.clone(),
     )
@@ -42,6 +43,7 @@ async fn two_node_cluster_routes_via_owning_shard() {
             region_id: "beta".into(),
             peers: HashMap::new(),
             request_timeout: Duration::from_secs(5),
+            ..ClusterConfig::default()
         },
         coordinator.clone(),
     )
