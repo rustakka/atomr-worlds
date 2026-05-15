@@ -243,14 +243,125 @@ impl PyBrick {
     }
     /// Return the raw little-endian voxel bytes as a Python `bytes` object —
     /// suitable for `numpy.frombuffer(bytes, dtype=numpy.uint16).reshape(16,
-    /// 16, 16)`. Single allocation, no per-voxel copy. Full zero-copy via
-    /// the Python buffer protocol requires `Arc<Brick>` storage + a separate
-    /// view type (planned follow-up; the buffer-protocol API surface in
-    /// PyO3 changed between 0.21 and 0.22 — pin the version before wiring).
+    /// 16, 16)`. Single allocation, no per-voxel copy. The `__getbuffer__`
+    /// path below gives true zero-copy on Python 3.11+ (limited API exposes
+    /// the `Py_bf_getbuffer` slot from 3.11 onward); this method stays as a
+    /// fallback when callers want a copying byte buffer.
     fn buffer_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
         let bytes = bytemuck::cast_slice::<RustVoxel, u8>(self.inner.voxels.as_ref());
         pyo3::types::PyBytes::new_bound(py, bytes)
     }
+
+    /// Phase 11 follow-up — true zero-copy buffer protocol.
+    ///
+    /// Exposes the brick's voxel data as a `(16, 16, 16)` `uint16` buffer;
+    /// `numpy.asarray(brick)` allocates no copy. Requires Python 3.11+
+    /// because the `Py_bf_getbuffer` slot only entered the stable ABI
+    /// (limited API) at 3.11; older Python wheels keep the
+    /// `buffer_bytes()` helper as the zero-allocation alternative.
+    ///
+    /// # Safety
+    /// `view` is filled in the same shape as
+    /// `pyo3/tests/test_buffer_protocol.rs::fill_view_from_readonly_data`.
+    /// `view.obj` borrows the `PyBrick` itself, so the underlying voxel
+    /// slice stays alive as long as the buffer is held.
+    #[cfg(any(not(Py_LIMITED_API), Py_3_11))]
+    unsafe fn __getbuffer__(
+        slf: pyo3::Bound<'_, Self>,
+        view: *mut pyo3::ffi::Py_buffer,
+        flags: std::os::raw::c_int,
+    ) -> PyResult<()> {
+        use pyo3::exceptions::PyBufferError;
+        use std::ffi::CString;
+        use std::os::raw::c_void;
+        use std::ptr;
+
+        if view.is_null() {
+            return Err(PyBufferError::new_err("View is null"));
+        }
+        if (flags & pyo3::ffi::PyBUF_WRITABLE) == pyo3::ffi::PyBUF_WRITABLE {
+            return Err(PyBufferError::new_err("Brick buffer is read-only"));
+        }
+
+        // Pull the voxel byte slice through `slf` so the data pointer
+        // stays valid for as long as Python holds a reference to the
+        // `PyBrick` (PyO3 increfs `view.obj` for us via `into_ptr`).
+        let borrow = slf.borrow();
+        let bytes = bytemuck::cast_slice::<RustVoxel, u8>(borrow.inner.voxels.as_ref());
+        let len = bytes.len() as isize;
+        let buf_ptr = bytes.as_ptr() as *mut c_void;
+        // `borrow` keeps the `&PyBrick` alive only for the scope of this
+        // function; the `view.obj` increment below makes the pointer's
+        // lifetime tracked by Python instead.
+        drop(borrow);
+
+        (*view).obj = slf.into_ptr();
+        (*view).buf = buf_ptr;
+        (*view).len = len;
+        (*view).readonly = 1;
+        (*view).itemsize = std::mem::size_of::<RustVoxel>() as isize;
+
+        // numpy reads the format string ("H" = uint16, native byte order)
+        // when `PyBUF_FORMAT` is requested; otherwise leave it null so
+        // simple consumers (memoryview) accept the default `B` layout.
+        (*view).format = if (flags & pyo3::ffi::PyBUF_FORMAT) == pyo3::ffi::PyBUF_FORMAT {
+            CString::new("H").unwrap().into_raw()
+        } else {
+            ptr::null_mut()
+        };
+
+        // Shape: (16, 16, 16). The Brick's flat layout is
+        // `(z * 16 + y) * 16 + x`, so dim-0 is z, dim-1 is y, dim-2 is x.
+        // We Box the shape array onto the heap and leak it through the
+        // view; `__releasebuffer__` reclaims it.
+        if (flags & pyo3::ffi::PyBUF_ND) == pyo3::ffi::PyBUF_ND {
+            let edge = BRICK_EDGE as pyo3::ffi::Py_ssize_t;
+            let shape = Box::leak(Box::new([edge, edge, edge]));
+            (*view).ndim = 3;
+            (*view).shape = shape.as_mut_ptr();
+
+            if (flags & pyo3::ffi::PyBUF_STRIDES) == pyo3::ffi::PyBUF_STRIDES {
+                let item = std::mem::size_of::<RustVoxel>() as pyo3::ffi::Py_ssize_t;
+                let strides = Box::leak(Box::new([item * edge * edge, item * edge, item]));
+                (*view).strides = strides.as_mut_ptr();
+            } else {
+                (*view).strides = ptr::null_mut();
+            }
+        } else {
+            (*view).ndim = 1;
+            (*view).shape = ptr::null_mut();
+            (*view).strides = ptr::null_mut();
+        }
+
+        (*view).suboffsets = ptr::null_mut();
+        (*view).internal = ptr::null_mut();
+
+        Ok(())
+    }
+
+    /// Phase 11 follow-up: free the format string + shape/stride boxes
+    /// allocated by `__getbuffer__`.
+    #[cfg(any(not(Py_LIMITED_API), Py_3_11))]
+    unsafe fn __releasebuffer__(&self, view: *mut pyo3::ffi::Py_buffer) {
+        use std::ffi::CString;
+        if view.is_null() {
+            return;
+        }
+        if !(*view).format.is_null() {
+            drop(CString::from_raw((*view).format));
+            (*view).format = std::ptr::null_mut();
+        }
+        if !(*view).shape.is_null() {
+            // Reconstruct the [Py_ssize_t; 3] box so it drops cleanly.
+            let _ = Box::from_raw((*view).shape as *mut [pyo3::ffi::Py_ssize_t; 3]);
+            (*view).shape = std::ptr::null_mut();
+        }
+        if !(*view).strides.is_null() {
+            let _ = Box::from_raw((*view).strides as *mut [pyo3::ffi::Py_ssize_t; 3]);
+            (*view).strides = std::ptr::null_mut();
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!("Brick(nonempty={})", self.inner.nonempty_count)
     }
@@ -334,6 +445,54 @@ impl PyWorldClient {
             .map_err(|e| PyRuntimeError::new_err(format!("{e}")))
     }
 
+    /// Phase 11 follow-up — async subscribe.
+    ///
+    /// Returns a coroutine that resolves to a [`PySubscriptionHandle`].
+    /// The handle is an async iterator: `async for ev in handle: ...`.
+    /// Each yielded `ev` is a dict shaped like one of:
+    ///
+    /// ```text
+    /// {"kind": "snapshot", "brick": (bx, by, bz), "lod": int, "payload": bytes}
+    /// {"kind": "delta",    "pos": (x, y, z),     "before": int, "after": int}
+    /// {"kind": "stream_end", "sub_id": int}
+    /// ```
+    ///
+    /// `region_min` and `region_max` are inclusive-min / exclusive-max
+    /// world voxel coords. `lod_depth` selects the LOD the snapshot
+    /// payloads are delivered at.
+    #[pyo3(signature = (addr, region_min, region_max, lod_depth=0, sub_id=1))]
+    fn subscribe_async<'py>(
+        &self,
+        py: Python<'py>,
+        addr: PyWorldAddr,
+        region_min: (i64, i64, i64),
+        region_max: (i64, i64, i64),
+        lod_depth: u8,
+        sub_id: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let host = self.host.clone();
+        let a = Address::World(addr.0);
+        let region = atomr_worlds_proto::AABB::new(
+            IVec3::new(region_min.0, region_min.1, region_min.2),
+            IVec3::new(region_max.0, region_max.1, region_max.2),
+        );
+        let env = Envelope::new(
+            sub_id,
+            a,
+            WorldRequest::Subscribe { addr: a, region, lod: Lod::new(lod_depth), sub_id },
+        );
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let receiver = host
+                .subscribe(env)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("{e}")))?;
+            Ok(PySubscriptionHandle {
+                receiver: Arc::new(tokio::sync::Mutex::new(Some(receiver))),
+                sub_id,
+            })
+        })
+    }
+
     /// Register an authored region of literal voxel data.
     ///
     /// `bounds_min` and `bounds_max` are inclusive-min, exclusive-max
@@ -368,6 +527,109 @@ impl PyWorldClient {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PySubscriptionHandle — Phase 11 follow-up
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Async-iterable handle returned by [`PyWorldClient::subscribe_async`].
+///
+/// `__aiter__` returns `self`; `__anext__` resolves to the next
+/// `WorldEvent` rendered as a tagged dict (`"kind"` + variant fields).
+/// `StopAsyncIteration` is raised when the underlying mpsc channel
+/// closes or yields `StreamEnd`. The handle keeps the receiver under a
+/// `tokio::sync::Mutex<Option<…>>` so `__anext__` is safe to call from
+/// multiple Python tasks even though the underlying `Receiver` is
+/// `!Sync`.
+#[pyclass(name = "SubscriptionHandle", module = "atomrworlds")]
+struct PySubscriptionHandle {
+    receiver: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<Envelope<WorldEvent>>>>>,
+    sub_id: u64,
+}
+
+#[pymethods]
+impl PySubscriptionHandle {
+    /// `async for ev in handle` returns `self`.
+    fn __aiter__(slf: pyo3::Py<Self>) -> pyo3::Py<Self> {
+        slf
+    }
+
+    /// Resolve the next event or raise `StopAsyncIteration`.
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let recv = self.receiver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = recv.lock().await;
+            let next = match guard.as_mut() {
+                Some(rx) => rx.recv().await,
+                None => None,
+            };
+            match next {
+                None => {
+                    *guard = None;
+                    Err(pyo3::exceptions::PyStopAsyncIteration::new_err(
+                        "subscription stream ended",
+                    ))
+                }
+                Some(env) => Python::with_gil(|py| Ok(world_event_to_py(py, env.body)?.unbind())),
+            }
+        })
+    }
+
+    /// `await handle.next()` returns the next event without `async for`
+    /// semantics — useful for one-shot reads.
+    fn next<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.__anext__(py)
+    }
+
+    /// Subscription id, mirrored from the originating Subscribe envelope.
+    #[getter]
+    fn sub_id(&self) -> u64 {
+        self.sub_id
+    }
+}
+
+fn world_event_to_py(py: Python<'_>, ev: WorldEvent) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
+    use pyo3::types::PyDict;
+    let dict = PyDict::new_bound(py);
+    match ev {
+        WorldEvent::BrickSnapshot { addr: _, brick, lod, payload } => {
+            dict.set_item("kind", "snapshot")?;
+            dict.set_item("brick", (brick.x, brick.y, brick.z))?;
+            dict.set_item("lod", lod.depth)?;
+            dict.set_item(
+                "payload",
+                pyo3::types::PyBytes::new_bound(py, payload.as_ref()),
+            )?;
+        }
+        WorldEvent::VoxelDelta { addr: _, pos, before, after } => {
+            dict.set_item("kind", "delta")?;
+            dict.set_item("pos", (pos.x, pos.y, pos.z))?;
+            dict.set_item("before", before.0)?;
+            dict.set_item("after", after.0)?;
+        }
+        WorldEvent::StreamEnd { sub_id } => {
+            dict.set_item("kind", "stream_end")?;
+            dict.set_item("sub_id", sub_id)?;
+        }
+        WorldEvent::Voxel { addr: _, pos, voxel } => {
+            // Shouldn't appear on a subscribe stream but fold it for safety.
+            dict.set_item("kind", "voxel")?;
+            dict.set_item("pos", (pos.x, pos.y, pos.z))?;
+            dict.set_item("material", voxel.0)?;
+        }
+        WorldEvent::Ack { addr: _ } => {
+            dict.set_item("kind", "ack")?;
+        }
+        other => {
+            // Catch-all for variants the Python API doesn't model yet
+            // (Tier, RegionDelta, VehicleFrame, …). Surface as opaque
+            // debug repr so callers don't silently miss messages.
+            dict.set_item("kind", "other")?;
+            dict.set_item("debug", format!("{other:?}"))?;
+        }
+    }
+    Ok(dict)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Module entrypoint
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -382,6 +644,7 @@ fn atomrworlds_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_class::<PyVoxel>()?;
     m.add_class::<PyBrick>()?;
     m.add_class::<PyWorldClient>()?;
+    m.add_class::<PySubscriptionHandle>()?;
     m.add("BRICK_EDGE", BRICK_EDGE)?;
     Ok(())
 }

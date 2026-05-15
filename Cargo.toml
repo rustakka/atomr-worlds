@@ -91,8 +91,16 @@ cudarc                 = { version = "0.19.4", features = ["cuda-version-from-bu
 # PNG output (Phase 2 scaffold)
 png = "0.17"
 
-# Python bindings (Phase 6)
-pyo3 = { version = "0.22", features = ["abi3-py310"] }
+# Python bindings (Phase 6).
+# abi3-py311 is the floor — the Phase-11 follow-up needs the
+# `Py_bf_getbuffer` slot which entered the limited API at Python 3.11.
+# Python 3.10 reaches EOL in October 2026.
+pyo3 = { version = "0.22", features = ["abi3-py311"] }
+# Phase 11 follow-up: bridges tokio futures into Python awaitables for
+# the `WorldClient.subscribe_async` path. Pulls a static tokio runtime
+# that PyWorldClient also reuses for sync `block_on` calls so we don't
+# fragment async contexts.
+pyo3-async-runtimes = { version = "0.22", features = ["tokio-runtime", "attributes"] }
 
 # Client/server CLI + Bevy (Phase 15)
 clap = { version = "4", features = ["derive"] }

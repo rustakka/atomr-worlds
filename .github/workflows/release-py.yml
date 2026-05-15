@@ -22,7 +22,11 @@ jobs:
           - { os: macos-13,       target: x86_64-apple-darwin }
           - { os: macos-14,       target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
-        python: ["3.10", "3.11", "3.12", "3.13"]
+        # Python 3.10 dropped at the Phase-11 buffer-protocol follow-up:
+        # `Py_bf_getbuffer` / `Py_bf_releasebuffer` only enter the limited
+        # API at 3.11, and those slots back the zero-copy `numpy.asarray`
+        # path on `PyBrick`. 3.10 reaches EOL October 2026.
+        python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

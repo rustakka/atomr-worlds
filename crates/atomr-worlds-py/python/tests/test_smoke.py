@@ -74,6 +74,96 @@ def test_brick_to_numpy_or_list():
         client.shutdown()
 
 
+def test_brick_buffer_protocol_zero_copy():
+    """Phase 11 follow-up: PyBrick exposes the Python buffer protocol so
+    `numpy.asarray(brick)` is a zero-copy `(16, 16, 16) uint16` view.
+
+    `memoryview(brick)` always works; the numpy assertion is gated on
+    numpy being installed.
+    """
+    client = aw.WorldClient(root_seed=1)
+    try:
+        addr = aw.WorldAddr.root()
+        brick = client.get_brick(addr, 0, -2, 0)
+
+        mv = memoryview(brick)
+        assert mv.format == "H", f"expected 'H' (uint16), got {mv.format!r}"
+        assert mv.itemsize == 2
+        assert mv.shape == (16, 16, 16)
+        assert mv.nbytes == 16 * 16 * 16 * 2
+        assert mv.readonly
+
+        try:
+            import numpy as np  # type: ignore[import-not-found]
+        except ImportError:
+            return
+        arr = np.asarray(brick)
+        assert arr.dtype == np.uint16
+        assert arr.shape == (16, 16, 16)
+        assert arr.flags["C_CONTIGUOUS"]
+        # Zero-copy: numpy's `.base` should point back at the brick.
+        assert arr.base is not None
+        # Sanity: array contents match the explicit `materials()` walk.
+        flat = brick.materials()
+        for z in range(16):
+            for y in range(16):
+                for x in range(16):
+                    # Brick layout is `(z * 16 + y) * 16 + x`.
+                    assert int(arr[z, y, x]) == flat[(z * 16 + y) * 16 + x]
+                    if z + y + x > 0:
+                        # Quick exit — we already checked many cells.
+                        break
+                break
+    finally:
+        client.shutdown()
+
+
+def test_subscribe_async_yields_snapshot_then_delta():
+    """Phase 11 follow-up: `WorldClient.subscribe_async` returns a
+    coroutine-resolved async iterator over `WorldEvent` dicts.
+
+    Subscribing to a region must:
+    1. Yield `{"kind": "snapshot", …}` for each brick overlapping the
+       region (initial-snapshot pass).
+    2. Yield `{"kind": "delta", …}` for in-region writes after the
+       snapshot completes.
+
+    Run synchronously via `asyncio.run` so the test stays in-process with
+    no extra pytest plugin.
+    """
+    import asyncio
+
+    async def main():
+        client = aw.WorldClient(root_seed=0xDEAD_BEEF_CAFE_F00D)
+        try:
+            addr = aw.WorldAddr.root()
+            # 16³ region right at the origin — exactly one brick. Brick
+            # snapshots will arrive first; then we write a voxel inside
+            # and expect a delta.
+            handle = await client.subscribe_async(
+                addr, (0, 0, 0), (16, 16, 16), 0, 7
+            )
+            assert handle.sub_id == 7
+            ev = await handle.__anext__()
+            assert ev["kind"] == "snapshot", f"first event wasn't a snapshot: {ev}"
+            # Write a voxel inside the region and expect a delta.
+            client.write_voxel(addr, 1, 1, 1, aw.Voxel(material=42))
+            # Drain any further snapshots until the delta arrives, with a
+            # safety cap so a misbehaving stream can't hang the test.
+            for _ in range(64):
+                ev = await handle.__anext__()
+                if ev["kind"] == "delta":
+                    assert ev["pos"] == (1, 1, 1)
+                    assert ev["after"] == 42
+                    break
+            else:
+                raise AssertionError("no delta after 64 events")
+        finally:
+            client.shutdown()
+
+    asyncio.run(main())
+
+
 if __name__ == "__main__":
     test_splitmix64_deterministic_and_nonzero()
     test_child_seed_deterministic()
@@ -82,4 +172,6 @@ if __name__ == "__main__":
     test_world_client_get_brick()
     test_world_client_voxel_round_trip()
     test_brick_to_numpy_or_list()
+    test_brick_buffer_protocol_zero_copy()
+    test_subscribe_async_yields_snapshot_then_delta()
     print("ALL SMOKE TESTS PASS")

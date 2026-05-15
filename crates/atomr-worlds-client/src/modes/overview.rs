@@ -136,7 +136,12 @@ fn overview_render(
         return;
     }
     if cache.seed != Some(active.seed) {
-        // Bake the pyramid on first entry. ~seconds at grid_level 3.
+        // Bake the pyramid on first entry. ~seconds at grid_level 3 — this
+        // synchronously blocks the Update schedule, so any harness capture
+        // that fires on the same frame as the first overview entry sees a
+        // pre-bake (background-only) image. Trace + debug logs let an
+        // interactive debugger correlate "empty sky" captures with this.
+        let t0 = std::time::Instant::now();
         tracing::info!(seed = active.seed, "baking macro-state pyramid for overview");
         let generator =
             DefaultMacroGenerator::new(MacroConfig { grid_level: 3, ..MacroConfig::default() });
@@ -145,6 +150,7 @@ fn overview_render(
         let pyramid = bake_world_summary(active.addr, &macro_state, 4, 64);
         cache.pyramid = Some(pyramid);
         cache.seed = Some(active.seed);
+        tracing::info!(elapsed_ms = t0.elapsed().as_millis() as u64, "overview pyramid baked");
     }
     let Some(pyramid) = cache.pyramid.as_ref() else { return };
 

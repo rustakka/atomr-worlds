@@ -277,18 +277,42 @@ fire-and-forget. Cross-node remote forwarding is exposed via
 actor remains a follow-up that depends on upstream codec
 verification. In-tree two-node test pending.
 
-## Phase 11 *(landed)* — Python release + zero-copy-ish accessor
+## Phase 11 *(landed)* — Python release + zero-copy accessor
 
 `.github/workflows/release-py.yml` builds wheels on push of `py-v*`
 tags across linux x86_64/aarch64, macos x86_64/arm64, windows
-x86_64, python 3.10–3.13 via `PyO3/maturin-action@v1`, and
+x86_64, python 3.11–3.13 via `PyO3/maturin-action@v1`, and
 publishes via `maturin publish` on the `pypi` environment.
 `PyBrick.buffer_bytes()` returns the brick's voxels as a single-copy
-`bytes` object suitable for `numpy.frombuffer(...)`. Full
-buffer-protocol zero-copy + `pyo3-async-runtimes`-backed
-`subscribe_async` need a separate worktree to land cleanly
-against the current PyO3 version pin; deferred as documented
-follow-ups.
+`bytes` object suitable for `numpy.frombuffer(...)`.
+
+### Follow-ups landed
+
+- **True zero-copy buffer protocol** on `PyBrick`. `__getbuffer__` and
+  `__releasebuffer__`
+  ([`crates/atomr-worlds-py/src/lib.rs`](../crates/atomr-worlds-py/src/lib.rs))
+  expose the brick's 8 KiB voxel slice as a `(16, 16, 16)` `uint16`
+  view; `numpy.asarray(brick)` / `memoryview(brick)` allocate no
+  copy. The format string is `"H"` (uint16) when `PyBUF_FORMAT` is
+  requested; shape and strides are filled when `PyBUF_ND` /
+  `PyBUF_STRIDES` are. The slot only entered the limited API at
+  Python 3.11, so the workspace `pyo3` feature was bumped from
+  `abi3-py310` → `abi3-py311`, the release matrix and `pyproject.toml`
+  dropped the 3.10 row, and the smoke test
+  (`crates/atomr-worlds-py/python/tests/test_smoke.py::test_brick_buffer_protocol_zero_copy`)
+  asserts the format/shape/itemsize and the numpy `.base` link.
+
+- **`subscribe_async` + `SubscriptionHandle`** on `PyWorldClient`. The
+  client gains a `subscribe_async(addr, region_min, region_max,
+  lod_depth, sub_id)` coroutine returning a `SubscriptionHandle`. The
+  handle is an async iterator: `async for ev in handle: …` yields
+  tagged dicts (`"kind": "snapshot" | "delta" | "stream_end" | …`).
+  `pyo3-async-runtimes` (0.22, `tokio-runtime` feature) bridges the
+  host's tokio `mpsc::Receiver` into a Python awaitable; the receiver
+  is held under `tokio::sync::Mutex<Option<…>>` so `__anext__` is
+  re-entrant and raises `StopAsyncIteration` when the channel closes.
+  Smoke test:
+  `crates/atomr-worlds-py/python/tests/test_smoke.py::test_subscribe_async_yields_snapshot_then_delta`.
 
 ## Phase 12 *(landed)* — Scene description + portals + variable-depth
 
@@ -1251,8 +1275,17 @@ See [HYDROLOGY.md](HYDROLOGY.md) for the full design.
 ### Out of scope (still)
 
 - Overview-mode harness capture is a pre-existing issue (stock
-  `overview_globe_arrow.toml` also renders empty sky) — the ideal
-  globe-scale water visualization is blocked on that being fixed.
+  `overview_globe_arrow.toml` also renders empty sky). Static analysis
+  rules out a few candidates — the `overview_render` system is wired
+  in, the `RasterTarget` image is mutated each frame, the `BlitCamera`
+  toggles `is_active = true` for `ViewMode::Overview` — but the bug
+  needs a live binary + `RUST_LOG=trace,bevy_render=info` capture run
+  to bisect. The synchronous pyramid bake (~seconds at `grid_level=3`)
+  blocks the Update schedule on first entry; if a screenshot lands on
+  the same frame it sees a pre-bake background. The
+  `tracing::info!("overview pyramid baked", elapsed_ms = …)` line in
+  [`modes/overview.rs`](../crates/atomr-worlds-client/src/modes/overview.rs)
+  exists to correlate that hypothesis with capture timestamps.
 - River deltas / estuaries, lake-shore beaches, aquifer / spring
   sources, and seasonal water-level variation.
 
