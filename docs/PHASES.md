@@ -1459,3 +1459,89 @@ See [RENDERING.md](RENDERING.md) for the renderer architecture.
 - Slice panning does not write back to the FP position; switching back
   to FP returns you to where you left it (this was the chosen design,
   noted here as a known behaviour).
+
+## Phase 19 (Algorithm Topologies) *(landed)* — Advanced Algorithmic Topologies & Layered Voxel Architecture
+
+> Naming note: this is the *second* phase tagged "19" — the prior
+> Phase 19 (slice view) is a smaller hotfix tier. The full Phase 19
+> reference for this work lives at [PHASE_19.md](PHASE_19.md). The
+> pipeline contract is in [PIPELINE.md](PIPELINE.md).
+
+Lands every algorithm from the *Advanced Algorithmic Topologies and
+Layered Architecture in Procedural Voxel World Generation* paper as
+additive strategy-pattern slots on a new `WorldGenConfig`. Existing
+behavior is preserved byte-for-byte (`WorldGenPreset::Vanilla` asserted
+by `tests/vanilla_byte_equality.rs`). Each algorithm opts in via
+`WorldGenPreset::Advanced` / `WorldGenPreset::Showcase` or per-slot via
+the harness DSL.
+
+### Landed work
+
+- **Noise primitives** — `atomr-worlds-noise`: 3D simplex, domain warp
+  (single + iterated), 3D-noise × radial-falloff floating-island field.
+- **Voxel storage layer** — `atomr-worlds-voxel`: `BrickCodec` (RawU16
+  / Rle / Zlib / PaletteRle), `BrickStorage` (DenseBrick /
+  SegmentedRowBrick / SvoBrick), 4-bit `LightOverlay` (2048 bytes per
+  brick).
+- **Mesh strategies** — `atomr-worlds-view`: `NaiveMesh`,
+  `MarchingCubes`, `DualContouring` alongside the existing
+  `GreedyFlat`.
+- **Layered brick pipeline** — `atomr-worlds-generate::pipeline`:
+  `BrickPipeline` trait + `LayeredBrickPipeline` orchestrator,
+  `BrickWorkspace` with padded 18³ apron, `WorldGenConfig` with 13
+  trait-object slots, three named presets, `apply_worldgen_strategy_by_name`
+  registry. Registered under new `TERRAIN_LAYERED` strategy id.
+- **Density / strata / biome** — `HeightmapPlanar`, `Hybrid2D3D`,
+  `Pure3DOverhang`, `FloatingIslandField`; `TopsoilLayer`,
+  `LayeredGeology`, `KrigingInterpolated`; `PerFaceWhittaker`,
+  `WhittakerDirect2D`, `VoronoiCells`; `Hard`,
+  `NormalizedSparseConvolution`, `BufferTerrainInjected`.
+- **Caves + feature seeder** — `WorleyThreshold`,
+  `CellularAutomata3D`, `PerlinWorm`, `IsosurfaceIntersection`;
+  `ColumnAnchorSeeder` emits `FeatureKind` anchors on a 64 m column
+  grid for cross-brick path features.
+- **Ore / erosion / fluid** — `ThresholdNoise`, `BiasedRandomWalk`;
+  `MacroRiverOnly`, `DropletHydraulic`; `Static`,
+  `CellularAutomataFlow`, `LatticeBoltzmannD3Q19`.
+- **Structures** — `WaveFunctionCollapse` (entropy-min + AC-3
+  propagation + bounded backtracking), `Jigsaw` (template-pool
+  recursion over `AuthoredRegion`), `QwfcClassicalSim` (classical
+  amplitude-collapse PDF, research stub).
+- **Flora + placement** — `LSystemTrees` (declarative grammar +
+  3D turtle), `BlueNoiseGrass`; `WhiteNoise`, `UniformGrid`,
+  `PoissonDiskBridson`, `MitchellBestCandidate`.
+- **Sky light + render hookup** — `VerticalCastWithDiffusion` produces
+  a `LightOverlay`; greedy mesher consumes it for per-vertex sky-light;
+  `BrickEdgeAwareAo` resolves edge seams; `BiomeBlendedFog` tints fog
+  across biome borders.
+- **CUDA scaffold** — `atomr-worlds-accel::strategy_kernels` (feature
+  `cuda`): `StrategyKernel` trait + four kernel modules (droplet, lbm,
+  ca3d, wfc), `PARITY_CASES` for CPU/CUDA byte-equality testing. NVRTC
+  source land in a follow-up PR; trait surface is stable.
+
+### Verification
+
+- `tests/vanilla_byte_equality.rs` — `LayeredGenerator(Vanilla)`
+  identical to `default_terrain()` across 4 seeds × 8 brick coords.
+- `cargo test -p atomr-worlds-generate` — 152 lib + 17 integration
+  tests; covers determinism, boundary continuity, mass conservation
+  (LBM 1000 ticks), `min_distance_held` (Poisson-disk), grammar
+  termination (L-system), no-contradiction (WFC), etc.
+- `cargo test -p atomr-worlds-noise` — 22 noise tests green.
+- `cargo test -p atomr-worlds-voxel` — 30 codec/storage/light tests green.
+- `cargo test -p atomr-worlds-view` — mesh + iso tests green.
+- `cargo test -p atomr-worlds-client` — render + AO + fog tests green.
+- `cargo run -p showcase-strategies -- --preset {vanilla,advanced,showcase}` —
+  smoke-tests every preset from the CLI.
+
+### Out of scope (deferred)
+
+- CUDA kernel source (`kernels/*.cu` + NVRTC binding) — module surface
+  landed; kernel implementation deferred.
+- Full kriging interpolation for `KrigingInterpolated` (delegates to
+  `LayeredGeology::default()` per spec).
+- Real `JigsawTag` orientation parity (current impl matches by tag
+  name only).
+- Bevy 0.13 shader updates to render the new `BrickEdgeAwareAo` /
+  `BiomeBlendedFog` end-to-end (vertex attribute lands; shader path
+  consumes default value when fields are zero).
