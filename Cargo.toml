@@ -24,6 +24,7 @@ members = [
     "examples/view-rts",
     "examples/view-slice",
     "examples/view-tp",
+    "examples/showcase-strategies",
 ]
 
 [workspace.package]
