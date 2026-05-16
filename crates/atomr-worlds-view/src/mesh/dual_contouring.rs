@@ -142,7 +142,7 @@ fn solve_cell(brick: &Brick, cx: i32, cy: i32, cz: i32) -> Option<Vertex> {
     let cell_center = [cx as f32 + 0.5, cy as f32 + 0.5, cz as f32 + 0.5];
     let pos = solve_qef_jacobi(&points, &normals, cell_center, [cx as f32, cy as f32, cz as f32]);
     let dominant = dominant_material(&corner_d, &corner_mat);
-    Some(Vertex { pos, normal: [0.0, 0.0, 0.0], material: dominant, ao: 1.0 })
+    Some(Vertex { pos, normal: [0.0, 0.0, 0.0], material: dominant, ao: 1.0, sky_light: 1.0 })
 }
 
 fn central_difference_normal(brick: &Brick, x: i32, y: i32, z: i32) -> [f32; 3] {
@@ -295,7 +295,7 @@ fn push_quad_if_valid(
         triangle_normal(p0, p2, p1)
     };
     for p in [p0, p1, p2, p3] {
-        mesh.vertices.push(Vertex { pos: p, normal, material: mat, ao: 1.0 });
+        mesh.vertices.push(Vertex { pos: p, normal, material: mat, ao: 1.0, sky_light: 1.0 });
     }
     if inside_first {
         mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

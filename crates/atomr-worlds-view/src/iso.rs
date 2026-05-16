@@ -180,6 +180,7 @@ fn naive_surface_nets(brick: &Brick, cfg: SmoothConfig) -> Mesh {
                     normal: [0.0, 0.0, 0.0],
                     material,
                     ao: 1.0,
+                    sky_light: 1.0,
                 });
                 // Cell coord is shifted +1 so x in [-1, EDGE) → cell_x in [0, EDGE+1).
                 cell_vertex[idx(x + 1, y + 1, z + 1)] = vert_index;
@@ -418,7 +419,7 @@ pub fn lod_transition_strip(
             (2, 1) => [0.0, 0.0, 1.0],
             (_, _) => [0.0, 0.0, -1.0],
         };
-        Vertex { pos, normal, material, ao: 1.0 }
+        Vertex { pos, normal, material, ao: 1.0, sky_light: 1.0 }
     };
     for v in 0..edge {
         for u in 0..edge {
@@ -540,7 +541,7 @@ pub fn boundary_skirt(brick: &Brick, axis: u8, sign: i8, skirt_depth_voxels: f32
             (2, 1) => [0.0, 0.0, 1.0],
             (_, _) => [0.0, 0.0, -1.0],
         };
-        Vertex { pos, normal, material: mat, ao: 1.0 }
+        Vertex { pos, normal, material: mat, ao: 1.0, sky_light: 1.0 }
     };
     let edge_e = BRICK_EDGE as i64;
     for u in 0..edge_e {

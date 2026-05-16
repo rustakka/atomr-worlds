@@ -322,6 +322,7 @@ fn combine_meshes(meshes: &[MeshNode]) -> crate::mesh::Mesh {
                 normal: n,
                 material: v.material,
                 ao: v.ao,
+                sky_light: v.sky_light,
             });
         }
         for idx in &node.mesh.indices {

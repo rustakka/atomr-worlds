@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use super::config::WorldGenConfig;
+use super::light::VerticalCastWithDiffusion;
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -30,18 +31,23 @@ pub fn build_vanilla() -> WorldGenConfig {
     }
 }
 
-/// `Advanced` opts into every paper algorithm at moderate cost. Until
-/// Steps 5–10 ship the real strategies, this is a clone of Vanilla; the
-/// `apply_worldgen_strategy_by_name` registry lets the harness DSL swap
-/// individual slots in any preset.
+/// `Advanced` opts into every paper algorithm at moderate cost. Step 10
+/// wires `sky_light = VerticalCastWithDiffusion`; remaining slots track
+/// Vanilla until Steps 5–9 land their per-paper strategies (the harness
+/// DSL can swap individual slots via `apply_worldgen_strategy_by_name`).
 pub fn build_advanced() -> WorldGenConfig {
-    build_vanilla()
+    let mut cfg = build_vanilla();
+    cfg.sky_light = Arc::new(VerticalCastWithDiffusion::default());
+    cfg
 }
 
 /// `Showcase` cranks every algorithm up for the visual demo. Same caveat
-/// as `Advanced` — slot-by-slot upgrades land with subsequent steps.
+/// as `Advanced` — slot-by-slot upgrades land with subsequent steps. The
+/// sky-light pass uses the same default tuning as `Advanced` for now.
 pub fn build_showcase() -> WorldGenConfig {
-    build_vanilla()
+    let mut cfg = build_vanilla();
+    cfg.sky_light = Arc::new(VerticalCastWithDiffusion::default());
+    cfg
 }
 
 #[cfg(test)]

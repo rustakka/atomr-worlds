@@ -1075,7 +1075,13 @@ fn merge_by_material(
             positions.push(v.pos);
             normals.push(v.normal);
             let ao = v.ao.clamp(0.0, 1.0);
-            colors.push([ao, ao, ao, 1.0]);
+            // `sky_light` defaults to 1.0 when no overlay was baked; folding
+            // it into RGB here is therefore a no-op for Vanilla / Legacy and
+            // only attenuates the surface when an Advanced / Showcase preset
+            // produced a `Brick::light_overlay` that `bake_sky_light` consumed.
+            let sky = v.sky_light.clamp(0.0, 1.0);
+            let lit = ao * sky;
+            colors.push([lit, lit, lit, 1.0]);
             uvs.push([id_f, 0.0]);
         }
         indices.extend(sub_mesh.indices.iter().map(|i| *i + base));
@@ -1124,7 +1130,13 @@ fn atomr_to_bevy_mesh(m: &atomr_worlds_view::Mesh) -> BevyMesh {
         positions.push(v.pos);
         normals.push(v.normal);
         let ao = v.ao.clamp(0.0, 1.0);
-        colors.push([ao, ao, ao, 1.0]);
+        // `sky_light` defaults to 1.0 when no overlay was baked, so this is
+        // a behaviour-preserving multiplication for every existing preset.
+        // BrickEdgeAwareAo + LayeredGenerator(Advanced) is the path that
+        // produces sub-1.0 sky values via `bake_sky_light`.
+        let sky = v.sky_light.clamp(0.0, 1.0);
+        let lit = ao * sky;
+        colors.push([lit, lit, lit, 1.0]);
     }
     let mut mesh =
         BevyMesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());

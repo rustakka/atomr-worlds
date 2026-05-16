@@ -34,8 +34,9 @@ pub use pipeline::{
     BiomeBlendStrategy, BiomeMatrixStrategy, BrickPipeline, BrickWorkspace, CaveStrategy,
     DensityFieldStrategy, ErosionStrategy, FeatureAnchor, FeatureAnchorCache, FeatureKind,
     FeatureSeederStrategy, FloraStrategy, FluidStrategy, LayeredBrickPipeline, LayeredGenerator,
-    MonolithicTerrainPass, OreVeinStrategy, PlacementStrategy, SkyLightStrategy, StrataStrategy,
-    StructureStrategy, WorldGenConfig, WorldGenPreset, WS_APRON_EDGE,
+    MonolithicTerrainPass, OreVeinStrategy, PlacementStrategy, SkyLightConfig, SkyLightStrategy,
+    StrataStrategy, StructureStrategy, VerticalCastWithDiffusion, WorldGenConfig, WorldGenPreset,
+    SKY_LIGHT_DIM, WS_APRON_EDGE,
 };
 pub use registry::{
     default_registry, strategy_id, BuiltinSelector, GenerationPolicy, GeneratorRegistry,

@@ -405,7 +405,7 @@ pub fn surface_raster_to_mesh(raster: &SurfaceRaster, palette: &MaterialPalette)
             let p2 = [x1, h, z1];
             let p3 = [x0, h, z1];
             for p in [p0, p1, p2, p3] {
-                mesh.vertices.push(Vertex { pos: p, normal: n, material: mat, ao: 1.0 });
+                mesh.vertices.push(Vertex { pos: p, normal: n, material: mat, ao: 1.0, sky_light: 1.0 });
             }
             // Two triangles, winding so the +Y normal faces "outwards"
             // (matches `mesh::emit_quad` for the `positive` axis case).

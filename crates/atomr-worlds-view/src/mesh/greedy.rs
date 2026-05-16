@@ -175,7 +175,7 @@ fn emit_quad(
         [origin[0] + u_vec[0] + v_vec[0], origin[1] + u_vec[1] + v_vec[1], origin[2] + u_vec[2] + v_vec[2]];
     let p3 = [origin[0] + v_vec[0], origin[1] + v_vec[1], origin[2] + v_vec[2]];
     for p in [p0, p1, p2, p3] {
-        mesh.vertices.push(Vertex { pos: p, normal, material, ao: 1.0 });
+        mesh.vertices.push(Vertex { pos: p, normal, material, ao: 1.0, sky_light: 1.0 });
     }
     if positive {
         mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -196,6 +196,75 @@ pub fn bake_ao(mesh: &mut Mesh, brick: &Brick) {
     for v in &mut mesh.vertices {
         v.ao = compute_vertex_ao(brick, v);
     }
+}
+
+/// Post-process a mesh, writing per-vertex sky-light from
+/// `brick.light_overlay`. No-op when the brick has no overlay attached
+/// (the vertex stays at the default `1.0`). For each face vertex we
+/// sample the air-side voxel that "owns" the light reading; the same
+/// 4-corner averaging strategy as AO would over-darken in the common
+/// case where one corner is solid (overlay reads `0`), so we average
+/// across the four candidate apron cells but skip cells whose underlying
+/// material is solid (their stored light is `0` by construction).
+pub fn bake_sky_light(mesh: &mut Mesh, brick: &Brick) {
+    let Some(overlay) = brick.light_overlay.as_ref() else { return };
+    for v in &mut mesh.vertices {
+        v.sky_light = compute_vertex_sky_light(brick, overlay, v);
+    }
+}
+
+fn compute_vertex_sky_light(
+    brick: &Brick,
+    overlay: &atomr_worlds_voxel::light::LightOverlay,
+    v: &Vertex,
+) -> f32 {
+    let n = v.normal;
+    let face_axis = if n[0].abs() > 0.5 {
+        0
+    } else if n[1].abs() > 0.5 {
+        1
+    } else {
+        2
+    };
+    let positive = n[face_axis] > 0.0;
+    let (u_axis, v_axis) = match face_axis {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    let layer_air = if positive {
+        v.pos[face_axis] as i32
+    } else {
+        v.pos[face_axis] as i32 - 1
+    };
+    let u_pos = v.pos[u_axis] as i32;
+    let v_pos = v.pos[v_axis] as i32;
+    let mut sum = 0u32;
+    let mut count = 0u32;
+    for (du, dv) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+        let mut c = [0i32; 3];
+        c[face_axis] = layer_air;
+        c[u_axis] = u_pos + du;
+        c[v_axis] = v_pos + dv;
+        if c[0] < 0 || c[1] < 0 || c[2] < 0 {
+            continue;
+        }
+        if c[0] >= EDGE as i32 || c[1] >= EDGE as i32 || c[2] >= EDGE as i32 {
+            continue;
+        }
+        // Skip solid cells — their overlay slot is `0` and would drag the
+        // mean down to zero at corners that the player can actually see.
+        if material_at(brick, c[0], c[1], c[2]) != 0 {
+            continue;
+        }
+        sum += overlay.get(c[0] as u8, c[1] as u8, c[2] as u8) as u32;
+        count += 1;
+    }
+    if count == 0 {
+        return 1.0;
+    }
+    let avg = sum as f32 / count as f32;
+    (avg / 15.0).clamp(0.0, 1.0)
 }
 
 fn compute_vertex_ao(brick: &Brick, v: &Vertex) -> f32 {

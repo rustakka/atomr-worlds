@@ -44,6 +44,14 @@ pub fn apply_strategy_by_name(cfg: &mut RenderConfig, slot: &str, name: &str) ->
                 cfg.ao = Arc::new(NoAo);
                 true
             }
+            "MinecraftCornerAo" => {
+                cfg.ao = Arc::new(MinecraftCornerAo);
+                true
+            }
+            "BrickEdgeAwareAo" => {
+                cfg.ao = Arc::new(BrickEdgeAwareAo);
+                true
+            }
             _ => false,
         },
         "shading" => match name {
@@ -101,6 +109,10 @@ pub fn apply_strategy_by_name(cfg: &mut RenderConfig, slot: &str, name: &str) ->
             }
             "ExpSquaredSkyTintedFog" => {
                 cfg.fog = Arc::new(ExpSquaredSkyTintedFog::default());
+                true
+            }
+            "BiomeBlendedFog" => {
+                cfg.fog = Arc::new(BiomeBlendedFog::default());
                 true
             }
             _ => false,

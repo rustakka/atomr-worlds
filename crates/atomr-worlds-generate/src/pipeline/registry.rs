@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use super::config::WorldGenConfig;
+use super::light::VerticalCastWithDiffusion;
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -107,6 +108,10 @@ pub fn apply_worldgen_strategy_by_name(
         "sky_light" => match name {
             "None" => {
                 cfg.sky_light = Arc::new(NoneSkyLight);
+                true
+            }
+            "VerticalCastWithDiffusion" => {
+                cfg.sky_light = Arc::new(VerticalCastWithDiffusion::default());
                 true
             }
             _ => false,
