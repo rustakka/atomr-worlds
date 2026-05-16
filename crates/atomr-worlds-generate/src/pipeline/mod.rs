@@ -9,7 +9,9 @@
 //! existing monolithic [`crate::TerrainGenerator`].
 
 pub mod anchor;
+pub mod caves;
 pub mod config;
+pub mod feature_seeder;
 pub mod layered;
 pub mod presets;
 pub mod registry;
@@ -18,7 +20,9 @@ pub mod vanilla;
 pub mod workspace;
 
 pub use anchor::{FeatureAnchor, FeatureAnchorCache, FeatureKind};
+pub use caves::{CellularAutomata3D, IsosurfaceIntersection, PerlinWorm, WorleyThreshold};
 pub use config::{WorldGenConfig, WorldGenPreset};
+pub use feature_seeder::{ColumnAnchorSeeder, SeederConfig, FEATURE_DIM};
 pub use layered::{BrickPipeline, LayeredBrickPipeline, LayeredGenerator};
 pub use presets::{build_advanced, build_showcase, build_vanilla};
 pub use registry::apply_worldgen_strategy_by_name;

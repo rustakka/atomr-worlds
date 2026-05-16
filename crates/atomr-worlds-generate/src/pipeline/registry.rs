@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
+use super::caves::{CellularAutomata3D, IsosurfaceIntersection, PerlinWorm, WorleyThreshold};
 use super::config::WorldGenConfig;
+use super::feature_seeder::ColumnAnchorSeeder;
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -44,6 +46,22 @@ pub fn apply_worldgen_strategy_by_name(
         "caves" => match name {
             "None" => {
                 cfg.caves = Arc::new(NoneCaves);
+                true
+            }
+            "WorleyThreshold" => {
+                cfg.caves = Arc::new(WorleyThreshold::default());
+                true
+            }
+            "CellularAutomata3D" => {
+                cfg.caves = Arc::new(CellularAutomata3D::default());
+                true
+            }
+            "PerlinWorm" => {
+                cfg.caves = Arc::new(PerlinWorm::default());
+                true
+            }
+            "IsosurfaceIntersection" => {
+                cfg.caves = Arc::new(IsosurfaceIntersection::default());
                 true
             }
             _ => false,
@@ -114,6 +132,10 @@ pub fn apply_worldgen_strategy_by_name(
         "feature_seeder" => match name {
             "Empty" => {
                 cfg.feature_seeder = Arc::new(EmptySeeder);
+                true
+            }
+            "ColumnAnchorSeeder" => {
+                cfg.feature_seeder = Arc::new(ColumnAnchorSeeder::default());
                 true
             }
             _ => false,
