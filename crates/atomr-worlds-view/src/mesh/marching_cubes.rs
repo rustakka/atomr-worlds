@@ -117,7 +117,7 @@ fn process_cell(brick: &Brick, cx: i32, cy: i32, cz: i32, iso: f32, mesh: &mut M
         let normal = triangle_normal(a, b, c);
         let base = mesh.vertices.len() as u32;
         for p in [a, b, c] {
-            mesh.vertices.push(Vertex { pos: p, normal, material: dominant, ao: 1.0 });
+            mesh.vertices.push(Vertex { pos: p, normal, material: dominant, ao: 1.0, sky_light: 1.0 });
         }
         mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
         i += 3;

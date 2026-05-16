@@ -19,6 +19,7 @@ pub mod feature_seeder;
 pub mod flora;
 pub mod fluid;
 pub mod layered;
+pub mod light;
 pub mod ore;
 pub mod placement;
 pub mod presets;
@@ -50,6 +51,7 @@ pub use fluid::{
     CaFlowConfig, CellularAutomataFlow, LatticeBoltzmannD3Q19, LbmConfig, Static, StaticConfig,
 };
 pub use layered::{BrickPipeline, LayeredBrickPipeline, LayeredGenerator};
+pub use light::{SkyLightConfig, VerticalCastWithDiffusion, SKY_LIGHT_DIM};
 pub use ore::{
     BiasedRandomWalk, BiasedRandomWalkConfig, OreVeinConfig, StrataBias, ThresholdNoise,
 };

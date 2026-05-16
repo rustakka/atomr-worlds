@@ -16,6 +16,7 @@ use super::erosion::{DropletHydraulic, MacroRiverOnly};
 use super::feature_seeder::ColumnAnchorSeeder;
 use super::flora::{BlueNoiseGrass, LSystemTrees};
 use super::fluid::{CellularAutomataFlow, LatticeBoltzmannD3Q19, Static};
+use super::light::VerticalCastWithDiffusion;
 use super::ore::{BiasedRandomWalk, ThresholdNoise};
 use super::placement::{MitchellBestCandidate, PoissonDiskBridson, UniformGrid, WhiteNoise};
 use super::strata::{KrigingInterpolated, LayeredGeology, TopsoilLayer};
@@ -251,6 +252,10 @@ pub fn apply_worldgen_strategy_by_name(
         "sky_light" => match name {
             "None" => {
                 cfg.sky_light = Arc::new(NoneSkyLight);
+                true
+            }
+            "VerticalCastWithDiffusion" => {
+                cfg.sky_light = Arc::new(VerticalCastWithDiffusion::default());
                 true
             }
             _ => false,

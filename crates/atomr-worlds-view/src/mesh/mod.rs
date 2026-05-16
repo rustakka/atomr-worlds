@@ -14,6 +14,11 @@ pub struct Vertex {
     /// in a concave corner. Set by AO strategies (Minecraft-style corner
     /// sampling); defaults to `1.0` so meshes without AO render unaffected.
     pub ao: f32,
+    /// Per-vertex sky-light factor in `[0, 1]`. `1.0` means the vertex
+    /// sees full sky brightness; `0.0` means complete darkness. Sourced
+    /// from `Brick::light_overlay` by `bake_sky_light`. Defaults to `1.0`
+    /// so meshes for unlit bricks render at full brightness.
+    pub sky_light: f32,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -43,6 +48,6 @@ pub mod marching_cubes;
 pub mod naive;
 
 pub use dual_contouring::dual_contouring_mesh;
-pub use greedy::{bake_ao, greedy_mesh, greedy_mesh_by_material};
+pub use greedy::{bake_ao, bake_sky_light, greedy_mesh, greedy_mesh_by_material};
 pub use marching_cubes::{marching_cubes_mesh, marching_cubes_mesh_with_iso};
 pub use naive::naive_mesh;

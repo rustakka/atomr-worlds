@@ -16,6 +16,7 @@ use super::erosion::{DropletHydraulic, MacroRiverOnly};
 use super::feature_seeder::{ColumnAnchorSeeder, SeederConfig};
 use super::flora::LSystemTrees;
 use super::fluid::{CellularAutomataFlow, LatticeBoltzmannD3Q19};
+use super::light::VerticalCastWithDiffusion;
 use super::ore::BiasedRandomWalk;
 use super::placement::PoissonDiskBridson;
 use super::strata::LayeredGeology;
@@ -70,6 +71,7 @@ pub fn build_advanced() -> WorldGenConfig {
     cfg.placement = Arc::new(PoissonDiskBridson::default());
     cfg.flora = Arc::new(LSystemTrees::default());
     cfg.structures = Arc::new(Jigsaw::default());
+    cfg.sky_light = Arc::new(VerticalCastWithDiffusion::default());
     cfg
 }
 
@@ -99,6 +101,7 @@ pub fn build_showcase() -> WorldGenConfig {
     cfg.placement = Arc::new(PoissonDiskBridson::default());
     cfg.flora = Arc::new(LSystemTrees::default());
     cfg.structures = Arc::new(WaveFunctionCollapse::default());
+    cfg.sky_light = Arc::new(VerticalCastWithDiffusion::default());
     cfg
 }
 

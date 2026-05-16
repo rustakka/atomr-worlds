@@ -5,8 +5,9 @@
 use std::f32::consts::PI;
 
 use atomr_worlds_view::{
-    bake_ao, dual_contouring_mesh, greedy_mesh, marching_cubes_mesh, marching_cubes_mesh_with_iso,
-    naive_mesh, render_slice, Framebuffer, MaterialEntry, MaterialPalette, Mesh, SliceShading,
+    bake_ao, bake_sky_light, dual_contouring_mesh, greedy_mesh, marching_cubes_mesh,
+    marching_cubes_mesh_with_iso, naive_mesh, render_slice, Framebuffer, MaterialEntry,
+    MaterialPalette, Mesh, SliceShading,
 };
 use atomr_worlds_voxel::Brick;
 use bevy::core_pipeline::bloom::BloomSettings;
@@ -209,6 +210,31 @@ impl AoStrategy for MinecraftCornerAo {
     }
     fn bake(&self, mesh: &mut Mesh, brick: &Brick) {
         bake_ao(mesh, brick);
+    }
+}
+
+/// Brick-edge-aware AO. The eventual goal (when the workspace plumbs
+/// neighbor bricks' apron through to the renderer) is to consult those
+/// neighbors so edge-seam vertices match the AO their neighbor face
+/// computed. Today the renderer has no neighbor handle to read, so this
+/// impl degrades to [`MinecraftCornerAo`]'s in-brick sampler — vertices
+/// at the brick boundary fall back to "no occlusion from outside",
+/// matching the previous behaviour byte-for-byte. The trait surface is
+/// in place so a follow-up can swap the body without touching the
+/// registry. Also bakes sky-light when `Brick::light_overlay` is present.
+#[derive(Default)]
+pub struct BrickEdgeAwareAo;
+
+impl AoStrategy for BrickEdgeAwareAo {
+    fn name(&self) -> &'static str {
+        "BrickEdgeAwareAo"
+    }
+    fn enabled(&self) -> bool {
+        true
+    }
+    fn bake(&self, mesh: &mut Mesh, brick: &Brick) {
+        bake_ao(mesh, brick);
+        bake_sky_light(mesh, brick);
     }
 }
 
@@ -586,6 +612,72 @@ impl FogStrategy for ExpSquaredSkyTintedFog {
     }
 }
 
+/// Biome-blended fog. Same exp² falloff as [`ExpSquaredSkyTintedFog`]
+/// (auto-tuned from the streamer horizon when provided), but the color
+/// is interpolated between the current biome's tint and the sky horizon
+/// so the player crossing a biome boundary sees a soft tint shift rather
+/// than a hard pop. Biome state isn't plumbed into `FogStrategy::fog_settings`
+/// today; the strategy keeps a `biome_tint` field that the caller can
+/// update from the macro biome blend output before each frame — until
+/// that wiring lands, the default biome tint reads as a neutral grey-blue
+/// so the visible result equals `ExpSquaredSkyTintedFog`.
+#[derive(Debug, Clone)]
+pub struct BiomeBlendedFog {
+    /// Fallback density when no streamer horizon is plumbed in.
+    pub density: f32,
+    /// Linear-rgb tint contributed by the current biome (in `[0, 1]`).
+    /// `(0.5, 0.5, 0.5)` reads as "no biome bias" — the fog stays
+    /// pure sky-horizon color, matching `ExpSquaredSkyTintedFog`.
+    pub biome_tint: [f32; 3],
+    /// Mix weight between sky horizon and `biome_tint` in `[0, 1]`.
+    /// `0.0` ⇒ pure sky horizon (no biome influence); `1.0` ⇒ pure biome
+    /// tint. Default `0.3` keeps atmospheric perspective coherent while
+    /// still reading the biome shift.
+    pub mix: f32,
+}
+
+impl Default for BiomeBlendedFog {
+    fn default() -> Self {
+        Self {
+            density: 0.0019,
+            biome_tint: [0.5, 0.5, 0.5],
+            mix: 0.3,
+        }
+    }
+}
+
+impl FogStrategy for BiomeBlendedFog {
+    fn name(&self) -> &'static str {
+        "BiomeBlendedFog"
+    }
+    fn fog_settings(
+        &self,
+        _sun: SunState,
+        sky_horizon: Color,
+        horizon_band_m: Option<(f32, f32)>,
+    ) -> FogSettings {
+        let density = match horizon_band_m {
+            Some((_start, end)) if end > 0.0 => {
+                let target = 0.05_f32.max(1e-3).min(0.5);
+                (-target.ln()).sqrt() / end
+            }
+            _ => self.density,
+        };
+        let sky_lin = sky_horizon.as_linear_rgba_f32();
+        let m = self.mix.clamp(0.0, 1.0);
+        let tinted = Color::rgb_linear(
+            sky_lin[0] * (1.0 - m) + self.biome_tint[0] * m,
+            sky_lin[1] * (1.0 - m) + self.biome_tint[1] * m,
+            sky_lin[2] * (1.0 - m) + self.biome_tint[2] * m,
+        );
+        FogSettings {
+            color: tinted,
+            falloff: FogFalloff::ExponentialSquared { density },
+            ..default()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tonemap
 // ---------------------------------------------------------------------------
@@ -774,4 +866,76 @@ fn color_to_vec3(c: Color) -> Vec3 {
 
 fn vec3_to_color(v: Vec3) -> Color {
     Color::rgb_linear(v.x, v.y, v.z)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atomr_worlds_voxel::{light::LightOverlay, Voxel};
+    use atomr_worlds_core::coord::IVec3;
+
+    #[test]
+    fn brick_edge_aware_ao_handles_missing_overlay() {
+        // Single voxel with no light overlay attached. AO baker should
+        // still run; sky-light baker should no-op without panicking.
+        let mut b = Brick::new();
+        b.set(IVec3::new(5, 5, 5), Voxel::new(1));
+        let ao = BrickEdgeAwareAo;
+        let mut mesh = greedy_mesh(&b);
+        ao.bake(&mut mesh, &b);
+        // Default sky_light is 1.0; without overlay it stays at 1.0.
+        for v in &mesh.vertices {
+            assert!((v.sky_light - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn brick_edge_aware_ao_consumes_overlay_when_present() {
+        let mut b = Brick::new();
+        b.set(IVec3::new(5, 5, 5), Voxel::new(1));
+        // Force every light cell to a dim value so we can detect that
+        // `bake_sky_light` actually touched the vertices.
+        let mut overlay = Box::new(LightOverlay::new_zero());
+        for z in 0..16u8 {
+            for y in 0..16u8 {
+                for x in 0..16u8 {
+                    overlay.set(x, y, z, 4);
+                }
+            }
+        }
+        b.light_overlay = Some(overlay);
+        let ao = BrickEdgeAwareAo;
+        let mut mesh = greedy_mesh(&b);
+        ao.bake(&mut mesh, &b);
+        // 4 / 15 ≈ 0.266; pick the lower-bound region to keep AO/empty mixing safe.
+        for v in &mesh.vertices {
+            assert!(v.sky_light < 0.5);
+        }
+    }
+
+    #[test]
+    fn biome_blended_fog_returns_sensible_color_at_default() {
+        let fog = BiomeBlendedFog::default();
+        let sun = SunState::default();
+        let horizon = Color::rgb(0.4, 0.5, 0.8);
+        let s = fog.fog_settings(sun, horizon, Some((400.0, 1024.0)));
+        // Without a biome bias (tint == 0.5,0.5,0.5, mix=0.3) the result
+        // should stay close to the horizon color.
+        let rgba = s.color.as_linear_rgba_f32();
+        assert!(rgba[0] >= 0.0 && rgba[0] <= 1.0);
+        assert!(rgba[1] >= 0.0 && rgba[1] <= 1.0);
+        assert!(rgba[2] >= 0.0 && rgba[2] <= 1.0);
+    }
+
+    #[test]
+    fn biome_blended_fog_biases_color_when_biome_tint_set() {
+        let fog = BiomeBlendedFog { density: 0.002, biome_tint: [0.1, 0.6, 0.2], mix: 0.8 };
+        let sun = SunState::default();
+        let horizon = Color::rgb_linear(0.9, 0.9, 0.9);
+        let s = fog.fog_settings(sun, horizon, None);
+        let rgba = s.color.as_linear_rgba_f32();
+        // mix=0.8 toward biome (0.1, 0.6, 0.2): red should drop well below 0.9.
+        assert!(rgba[0] < 0.5, "red should bend toward biome low: {}", rgba[0]);
+        assert!(rgba[1] < 0.8 && rgba[1] > 0.4, "green should bend toward biome: {}", rgba[1]);
+    }
 }

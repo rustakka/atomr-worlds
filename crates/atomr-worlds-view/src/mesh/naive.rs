@@ -93,7 +93,7 @@ fn emit_face(mesh: &mut Mesh, x: i32, y: i32, z: i32, face_idx: usize, material:
     ];
     let p3 = [origin[0] + v_vec[0], origin[1] + v_vec[1], origin[2] + v_vec[2]];
     for p in [p0, p1, p2, p3] {
-        mesh.vertices.push(Vertex { pos: p, normal, material, ao: 1.0 });
+        mesh.vertices.push(Vertex { pos: p, normal, material, ao: 1.0, sky_light: 1.0 });
     }
     if positive {
         mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

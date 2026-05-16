@@ -128,10 +128,10 @@ fn mesh_with_pos_x_quad() -> MeshNode {
     let mut mesh = Mesh::default();
     // Quad at x = 5, spanning y/z in [-2, 2], normal facing -X (toward the camera).
     let n = [-1.0, 0.0, 0.0];
-    mesh.vertices.push(Vertex { pos: [5.0, -2.0, -2.0], normal: n, material: 1, ao: 1.0 });
-    mesh.vertices.push(Vertex { pos: [5.0, 2.0, -2.0], normal: n, material: 1, ao: 1.0 });
-    mesh.vertices.push(Vertex { pos: [5.0, 2.0, 2.0], normal: n, material: 1, ao: 1.0 });
-    mesh.vertices.push(Vertex { pos: [5.0, -2.0, 2.0], normal: n, material: 1, ao: 1.0 });
+    mesh.vertices.push(Vertex { pos: [5.0, -2.0, -2.0], normal: n, material: 1, ao: 1.0, sky_light: 1.0 });
+    mesh.vertices.push(Vertex { pos: [5.0, 2.0, -2.0], normal: n, material: 1, ao: 1.0, sky_light: 1.0 });
+    mesh.vertices.push(Vertex { pos: [5.0, 2.0, 2.0], normal: n, material: 1, ao: 1.0, sky_light: 1.0 });
+    mesh.vertices.push(Vertex { pos: [5.0, -2.0, 2.0], normal: n, material: 1, ao: 1.0, sky_light: 1.0 });
     mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
     MeshNode {
         id: 0,
