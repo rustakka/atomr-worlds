@@ -8,6 +8,8 @@
 use std::sync::Arc;
 
 use super::config::WorldGenConfig;
+use super::flora::{BlueNoiseGrass, LSystemTrees};
+use super::placement::{MitchellBestCandidate, PoissonDiskBridson, UniformGrid, WhiteNoise};
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -81,11 +83,35 @@ pub fn apply_worldgen_strategy_by_name(
                 cfg.flora = Arc::new(NoneFlora);
                 true
             }
+            "LSystemTrees" => {
+                cfg.flora = Arc::new(LSystemTrees::default());
+                true
+            }
+            "BlueNoiseGrass" => {
+                cfg.flora = Arc::new(BlueNoiseGrass::default());
+                true
+            }
             _ => false,
         },
         "placement" => match name {
             "None" => {
                 cfg.placement = Arc::new(NonePlacement);
+                true
+            }
+            "WhiteNoise" => {
+                cfg.placement = Arc::new(WhiteNoise::default());
+                true
+            }
+            "UniformGrid" => {
+                cfg.placement = Arc::new(UniformGrid::default());
+                true
+            }
+            "PoissonDiskBridson" => {
+                cfg.placement = Arc::new(PoissonDiskBridson::default());
+                true
+            }
+            "MitchellBestCandidate" => {
+                cfg.placement = Arc::new(MitchellBestCandidate::default());
                 true
             }
             _ => false,

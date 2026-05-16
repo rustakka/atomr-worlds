@@ -31,11 +31,14 @@ pub use macro_state::{
 };
 pub use pipeline::{
     apply_worldgen_strategy_by_name, build_advanced, build_showcase, build_vanilla,
-    BiomeBlendStrategy, BiomeMatrixStrategy, BrickPipeline, BrickWorkspace, CaveStrategy,
-    DensityFieldStrategy, ErosionStrategy, FeatureAnchor, FeatureAnchorCache, FeatureKind,
-    FeatureSeederStrategy, FloraStrategy, FluidStrategy, LayeredBrickPipeline, LayeredGenerator,
-    MonolithicTerrainPass, OreVeinStrategy, PlacementStrategy, SkyLightStrategy, StrataStrategy,
-    StructureStrategy, WorldGenConfig, WorldGenPreset, WS_APRON_EDGE,
+    BiomeBlendStrategy, BiomeMatrixStrategy, BlueNoiseGrass, BrickPipeline, BrickWorkspace,
+    CaveStrategy, DensityFieldStrategy, ErosionStrategy, FeatureAnchor, FeatureAnchorCache,
+    FeatureKind, FeatureSeederStrategy, FloraStrategy, FluidStrategy, LSystemGrammar,
+    LSystemTrees, LayeredBrickPipeline, LayeredGenerator, MitchellBestCandidate, MitchellConfig,
+    MonolithicTerrainPass, OreVeinStrategy, PlacementStrategy, PoissonDiskBridson,
+    PoissonDiskConfig, SkyLightStrategy, StrataStrategy, StructureStrategy, TurtleParams,
+    UniformGrid, UniformGridConfig, WhiteNoise, WhiteNoiseConfig, WorldGenConfig, WorldGenPreset,
+    PLACEMENT_DIM, WS_APRON_EDGE,
 };
 pub use registry::{
     default_registry, strategy_id, BuiltinSelector, GenerationPolicy, GeneratorRegistry,

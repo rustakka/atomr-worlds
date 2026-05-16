@@ -8,6 +8,8 @@
 use std::sync::Arc;
 
 use super::config::WorldGenConfig;
+use super::flora::LSystemTrees;
+use super::placement::PoissonDiskBridson;
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -30,18 +32,24 @@ pub fn build_vanilla() -> WorldGenConfig {
     }
 }
 
-/// `Advanced` opts into every paper algorithm at moderate cost. Until
-/// Steps 5–10 ship the real strategies, this is a clone of Vanilla; the
-/// `apply_worldgen_strategy_by_name` registry lets the harness DSL swap
-/// individual slots in any preset.
+/// `Advanced` opts into every paper algorithm at moderate cost. Step 9
+/// swaps in real placement + flora strategies; remaining slots still
+/// clone the Vanilla pipeline until later steps land.
 pub fn build_advanced() -> WorldGenConfig {
-    build_vanilla()
+    let mut cfg = build_vanilla();
+    cfg.placement = Arc::new(PoissonDiskBridson::default());
+    cfg.flora = Arc::new(LSystemTrees::default());
+    cfg
 }
 
-/// `Showcase` cranks every algorithm up for the visual demo. Same caveat
-/// as `Advanced` — slot-by-slot upgrades land with subsequent steps.
+/// `Showcase` cranks every algorithm up for the visual demo. Step 9 wires
+/// the same placement + flora as `Advanced`; later steps upgrade the
+/// remaining slots.
 pub fn build_showcase() -> WorldGenConfig {
-    build_vanilla()
+    let mut cfg = build_vanilla();
+    cfg.placement = Arc::new(PoissonDiskBridson::default());
+    cfg.flora = Arc::new(LSystemTrees::default());
+    cfg
 }
 
 #[cfg(test)]

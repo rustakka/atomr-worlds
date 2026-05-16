@@ -10,7 +10,9 @@
 
 pub mod anchor;
 pub mod config;
+pub mod flora;
 pub mod layered;
+pub mod placement;
 pub mod presets;
 pub mod registry;
 pub mod strategies;
@@ -19,7 +21,12 @@ pub mod workspace;
 
 pub use anchor::{FeatureAnchor, FeatureAnchorCache, FeatureKind};
 pub use config::{WorldGenConfig, WorldGenPreset};
+pub use flora::{BlueNoiseGrass, LSystemGrammar, LSystemTrees, TurtleParams};
 pub use layered::{BrickPipeline, LayeredBrickPipeline, LayeredGenerator};
+pub use placement::{
+    MitchellBestCandidate, MitchellConfig, PoissonDiskBridson, PoissonDiskConfig, UniformGrid,
+    UniformGridConfig, WhiteNoise, WhiteNoiseConfig, PLACEMENT_DIM,
+};
 pub use presets::{build_advanced, build_showcase, build_vanilla};
 pub use registry::apply_worldgen_strategy_by_name;
 pub use strategies::{
