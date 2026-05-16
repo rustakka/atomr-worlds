@@ -6,6 +6,7 @@
 
 use atomr_worlds_core::coord::IVec3;
 
+use crate::light::LightOverlay;
 use crate::voxel::Voxel;
 
 pub const BRICK_EDGE: usize = 16;
@@ -15,17 +16,27 @@ pub const BRICK_LEN: usize = BRICK_EDGE * BRICK_EDGE * BRICK_EDGE; // 4096
 pub struct Brick {
     pub voxels: Box<[Voxel; BRICK_LEN]>,
     pub nonempty_count: u16,
+    /// Optional per-brick skylight overlay (Phase 19); derived state, not
+    /// part of canonical voxel content. `None` for legacy / Vanilla bricks.
+    pub light_overlay: Option<Box<LightOverlay>>,
 }
 
 impl std::fmt::Debug for Brick {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Brick").field("nonempty_count", &self.nonempty_count).finish()
+        f.debug_struct("Brick")
+            .field("nonempty_count", &self.nonempty_count)
+            .field("light_overlay", &self.light_overlay.is_some())
+            .finish()
     }
 }
 
 impl Default for Brick {
     fn default() -> Self {
-        Self { voxels: Box::new([Voxel::EMPTY; BRICK_LEN]), nonempty_count: 0 }
+        Self {
+            voxels: Box::new([Voxel::EMPTY; BRICK_LEN]),
+            nonempty_count: 0,
+            light_overlay: None,
+        }
     }
 }
 
@@ -117,7 +128,14 @@ impl Brick {
         let voxels: &[Voxel] = bytemuck::cast_slice(voxel_bytes);
         let mut arr: Box<[Voxel; BRICK_LEN]> = Box::new([Voxel::EMPTY; BRICK_LEN]);
         arr.copy_from_slice(voxels);
-        Ok(Self { voxels: arr, nonempty_count: count })
+        Ok(Self { voxels: arr, nonempty_count: count, light_overlay: None })
+    }
+
+    /// Construct a brick with every voxel set to `v`. `light_overlay` is `None`.
+    pub fn filled(v: Voxel) -> Self {
+        let voxels = Box::new([v; BRICK_LEN]);
+        let nonempty_count = if v.is_empty() { 0 } else { BRICK_LEN as u16 };
+        Self { voxels, nonempty_count, light_overlay: None }
     }
 }
 

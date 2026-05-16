@@ -7,13 +7,19 @@
 #![warn(missing_debug_implementations)]
 
 pub mod brick;
+pub mod codec;
 pub mod error;
+pub mod light;
 pub mod octree;
+pub mod storage;
 pub mod store;
 pub mod voxel;
 
 pub use brick::{Brick, BrickDecodeError, BRICK_EDGE, BRICK_LEN};
+pub use codec::{BrickCodec, CodecError, PaletteRle, RawU16, Rle, Zlib};
 pub use error::VoxelError;
+pub use light::{LightOverlay, LIGHT_OVERLAY_BYTES};
 pub use octree::{InternalNode, NodeId, NodeKind, Octree, OCTREE_NULL};
+pub use storage::{BrickStorage, DenseBrick, SegmentedRowBrick, SvoBrick};
 pub use store::SparseVoxelStore;
 pub use voxel::Voxel;

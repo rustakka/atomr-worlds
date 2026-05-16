@@ -14,3 +14,4 @@ atomr-worlds-core = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 bytemuck = { workspace = true }
+flate2 = "1"
