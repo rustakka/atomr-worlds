@@ -7,7 +7,11 @@
 
 use std::sync::Arc;
 
+use super::biome_blend::{BufferTerrainInjected, NormalizedSparseConvolution};
+use super::biome_matrix::{VoronoiCells, WhittakerDirect2D};
 use super::config::WorldGenConfig;
+use super::density::{FloatingIslandField, Hybrid2D3D};
+use super::strata::LayeredGeology;
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -30,18 +34,28 @@ pub fn build_vanilla() -> WorldGenConfig {
     }
 }
 
-/// `Advanced` opts into every paper algorithm at moderate cost. Until
-/// Steps 5–10 ship the real strategies, this is a clone of Vanilla; the
-/// `apply_worldgen_strategy_by_name` registry lets the harness DSL swap
-/// individual slots in any preset.
+/// `Advanced` opts into the paper algorithms at moderate cost. Step 5
+/// wires density / strata / biome matrix / biome blend; later steps fill
+/// the remaining slots (caves, ore, structures, flora, sky light).
 pub fn build_advanced() -> WorldGenConfig {
-    build_vanilla()
+    let mut cfg = build_vanilla();
+    cfg.density = Arc::new(Hybrid2D3D::default());
+    cfg.strata = Arc::new(LayeredGeology::default());
+    cfg.biome_matrix = Arc::new(WhittakerDirect2D::default());
+    cfg.biome_blend = Arc::new(NormalizedSparseConvolution::default());
+    cfg
 }
 
-/// `Showcase` cranks every algorithm up for the visual demo. Same caveat
-/// as `Advanced` — slot-by-slot upgrades land with subsequent steps.
+/// `Showcase` cranks every algorithm up for the visual demo. Step 5 wires
+/// the most distinctive density (floating islands) and biome layouts
+/// (Voronoi + buffer-terrain).
 pub fn build_showcase() -> WorldGenConfig {
-    build_vanilla()
+    let mut cfg = build_vanilla();
+    cfg.density = Arc::new(FloatingIslandField::default());
+    cfg.strata = Arc::new(LayeredGeology::default());
+    cfg.biome_matrix = Arc::new(VoronoiCells::default());
+    cfg.biome_blend = Arc::new(BufferTerrainInjected::default());
+    cfg
 }
 
 #[cfg(test)]

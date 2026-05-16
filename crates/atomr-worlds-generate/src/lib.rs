@@ -31,11 +31,16 @@ pub use macro_state::{
 };
 pub use pipeline::{
     apply_worldgen_strategy_by_name, build_advanced, build_showcase, build_vanilla,
-    BiomeBlendStrategy, BiomeMatrixStrategy, BrickPipeline, BrickWorkspace, CaveStrategy,
-    DensityFieldStrategy, ErosionStrategy, FeatureAnchor, FeatureAnchorCache, FeatureKind,
-    FeatureSeederStrategy, FloraStrategy, FluidStrategy, LayeredBrickPipeline, LayeredGenerator,
-    MonolithicTerrainPass, OreVeinStrategy, PlacementStrategy, SkyLightStrategy, StrataStrategy,
-    StructureStrategy, WorldGenConfig, WorldGenPreset, WS_APRON_EDGE,
+    BiomeBlendStrategy, BiomeMatrixStrategy, BrickPipeline, BrickWorkspace, BufferTerrainConfig,
+    BufferTerrainInjected, CaveStrategy, DensityFieldStrategy, ErosionStrategy, FeatureAnchor,
+    FeatureAnchorCache, FeatureKind, FeatureSeederStrategy, FloatingIslandField,
+    FloatingIslandFieldConfig, FloraStrategy, FluidStrategy, Hard, HeightmapPlanar,
+    HeightmapPlanarConfig, Hybrid2D3D, Hybrid2D3DConfig, KrigingInterpolated, LayeredBrickPipeline,
+    LayeredGenerator, LayeredGeology, MonolithicTerrainPass, NormalizedSparseConvolution,
+    OreVeinStrategy, PerFaceWhittaker, PlacementStrategy, Pure3DOverhang, Pure3DOverhangConfig,
+    SkyLightStrategy, SparseBlendConfig, StrataConfig, StrataStrategy, StratumBand,
+    StructureStrategy, TopsoilConfig, TopsoilLayer, VoronoiCells, VoronoiCellsConfig,
+    WhittakerDirect2D, WhittakerDirect2DConfig, WorldGenConfig, WorldGenPreset, WS_APRON_EDGE,
 };
 pub use registry::{
     default_registry, strategy_id, BuiltinSelector, GenerationPolicy, GeneratorRegistry,

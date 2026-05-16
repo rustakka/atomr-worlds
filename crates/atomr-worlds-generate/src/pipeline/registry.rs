@@ -7,7 +7,11 @@
 
 use std::sync::Arc;
 
+use super::biome_blend::{BufferTerrainInjected, Hard, NormalizedSparseConvolution};
+use super::biome_matrix::{PerFaceWhittaker, VoronoiCells, WhittakerDirect2D};
 use super::config::WorldGenConfig;
+use super::density::{FloatingIslandField, HeightmapPlanar, Hybrid2D3D, Pure3DOverhang};
+use super::strata::{KrigingInterpolated, LayeredGeology, TopsoilLayer};
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -24,6 +28,22 @@ pub fn apply_worldgen_strategy_by_name(
                 cfg.density = Arc::new(MonolithicTerrainPass::default());
                 true
             }
+            "HeightmapPlanar" => {
+                cfg.density = Arc::new(HeightmapPlanar::default());
+                true
+            }
+            "Hybrid2D3D" => {
+                cfg.density = Arc::new(Hybrid2D3D::default());
+                true
+            }
+            "Pure3DOverhang" => {
+                cfg.density = Arc::new(Pure3DOverhang::default());
+                true
+            }
+            "FloatingIslandField" => {
+                cfg.density = Arc::new(FloatingIslandField::default());
+                true
+            }
             "None" => {
                 cfg.density = Arc::new(NoneDensity);
                 true
@@ -33,6 +53,18 @@ pub fn apply_worldgen_strategy_by_name(
         "strata" => match name {
             "MonolithicTerrainPass" => {
                 cfg.strata = Arc::new(MonolithicTerrainPass::default());
+                true
+            }
+            "TopsoilLayer" => {
+                cfg.strata = Arc::new(TopsoilLayer::default());
+                true
+            }
+            "LayeredGeology" => {
+                cfg.strata = Arc::new(LayeredGeology::default());
+                true
+            }
+            "KrigingInterpolated" => {
+                cfg.strata = Arc::new(KrigingInterpolated::default());
                 true
             }
             "None" => {
@@ -91,6 +123,18 @@ pub fn apply_worldgen_strategy_by_name(
             _ => false,
         },
         "biome_matrix" => match name {
+            "PerFaceWhittaker" => {
+                cfg.biome_matrix = Arc::new(PerFaceWhittaker::default());
+                true
+            }
+            "WhittakerDirect2D" => {
+                cfg.biome_matrix = Arc::new(WhittakerDirect2D::default());
+                true
+            }
+            "VoronoiCells" => {
+                cfg.biome_matrix = Arc::new(VoronoiCells::default());
+                true
+            }
             "None" => {
                 cfg.biome_matrix = Arc::new(NoneBiomeMatrix);
                 true
@@ -98,6 +142,18 @@ pub fn apply_worldgen_strategy_by_name(
             _ => false,
         },
         "biome_blend" => match name {
+            "Hard" => {
+                cfg.biome_blend = Arc::new(Hard::default());
+                true
+            }
+            "NormalizedSparseConvolution" => {
+                cfg.biome_blend = Arc::new(NormalizedSparseConvolution::default());
+                true
+            }
+            "BufferTerrainInjected" => {
+                cfg.biome_blend = Arc::new(BufferTerrainInjected::default());
+                true
+            }
             "None" => {
                 cfg.biome_blend = Arc::new(NoneBiomeBlend);
                 true
