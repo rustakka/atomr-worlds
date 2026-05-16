@@ -8,6 +8,9 @@
 use std::sync::Arc;
 
 use super::config::WorldGenConfig;
+use super::erosion::{DropletHydraulic, MacroRiverOnly};
+use super::fluid::{CellularAutomataFlow, LatticeBoltzmannD3Q19, Static};
+use super::ore::{BiasedRandomWalk, ThresholdNoise};
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -53,6 +56,14 @@ pub fn apply_worldgen_strategy_by_name(
                 cfg.ore = Arc::new(NoneOre);
                 true
             }
+            "ThresholdNoise" => {
+                cfg.ore = Arc::new(ThresholdNoise::default());
+                true
+            }
+            "BiasedRandomWalk" => {
+                cfg.ore = Arc::new(BiasedRandomWalk::default());
+                true
+            }
             _ => false,
         },
         "erosion" => match name {
@@ -60,11 +71,31 @@ pub fn apply_worldgen_strategy_by_name(
                 cfg.erosion = Arc::new(NoneErosion);
                 true
             }
+            "MacroRiverOnly" => {
+                cfg.erosion = Arc::new(MacroRiverOnly);
+                true
+            }
+            "DropletHydraulic" => {
+                cfg.erosion = Arc::new(DropletHydraulic::default());
+                true
+            }
             _ => false,
         },
         "fluid" => match name {
             "None" => {
                 cfg.fluid = Arc::new(NoneFluid);
+                true
+            }
+            "Static" => {
+                cfg.fluid = Arc::new(Static::default());
+                true
+            }
+            "CellularAutomataFlow" => {
+                cfg.fluid = Arc::new(CellularAutomataFlow::default());
+                true
+            }
+            "LatticeBoltzmannD3Q19" => {
+                cfg.fluid = Arc::new(LatticeBoltzmannD3Q19::default());
                 true
             }
             _ => false,

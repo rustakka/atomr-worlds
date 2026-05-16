@@ -8,6 +8,9 @@
 use std::sync::Arc;
 
 use super::config::WorldGenConfig;
+use super::erosion::{DropletHydraulic, MacroRiverOnly};
+use super::fluid::{CellularAutomataFlow, LatticeBoltzmannD3Q19};
+use super::ore::BiasedRandomWalk;
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -18,6 +21,8 @@ pub fn build_vanilla() -> WorldGenConfig {
         strata: monolith,
         caves: Arc::new(NoneCaves),
         ore: Arc::new(NoneOre),
+        // Vanilla keeps the river carve inside MonolithicTerrainPass; the
+        // erosion slot stays a no-op so the byte-equality test is unaffected.
         erosion: Arc::new(NoneErosion),
         fluid: Arc::new(NoneFluid),
         structures: Arc::new(NoneStructures),
@@ -30,18 +35,26 @@ pub fn build_vanilla() -> WorldGenConfig {
     }
 }
 
-/// `Advanced` opts into every paper algorithm at moderate cost. Until
-/// Steps 5–10 ship the real strategies, this is a clone of Vanilla; the
-/// `apply_worldgen_strategy_by_name` registry lets the harness DSL swap
-/// individual slots in any preset.
+/// `Advanced` opts into every paper algorithm at moderate cost. Step 7
+/// wires ore + erosion + fluid; subsequent steps fill out the remaining
+/// slots.
 pub fn build_advanced() -> WorldGenConfig {
-    build_vanilla()
+    let mut cfg = build_vanilla();
+    cfg.ore = Arc::new(BiasedRandomWalk::default());
+    cfg.erosion = Arc::new(MacroRiverOnly);
+    cfg.fluid = Arc::new(CellularAutomataFlow::default());
+    cfg
 }
 
-/// `Showcase` cranks every algorithm up for the visual demo. Same caveat
-/// as `Advanced` — slot-by-slot upgrades land with subsequent steps.
+/// `Showcase` cranks every algorithm up for the visual demo. Step 7
+/// wires the heavyweight ore + erosion + fluid impls; subsequent steps
+/// fill out the remaining slots.
 pub fn build_showcase() -> WorldGenConfig {
-    build_vanilla()
+    let mut cfg = build_vanilla();
+    cfg.ore = Arc::new(BiasedRandomWalk::default());
+    cfg.erosion = Arc::new(DropletHydraulic::default());
+    cfg.fluid = Arc::new(LatticeBoltzmannD3Q19::default());
+    cfg
 }
 
 #[cfg(test)]

@@ -10,7 +10,10 @@
 
 pub mod anchor;
 pub mod config;
+pub mod erosion;
+pub mod fluid;
 pub mod layered;
+pub mod ore;
 pub mod presets;
 pub mod registry;
 pub mod strategies;
@@ -19,7 +22,14 @@ pub mod workspace;
 
 pub use anchor::{FeatureAnchor, FeatureAnchorCache, FeatureKind};
 pub use config::{WorldGenConfig, WorldGenPreset};
+pub use erosion::{DropletConfig, DropletHydraulic, MacroRiverOnly, DROPLET_DIM};
+pub use fluid::{
+    CaFlowConfig, CellularAutomataFlow, LatticeBoltzmannD3Q19, LbmConfig, Static, StaticConfig,
+};
 pub use layered::{BrickPipeline, LayeredBrickPipeline, LayeredGenerator};
+pub use ore::{
+    BiasedRandomWalk, BiasedRandomWalkConfig, OreVeinConfig, StrataBias, ThresholdNoise,
+};
 pub use presets::{build_advanced, build_showcase, build_vanilla};
 pub use registry::apply_worldgen_strategy_by_name;
 pub use strategies::{
