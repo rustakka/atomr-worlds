@@ -32,10 +32,11 @@ pub use macro_state::{
 pub use pipeline::{
     apply_worldgen_strategy_by_name, build_advanced, build_showcase, build_vanilla,
     BiomeBlendStrategy, BiomeMatrixStrategy, BrickPipeline, BrickWorkspace, CaveStrategy,
-    DensityFieldStrategy, ErosionStrategy, FeatureAnchor, FeatureAnchorCache, FeatureKind,
-    FeatureSeederStrategy, FloraStrategy, FluidStrategy, LayeredBrickPipeline, LayeredGenerator,
-    MonolithicTerrainPass, OreVeinStrategy, PlacementStrategy, SkyLightStrategy, StrataStrategy,
-    StructureStrategy, WorldGenConfig, WorldGenPreset, WS_APRON_EDGE,
+    CellularAutomata3D, ColumnAnchorSeeder, DensityFieldStrategy, ErosionStrategy, FeatureAnchor,
+    FeatureAnchorCache, FeatureKind, FeatureSeederStrategy, FloraStrategy, FluidStrategy,
+    IsosurfaceIntersection, LayeredBrickPipeline, LayeredGenerator, MonolithicTerrainPass,
+    OreVeinStrategy, PerlinWorm, PlacementStrategy, SeederConfig, SkyLightStrategy, StrataStrategy,
+    StructureStrategy, WorldGenConfig, WorldGenPreset, WorleyThreshold, FEATURE_DIM, WS_APRON_EDGE,
 };
 pub use registry::{
     default_registry, strategy_id, BuiltinSelector, GenerationPolicy, GeneratorRegistry,

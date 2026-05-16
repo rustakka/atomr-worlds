@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
+use super::caves::{CellularAutomata3D, IsosurfaceIntersection};
 use super::config::WorldGenConfig;
+use super::feature_seeder::{ColumnAnchorSeeder, SeederConfig};
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -30,18 +32,40 @@ pub fn build_vanilla() -> WorldGenConfig {
     }
 }
 
-/// `Advanced` opts into every paper algorithm at moderate cost. Until
-/// Steps 5–10 ship the real strategies, this is a clone of Vanilla; the
-/// `apply_worldgen_strategy_by_name` registry lets the harness DSL swap
-/// individual slots in any preset.
+/// `Advanced` opts into every paper algorithm at moderate cost. Step 6
+/// switches caves from the legacy Worley path (still bundled inside
+/// `MonolithicTerrainPass` for Vanilla) to a 3-D cellular-automata carver,
+/// and enables the column-anchor seeder so worm / ore / structure / flora
+/// passes have anchors to consume even when each individual stage is still
+/// `None`.
 pub fn build_advanced() -> WorldGenConfig {
-    build_vanilla()
+    let mut cfg = build_vanilla();
+    cfg.caves = Arc::new(CellularAutomata3D::default());
+    cfg.feature_seeder = Arc::new(ColumnAnchorSeeder::new(SeederConfig {
+        worm_density: 1.0,
+        ore_density: 1.0,
+        structure_density: 0.25,
+        flora_tree_density: 1.0,
+        ..Default::default()
+    }));
+    cfg
 }
 
-/// `Showcase` cranks every algorithm up for the visual demo. Same caveat
-/// as `Advanced` — slot-by-slot upgrades land with subsequent steps.
+/// `Showcase` cranks every algorithm up for the visual demo. Step 6 wires
+/// the cheese/spaghetti/noodle isosurface carver plus a high-density column
+/// seeder.
 pub fn build_showcase() -> WorldGenConfig {
-    build_vanilla()
+    let mut cfg = build_vanilla();
+    cfg.caves = Arc::new(IsosurfaceIntersection::default());
+    cfg.feature_seeder = Arc::new(ColumnAnchorSeeder::new(SeederConfig {
+        worm_density: 2.0,
+        ore_density: 2.0,
+        structure_density: 0.5,
+        flora_tree_density: 2.0,
+        floating_island_density: 0.25,
+        ..Default::default()
+    }));
+    cfg
 }
 
 #[cfg(test)]
