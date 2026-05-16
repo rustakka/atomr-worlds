@@ -7,12 +7,16 @@
 
 use std::sync::Arc;
 
+use super::biome_blend::{BufferTerrainInjected, NormalizedSparseConvolution};
+use super::biome_matrix::{VoronoiCells, WhittakerDirect2D};
 use super::caves::{CellularAutomata3D, IsosurfaceIntersection};
 use super::config::WorldGenConfig;
+use super::density::{FloatingIslandField, Hybrid2D3D};
 use super::erosion::{DropletHydraulic, MacroRiverOnly};
 use super::feature_seeder::{ColumnAnchorSeeder, SeederConfig};
 use super::fluid::{CellularAutomataFlow, LatticeBoltzmannD3Q19};
 use super::ore::BiasedRandomWalk;
+use super::strata::LayeredGeology;
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -37,13 +41,18 @@ pub fn build_vanilla() -> WorldGenConfig {
     }
 }
 
-/// `Advanced` opts into every paper algorithm at moderate cost. Caves
-/// swap from the legacy Worley path (still bundled inside
-/// `MonolithicTerrainPass` for Vanilla) to a 3-D cellular-automata
-/// carver. The column-anchor seeder feeds ore / structure / flora
-/// passes. Ore + erosion + fluid use the lighter-weight CPU impls.
+/// `Advanced` opts into every paper algorithm at moderate cost. Density
+/// becomes hybrid 2D/3D, strata is layered geology, biome matrix is
+/// direct 2D Whittaker with sparse-convolution blend, caves use 3-D
+/// CA, ore is biased random walk, erosion is macro-river only, and
+/// fluid is CA flow. The column-anchor seeder feeds the cross-brick
+/// stages.
 pub fn build_advanced() -> WorldGenConfig {
     let mut cfg = build_vanilla();
+    cfg.density = Arc::new(Hybrid2D3D::default());
+    cfg.strata = Arc::new(LayeredGeology::default());
+    cfg.biome_matrix = Arc::new(WhittakerDirect2D::default());
+    cfg.biome_blend = Arc::new(NormalizedSparseConvolution::default());
     cfg.caves = Arc::new(CellularAutomata3D::default());
     cfg.feature_seeder = Arc::new(ColumnAnchorSeeder::new(SeederConfig {
         worm_density: 1.0,
@@ -58,12 +67,16 @@ pub fn build_advanced() -> WorldGenConfig {
     cfg
 }
 
-/// `Showcase` cranks every algorithm up for the visual demo. Caves use
-/// the cheese/spaghetti/noodle isosurface carver, the seeder is
-/// dense, and the heavyweight droplet erosion + D3Q19 lattice fluid
-/// run on every brick.
+/// `Showcase` cranks every algorithm up for the visual demo. Floating
+/// island density, Voronoi + buffer-terrain biomes, cheese/spaghetti/
+/// noodle isosurface caves, dense column-anchor seeder, biased-random-
+/// walk ore, droplet hydraulic erosion, and D3Q19 lattice fluid.
 pub fn build_showcase() -> WorldGenConfig {
     let mut cfg = build_vanilla();
+    cfg.density = Arc::new(FloatingIslandField::default());
+    cfg.strata = Arc::new(LayeredGeology::default());
+    cfg.biome_matrix = Arc::new(VoronoiCells::default());
+    cfg.biome_blend = Arc::new(BufferTerrainInjected::default());
     cfg.caves = Arc::new(IsosurfaceIntersection::default());
     cfg.feature_seeder = Arc::new(ColumnAnchorSeeder::new(SeederConfig {
         worm_density: 2.0,
