@@ -1,56 +1,22 @@
 //! Greedy meshing of a [`Brick`] into axis-aligned face quads.
 //!
-//! For each of the six face directions we sweep the brick layer by layer and
-//! merge contiguous coplanar quads with the same material. The output is a
-//! flat-shaded triangle mesh with per-vertex position + normal + material id.
-//! Vertex count for a worst-case checkerboard is bounded by `3 * BRICK_LEN`
-//! (one triangle per nonempty face per voxel); empty bricks produce zero
-//! geometry.
+//! Sweeps each face direction layer-by-layer and coalesces contiguous
+//! coplanar same-material quads into the largest axis-aligned rectangle.
+//! Worst-case vertex count for a checkerboard is bounded by
+//! `3 * BRICK_LEN`; empty bricks produce zero geometry.
 
 use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_voxel::{Brick, BRICK_EDGE};
 
-#[derive(Copy, Clone, Debug)]
-pub struct Vertex {
-    pub pos: [f32; 3],
-    pub normal: [f32; 3],
-    pub material: u16,
-    /// Per-vertex ambient-occlusion factor in `[0, 1]`. `1.0` means
-    /// unobstructed (no corner occlusion); `< 1.0` means the vertex is
-    /// in a concave corner. Set by AO strategies (Minecraft-style corner
-    /// sampling); defaults to `1.0` so meshes without AO render unaffected.
-    pub ao: f32,
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct Quad {
-    pub origin: [f32; 3], // bottom-left corner in face's UV frame
-    pub u: [f32; 3],
-    pub v: [f32; 3],
-    pub normal: [f32; 3],
-    pub material: u16,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Mesh {
-    pub vertices: Vec<Vertex>,
-    pub indices: Vec<u32>,
-}
-
-impl Mesh {
-    pub fn triangle_count(&self) -> usize {
-        self.indices.len() / 3
-    }
-}
+use super::{Mesh, Vertex};
 
 const EDGE: usize = BRICK_EDGE;
 
-/// Six face directions, indexed by axis (0=x, 1=y, 2=z) and sign (0=−, 1=+).
 const FACE_DIRS: [[i32; 3]; 6] = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]];
 
 fn material_at(brick: &Brick, x: i32, y: i32, z: i32) -> u16 {
     if x < 0 || y < 0 || z < 0 || x >= EDGE as i32 || y >= EDGE as i32 || z >= EDGE as i32 {
-        return 0; // treat OOB as empty so brick boundaries emit faces
+        return 0;
     }
     brick.get(IVec3::new(x as i64, y as i64, z as i64)).0
 }
@@ -90,7 +56,6 @@ pub fn greedy_mesh_by_material(brick: &Brick) -> std::collections::HashMap<u16, 
         let v0 = merged.vertices[i0];
         let v1 = merged.vertices[i1];
         let v2 = merged.vertices[i2];
-        // All three vertices of a greedy quad share the same material; key on v0.
         let bucket = split.entry(v0.material).or_default();
         let base = bucket.vertices.len() as u32;
         bucket.vertices.push(v0);
@@ -112,22 +77,17 @@ fn meshing_axis(brick: &Brick, face_idx: usize, mesh: &mut Mesh) {
     };
     let positive = dir[axis] > 0;
 
-    // u, v are the in-plane axes; their ordering is picked so
-    // `u × v == +axis` (right-handed). For axis=1 (Y faces) the natural
-    // (0, 2) ordering gives `X × Z = -Y`, which would back-face-cull top
-    // faces — so we use (2, 0) instead to produce `Z × X = +Y`. With
-    // this rule, the positive-axis winding (`p0, p1, p2`) is always CCW
-    // when viewed from outside the face, matching Bevy's default
-    // `FrontFace::Ccw` / `Cull::Back` so all six face directions render.
+    // Pick (u, v) so `u × v = +axis` (right-handed). For axis=1 (Y)
+    // the natural (X, Z) order gives `X × Z = -Y`, which back-face-culls
+    // top faces — use (Z, X) so positive-axis winding is always CCW
+    // viewed from outside.
     let (u_axis, v_axis) = match axis {
-        0 => (1, 2), // Y × Z = +X
-        1 => (2, 0), // Z × X = +Y
-        _ => (0, 1), // X × Y = +Z
+        0 => (1, 2),
+        1 => (2, 0),
+        _ => (0, 1),
     };
 
     for layer in 0..EDGE as i32 {
-        // Build a (u, v) mask of the materials whose face points along `dir`
-        // at this layer.
         let mut mask = vec![0u16; EDGE * EDGE];
         for vi in 0..EDGE as i32 {
             for ui in 0..EDGE as i32 {
@@ -135,9 +95,6 @@ fn meshing_axis(brick: &Brick, face_idx: usize, mesh: &mut Mesh) {
                 coord[axis] = layer;
                 coord[u_axis] = ui;
                 coord[v_axis] = vi;
-                // `near` is the solid voxel that owns the face; `far` sits on
-                // the empty side. For both signs, the face exists when `near
-                // != 0 && far == 0`.
                 let near = material_at(brick, coord[0], coord[1], coord[2]);
                 let mut far_coord = coord;
                 far_coord[axis] = layer + if positive { 1 } else { -1 };
@@ -148,7 +105,6 @@ fn meshing_axis(brick: &Brick, face_idx: usize, mesh: &mut Mesh) {
             }
         }
 
-        // Greedy merge of contiguous same-material runs in the mask.
         let mut vi = 0usize;
         while vi < EDGE {
             let mut ui = 0usize;
@@ -158,12 +114,10 @@ fn meshing_axis(brick: &Brick, face_idx: usize, mesh: &mut Mesh) {
                     ui += 1;
                     continue;
                 }
-                // Extend along u.
                 let mut w = 1usize;
                 while ui + w < EDGE && mask[vi * EDGE + ui + w] == m {
                     w += 1;
                 }
-                // Extend along v.
                 let mut h = 1usize;
                 'h: while vi + h < EDGE {
                     for k in 0..w {
@@ -173,9 +127,7 @@ fn meshing_axis(brick: &Brick, face_idx: usize, mesh: &mut Mesh) {
                     }
                     h += 1;
                 }
-                // Emit quad.
                 emit_quad(mesh, axis, positive, layer, ui, vi, w, h, m, u_axis, v_axis);
-                // Zero the consumed region.
                 for j in 0..h {
                     for i in 0..w {
                         mask[(vi + j) * EDGE + ui + i] = 0;
@@ -225,8 +177,6 @@ fn emit_quad(
     for p in [p0, p1, p2, p3] {
         mesh.vertices.push(Vertex { pos: p, normal, material, ao: 1.0 });
     }
-    // Wind so the normal faces "outwards". Flip when the face points along the
-    // negative axis so back-face culling stays consistent.
     if positive {
         mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     } else {
@@ -242,10 +192,6 @@ fn emit_quad(
 /// solid. Greedy merging means the merged quad's 4 corners pick up AO
 /// from voxels just outside the quad's extent — the interior of the
 /// quad gets a bilinear gradient via Bevy's vertex-color interpolation.
-///
-/// This is intentionally a separate pass from [`greedy_mesh`] so AO is
-/// opt-in (the [`AoStrategy`](https://docs.rs/) pattern client-side) and
-/// the greedy meshing path stays minimal.
 pub fn bake_ao(mesh: &mut Mesh, brick: &Brick) {
     for v in &mut mesh.vertices {
         v.ao = compute_vertex_ao(brick, v);
@@ -267,8 +213,6 @@ fn compute_vertex_ao(brick: &Brick, v: &Vertex) -> f32 {
         1 => (0, 2),
         _ => (0, 1),
     };
-    // The vertex sits at integer brick-local coordinates. The "air
-    // layer" is the voxel layer on the empty side of the face.
     let layer_air = if positive {
         v.pos[face_axis] as i32
     } else {
@@ -283,9 +227,6 @@ fn compute_vertex_ao(brick: &Brick, v: &Vertex) -> f32 {
         c[v_axis] = v_pos + dv;
         material_at(brick, c[0], c[1], c[2]) != 0
     };
-    // The 4 air-side voxels touching this corner. One of them is the
-    // owner's air-side neighbor (always 0 by construction); the others
-    // contribute to occlusion. Max occlusion is 3.
     let occ = sample(-1, -1) as u8
         + sample(0, -1) as u8
         + sample(-1, 0) as u8
@@ -317,7 +258,6 @@ mod tests {
         let mut b = Brick::new();
         b.set(IVec3::new(5, 5, 5), Voxel::new(1));
         let m = greedy_mesh(&b);
-        // Six faces → six quads → 24 vertices, 36 indices.
         assert_eq!(m.vertices.len(), 24);
         assert_eq!(m.indices.len(), 36);
     }
@@ -333,27 +273,17 @@ mod tests {
             }
         }
         let m = greedy_mesh(&b);
-        // Six faces, each a 16×16 merged quad (4 vertices, 6 indices) → 24 verts, 36 indices.
         assert_eq!(m.vertices.len(), 24, "expected 6 merged quads, got {} verts", m.vertices.len());
         assert_eq!(m.indices.len(), 36);
     }
 
     #[test]
     fn all_six_face_directions_wind_outward() {
-        // For each of the 6 face directions, build a brick where only
-        // the face along that direction is exposed and verify that the
-        // first triangle's geometric normal (from CCW cross product)
-        // points the same way as the stored vertex normal. Catches the
-        // axis-1 (Y) handedness bug that previously back-face-culled
-        // every top + bottom face under Bevy's default Cull::Back.
         for face_idx in 0..6 {
-            // Single voxel in the middle so every face is exposed; pick
-            // one face's triangles via the stored normal.
             let mut b = Brick::new();
             b.set(IVec3::new(8, 8, 8), Voxel::new(1));
             let m = greedy_mesh(&b);
             let target_normal = FACE_DIRS[face_idx];
-            // Locate the first triangle whose v0.normal matches target.
             let mut found = false;
             let mut tri = 0;
             while tri + 2 < m.indices.len() {
@@ -414,8 +344,6 @@ mod tests {
         }
         let m = greedy_mesh(&b);
         assert!(!m.vertices.is_empty());
-        // Each solid voxel exposes all 6 faces in a checkerboard pattern.
-        // 16^3 / 2 = 2048 solid voxels × 6 faces × 4 verts = 49152.
         assert_eq!(m.vertices.len(), 2048 * 6 * 4);
     }
 }
