@@ -20,6 +20,7 @@ use super::ore::BiasedRandomWalk;
 use super::placement::PoissonDiskBridson;
 use super::strata::LayeredGeology;
 use super::strategies::*;
+use super::structures::{Jigsaw, WaveFunctionCollapse};
 use super::vanilla::MonolithicTerrainPass;
 
 pub fn build_vanilla() -> WorldGenConfig {
@@ -68,6 +69,7 @@ pub fn build_advanced() -> WorldGenConfig {
     cfg.fluid = Arc::new(CellularAutomataFlow::default());
     cfg.placement = Arc::new(PoissonDiskBridson::default());
     cfg.flora = Arc::new(LSystemTrees::default());
+    cfg.structures = Arc::new(Jigsaw::default());
     cfg
 }
 
@@ -96,6 +98,7 @@ pub fn build_showcase() -> WorldGenConfig {
     cfg.fluid = Arc::new(LatticeBoltzmannD3Q19::default());
     cfg.placement = Arc::new(PoissonDiskBridson::default());
     cfg.flora = Arc::new(LSystemTrees::default());
+    cfg.structures = Arc::new(WaveFunctionCollapse::default());
     cfg
 }
 

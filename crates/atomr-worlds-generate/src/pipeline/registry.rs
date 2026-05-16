@@ -20,6 +20,7 @@ use super::ore::{BiasedRandomWalk, ThresholdNoise};
 use super::placement::{MitchellBestCandidate, PoissonDiskBridson, UniformGrid, WhiteNoise};
 use super::strata::{KrigingInterpolated, LayeredGeology, TopsoilLayer};
 use super::strategies::*;
+use super::structures::{Jigsaw, QwfcClassicalSim, WaveFunctionCollapse};
 use super::vanilla::MonolithicTerrainPass;
 
 /// Apply a strategy by `(slot, name)`. Returns `true` if the slot+name was
@@ -155,6 +156,18 @@ pub fn apply_worldgen_strategy_by_name(
         "structures" => match name {
             "None" => {
                 cfg.structures = Arc::new(NoneStructures);
+                true
+            }
+            "WaveFunctionCollapse" => {
+                cfg.structures = Arc::new(WaveFunctionCollapse::default());
+                true
+            }
+            "Jigsaw" => {
+                cfg.structures = Arc::new(Jigsaw::default());
+                true
+            }
+            "QwfcClassicalSim" => {
+                cfg.structures = Arc::new(QwfcClassicalSim::default());
                 true
             }
             _ => false,

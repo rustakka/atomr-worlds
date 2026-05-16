@@ -25,6 +25,7 @@ pub mod presets;
 pub mod registry;
 pub mod strata;
 pub mod strategies;
+pub mod structures;
 pub mod vanilla;
 pub mod workspace;
 
@@ -65,6 +66,10 @@ pub use strategies::{
     BiomeBlendStrategy, BiomeMatrixStrategy, CaveStrategy, DensityFieldStrategy, ErosionStrategy,
     FeatureSeederStrategy, FloraStrategy, FluidStrategy, OreVeinStrategy, PlacementStrategy,
     SkyLightStrategy, StrataStrategy, StructureStrategy,
+};
+pub use structures::{
+    Jigsaw, JigsawConfig, JigsawTag, QwfcClassicalSim, TileDef, TileGeometry, TileSet,
+    WaveFunctionCollapse, WfcConfig,
 };
 pub use vanilla::MonolithicTerrainPass;
 pub use workspace::{BrickWorkspace, WS_APRON_EDGE};
