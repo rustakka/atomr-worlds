@@ -12,7 +12,13 @@
 pub mod cuda;
 
 #[cfg(feature = "cuda")]
+pub mod strategy_kernels;
+
+#[cfg(feature = "cuda")]
 pub use cuda::{CudaAccelerator, CudaError};
+
+#[cfg(feature = "cuda")]
+pub use strategy_kernels::{ParityCase, StrategyKernel, PARITY_CASES};
 
 use atomr_worlds_core::coord::IVec3;
 use atomr_worlds_generate::BrickGenerator;
