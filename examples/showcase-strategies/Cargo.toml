@@ -1,0 +1,16 @@
+[package]
+name = "showcase-strategies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "showcase-strategies"
+path = "src/main.rs"
+
+[dependencies]
+atomr-worlds-core     = { workspace = true }
+atomr-worlds-voxel    = { workspace = true }
+atomr-worlds-generate = { workspace = true }

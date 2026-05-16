@@ -31,12 +31,16 @@ pub use macro_state::{
 };
 pub use pipeline::{
     apply_worldgen_strategy_by_name, build_advanced, build_showcase, build_vanilla,
-    BiomeBlendStrategy, BiomeMatrixStrategy, BrickPipeline, BrickWorkspace, CaveStrategy,
-    CellularAutomata3D, ColumnAnchorSeeder, DensityFieldStrategy, ErosionStrategy, FeatureAnchor,
-    FeatureAnchorCache, FeatureKind, FeatureSeederStrategy, FloraStrategy, FluidStrategy,
-    IsosurfaceIntersection, LayeredBrickPipeline, LayeredGenerator, MonolithicTerrainPass,
-    OreVeinStrategy, PerlinWorm, PlacementStrategy, SeederConfig, SkyLightStrategy, StrataStrategy,
-    StructureStrategy, WorldGenConfig, WorldGenPreset, WorleyThreshold, FEATURE_DIM, WS_APRON_EDGE,
+    BiasedRandomWalk, BiasedRandomWalkConfig, BiomeBlendStrategy, BiomeMatrixStrategy,
+    BrickPipeline, BrickWorkspace, CaFlowConfig, CaveStrategy, CellularAutomata3D,
+    CellularAutomataFlow, ColumnAnchorSeeder, DensityFieldStrategy, DropletConfig,
+    DropletHydraulic, ErosionStrategy, FeatureAnchor, FeatureAnchorCache, FeatureKind,
+    FeatureSeederStrategy, FloraStrategy, FluidStrategy, IsosurfaceIntersection,
+    LatticeBoltzmannD3Q19, LayeredBrickPipeline, LayeredGenerator, LbmConfig, MacroRiverOnly,
+    MonolithicTerrainPass, OreVeinConfig, OreVeinStrategy, PerlinWorm, PlacementStrategy,
+    SeederConfig, SkyLightStrategy, Static, StaticConfig, StrataBias, StrataStrategy,
+    StructureStrategy, ThresholdNoise, WorldGenConfig, WorldGenPreset, WorleyThreshold,
+    DROPLET_DIM, FEATURE_DIM, WS_APRON_EDGE,
 };
 pub use registry::{
     default_registry, strategy_id, BuiltinSelector, GenerationPolicy, GeneratorRegistry,

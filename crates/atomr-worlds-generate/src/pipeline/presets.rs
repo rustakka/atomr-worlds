@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use super::caves::{CellularAutomata3D, IsosurfaceIntersection};
 use super::config::WorldGenConfig;
+use super::erosion::{DropletHydraulic, MacroRiverOnly};
 use super::feature_seeder::{ColumnAnchorSeeder, SeederConfig};
+use super::fluid::{CellularAutomataFlow, LatticeBoltzmannD3Q19};
+use super::ore::BiasedRandomWalk;
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
 
@@ -20,6 +23,8 @@ pub fn build_vanilla() -> WorldGenConfig {
         strata: monolith,
         caves: Arc::new(NoneCaves),
         ore: Arc::new(NoneOre),
+        // Vanilla keeps the river carve inside MonolithicTerrainPass; the
+        // erosion slot stays a no-op so the byte-equality test is unaffected.
         erosion: Arc::new(NoneErosion),
         fluid: Arc::new(NoneFluid),
         structures: Arc::new(NoneStructures),
@@ -32,12 +37,11 @@ pub fn build_vanilla() -> WorldGenConfig {
     }
 }
 
-/// `Advanced` opts into every paper algorithm at moderate cost. Step 6
-/// switches caves from the legacy Worley path (still bundled inside
-/// `MonolithicTerrainPass` for Vanilla) to a 3-D cellular-automata carver,
-/// and enables the column-anchor seeder so worm / ore / structure / flora
-/// passes have anchors to consume even when each individual stage is still
-/// `None`.
+/// `Advanced` opts into every paper algorithm at moderate cost. Caves
+/// swap from the legacy Worley path (still bundled inside
+/// `MonolithicTerrainPass` for Vanilla) to a 3-D cellular-automata
+/// carver. The column-anchor seeder feeds ore / structure / flora
+/// passes. Ore + erosion + fluid use the lighter-weight CPU impls.
 pub fn build_advanced() -> WorldGenConfig {
     let mut cfg = build_vanilla();
     cfg.caves = Arc::new(CellularAutomata3D::default());
@@ -48,12 +52,16 @@ pub fn build_advanced() -> WorldGenConfig {
         flora_tree_density: 1.0,
         ..Default::default()
     }));
+    cfg.ore = Arc::new(BiasedRandomWalk::default());
+    cfg.erosion = Arc::new(MacroRiverOnly);
+    cfg.fluid = Arc::new(CellularAutomataFlow::default());
     cfg
 }
 
-/// `Showcase` cranks every algorithm up for the visual demo. Step 6 wires
-/// the cheese/spaghetti/noodle isosurface carver plus a high-density column
-/// seeder.
+/// `Showcase` cranks every algorithm up for the visual demo. Caves use
+/// the cheese/spaghetti/noodle isosurface carver, the seeder is
+/// dense, and the heavyweight droplet erosion + D3Q19 lattice fluid
+/// run on every brick.
 pub fn build_showcase() -> WorldGenConfig {
     let mut cfg = build_vanilla();
     cfg.caves = Arc::new(IsosurfaceIntersection::default());
@@ -65,6 +73,9 @@ pub fn build_showcase() -> WorldGenConfig {
         floating_island_density: 0.25,
         ..Default::default()
     }));
+    cfg.ore = Arc::new(BiasedRandomWalk::default());
+    cfg.erosion = Arc::new(DropletHydraulic::default());
+    cfg.fluid = Arc::new(LatticeBoltzmannD3Q19::default());
     cfg
 }
 
