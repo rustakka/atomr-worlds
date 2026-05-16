@@ -16,9 +16,11 @@ pub mod config;
 pub mod density;
 pub mod erosion;
 pub mod feature_seeder;
+pub mod flora;
 pub mod fluid;
 pub mod layered;
 pub mod ore;
+pub mod placement;
 pub mod presets;
 pub mod registry;
 pub mod strata;
@@ -42,12 +44,17 @@ pub use density::{
 };
 pub use erosion::{DropletConfig, DropletHydraulic, MacroRiverOnly, DROPLET_DIM};
 pub use feature_seeder::{ColumnAnchorSeeder, SeederConfig, FEATURE_DIM};
+pub use flora::{BlueNoiseGrass, LSystemGrammar, LSystemTrees, TurtleParams};
 pub use fluid::{
     CaFlowConfig, CellularAutomataFlow, LatticeBoltzmannD3Q19, LbmConfig, Static, StaticConfig,
 };
 pub use layered::{BrickPipeline, LayeredBrickPipeline, LayeredGenerator};
 pub use ore::{
     BiasedRandomWalk, BiasedRandomWalkConfig, OreVeinConfig, StrataBias, ThresholdNoise,
+};
+pub use placement::{
+    MitchellBestCandidate, MitchellConfig, PoissonDiskBridson, PoissonDiskConfig, UniformGrid,
+    UniformGridConfig, WhiteNoise, WhiteNoiseConfig, PLACEMENT_DIM,
 };
 pub use presets::{build_advanced, build_showcase, build_vanilla};
 pub use registry::apply_worldgen_strategy_by_name;

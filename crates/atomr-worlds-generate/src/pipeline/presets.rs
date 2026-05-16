@@ -14,8 +14,10 @@ use super::config::WorldGenConfig;
 use super::density::{FloatingIslandField, Hybrid2D3D};
 use super::erosion::{DropletHydraulic, MacroRiverOnly};
 use super::feature_seeder::{ColumnAnchorSeeder, SeederConfig};
+use super::flora::LSystemTrees;
 use super::fluid::{CellularAutomataFlow, LatticeBoltzmannD3Q19};
 use super::ore::BiasedRandomWalk;
+use super::placement::PoissonDiskBridson;
 use super::strata::LayeredGeology;
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
@@ -43,10 +45,10 @@ pub fn build_vanilla() -> WorldGenConfig {
 
 /// `Advanced` opts into every paper algorithm at moderate cost. Density
 /// becomes hybrid 2D/3D, strata is layered geology, biome matrix is
-/// direct 2D Whittaker with sparse-convolution blend, caves use 3-D
-/// CA, ore is biased random walk, erosion is macro-river only, and
-/// fluid is CA flow. The column-anchor seeder feeds the cross-brick
-/// stages.
+/// direct 2D Whittaker with sparse-convolution blend, caves use 3-D CA,
+/// ore is biased random walk, erosion is macro-river only, fluid is CA
+/// flow, placement is Bridson Poisson-disk, and flora is L-system
+/// trees. The column-anchor seeder feeds the cross-brick stages.
 pub fn build_advanced() -> WorldGenConfig {
     let mut cfg = build_vanilla();
     cfg.density = Arc::new(Hybrid2D3D::default());
@@ -64,13 +66,16 @@ pub fn build_advanced() -> WorldGenConfig {
     cfg.ore = Arc::new(BiasedRandomWalk::default());
     cfg.erosion = Arc::new(MacroRiverOnly);
     cfg.fluid = Arc::new(CellularAutomataFlow::default());
+    cfg.placement = Arc::new(PoissonDiskBridson::default());
+    cfg.flora = Arc::new(LSystemTrees::default());
     cfg
 }
 
 /// `Showcase` cranks every algorithm up for the visual demo. Floating
 /// island density, Voronoi + buffer-terrain biomes, cheese/spaghetti/
 /// noodle isosurface caves, dense column-anchor seeder, biased-random-
-/// walk ore, droplet hydraulic erosion, and D3Q19 lattice fluid.
+/// walk ore, droplet hydraulic erosion, D3Q19 lattice fluid, Bridson
+/// Poisson-disk placement, and L-system trees.
 pub fn build_showcase() -> WorldGenConfig {
     let mut cfg = build_vanilla();
     cfg.density = Arc::new(FloatingIslandField::default());
@@ -89,6 +94,8 @@ pub fn build_showcase() -> WorldGenConfig {
     cfg.ore = Arc::new(BiasedRandomWalk::default());
     cfg.erosion = Arc::new(DropletHydraulic::default());
     cfg.fluid = Arc::new(LatticeBoltzmannD3Q19::default());
+    cfg.placement = Arc::new(PoissonDiskBridson::default());
+    cfg.flora = Arc::new(LSystemTrees::default());
     cfg
 }
 

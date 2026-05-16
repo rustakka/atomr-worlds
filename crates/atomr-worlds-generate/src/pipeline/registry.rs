@@ -14,8 +14,10 @@ use super::config::WorldGenConfig;
 use super::density::{FloatingIslandField, HeightmapPlanar, Hybrid2D3D, Pure3DOverhang};
 use super::erosion::{DropletHydraulic, MacroRiverOnly};
 use super::feature_seeder::ColumnAnchorSeeder;
+use super::flora::{BlueNoiseGrass, LSystemTrees};
 use super::fluid::{CellularAutomataFlow, LatticeBoltzmannD3Q19, Static};
 use super::ore::{BiasedRandomWalk, ThresholdNoise};
+use super::placement::{MitchellBestCandidate, PoissonDiskBridson, UniformGrid, WhiteNoise};
 use super::strata::{KrigingInterpolated, LayeredGeology, TopsoilLayer};
 use super::strategies::*;
 use super::vanilla::MonolithicTerrainPass;
@@ -162,11 +164,35 @@ pub fn apply_worldgen_strategy_by_name(
                 cfg.flora = Arc::new(NoneFlora);
                 true
             }
+            "LSystemTrees" => {
+                cfg.flora = Arc::new(LSystemTrees::default());
+                true
+            }
+            "BlueNoiseGrass" => {
+                cfg.flora = Arc::new(BlueNoiseGrass::default());
+                true
+            }
             _ => false,
         },
         "placement" => match name {
             "None" => {
                 cfg.placement = Arc::new(NonePlacement);
+                true
+            }
+            "WhiteNoise" => {
+                cfg.placement = Arc::new(WhiteNoise::default());
+                true
+            }
+            "UniformGrid" => {
+                cfg.placement = Arc::new(UniformGrid::default());
+                true
+            }
+            "PoissonDiskBridson" => {
+                cfg.placement = Arc::new(PoissonDiskBridson::default());
+                true
+            }
+            "MitchellBestCandidate" => {
+                cfg.placement = Arc::new(MitchellBestCandidate::default());
                 true
             }
             _ => false,
