@@ -5,8 +5,8 @@
 use std::f32::consts::PI;
 
 use atomr_worlds_view::{
-    bake_ao, greedy_mesh, render_slice, Framebuffer, MaterialEntry, MaterialPalette, Mesh,
-    SliceShading,
+    bake_ao, dual_contouring_mesh, greedy_mesh, marching_cubes_mesh, marching_cubes_mesh_with_iso,
+    naive_mesh, render_slice, Framebuffer, MaterialEntry, MaterialPalette, Mesh, SliceShading,
 };
 use atomr_worlds_voxel::Brick;
 use bevy::core_pipeline::bloom::BloomSettings;
@@ -37,6 +37,71 @@ impl MeshStrategy for GreedyFlat {
     }
     fn mesh(&self, brick: &Brick) -> Mesh {
         greedy_mesh(brick)
+    }
+}
+
+/// Naive per-face mesher: one quad per visible voxel face. Baseline
+/// reference impl backed by [`atomr_worlds_view::naive_mesh`]; useful
+/// for A/B-ing greedy's merge benefit and as a sanity check for new
+/// downstream passes.
+#[derive(Default)]
+pub struct NaiveMesh;
+
+impl MeshStrategy for NaiveMesh {
+    fn name(&self) -> &'static str {
+        "NaiveMesh"
+    }
+    fn mesh(&self, brick: &Brick) -> Mesh {
+        naive_mesh(brick)
+    }
+}
+
+/// Marching-cubes mesher (Lorensen & Cline 1987). Backed by
+/// [`atomr_worlds_view::marching_cubes_mesh`]; iso-value defaults to
+/// `0.0`, override with [`MarchingCubes::with_iso`] for sub-voxel
+/// thresholds on continuous density fields.
+pub struct MarchingCubes {
+    pub iso: f32,
+}
+
+impl Default for MarchingCubes {
+    fn default() -> Self {
+        Self { iso: 0.0 }
+    }
+}
+
+impl MarchingCubes {
+    pub fn with_iso(iso: f32) -> Self {
+        Self { iso }
+    }
+}
+
+impl MeshStrategy for MarchingCubes {
+    fn name(&self) -> &'static str {
+        "MarchingCubes"
+    }
+    fn mesh(&self, brick: &Brick) -> Mesh {
+        if self.iso == 0.0 {
+            marching_cubes_mesh(brick)
+        } else {
+            marching_cubes_mesh_with_iso(brick, self.iso)
+        }
+    }
+}
+
+/// Dual-contouring mesher (Schmitz/Garland Hermite + simplified QEF).
+/// Backed by [`atomr_worlds_view::dual_contouring_mesh`]; emits one
+/// vertex per sign-changed cell with quads dual to each sign-changed
+/// edge, preserving sharp features that MC's edge interpolation rounds.
+#[derive(Default)]
+pub struct DualContouring;
+
+impl MeshStrategy for DualContouring {
+    fn name(&self) -> &'static str {
+        "DualContouring"
+    }
+    fn mesh(&self, brick: &Brick) -> Mesh {
+        dual_contouring_mesh(brick)
     }
 }
 

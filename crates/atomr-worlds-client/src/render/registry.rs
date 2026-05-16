@@ -18,6 +18,18 @@ pub fn apply_strategy_by_name(cfg: &mut RenderConfig, slot: &str, name: &str) ->
                 cfg.mesher = Arc::new(GreedyFlat);
                 true
             }
+            "NaiveMesh" | "naive" => {
+                cfg.mesher = Arc::new(NaiveMesh);
+                true
+            }
+            "MarchingCubes" | "marching_cubes" => {
+                cfg.mesher = Arc::new(MarchingCubes::default());
+                true
+            }
+            "DualContouring" | "dual_contouring" => {
+                cfg.mesher = Arc::new(DualContouring);
+                true
+            }
             _ => false,
         },
         "palette" => match name {
