@@ -16,6 +16,8 @@
 //! target and lets `bevy_ui`'s ui_pass (which is registered into both
 //! `Core2d` and `Core3d`) composite the HUD above whichever main pass ran.
 
+use std::collections::VecDeque;
+
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
@@ -33,6 +35,97 @@ impl Plugin for HudPlugin {
                 Update,
                 (route_hud_target, update_fps, update_coords, update_mode),
             );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frame-time diagnostics ring buffer
+// ---------------------------------------------------------------------------
+
+/// Capacity of the [`FrameDiagBuffer`] ring buffer. 1024 frames ≈ 17 s at
+/// 60 Hz — enough to span a sprint harness scenario.
+pub const FRAME_DIAG_BUFFER_LEN: usize = 1024;
+
+#[derive(Debug, Clone, Copy)]
+pub struct FrameSample {
+    pub frame: u64,
+    pub micros: u64,
+}
+
+/// Ring buffer of per-frame µs. Updated every frame by
+/// [`record_frame_diag`]; consumed by the `dump_frame_diag` harness event
+/// when scenarios want a frame-time trace.
+#[derive(Resource)]
+pub struct FrameDiagBuffer {
+    samples: VecDeque<FrameSample>,
+    next_frame: u64,
+}
+
+impl Default for FrameDiagBuffer {
+    fn default() -> Self {
+        Self {
+            samples: VecDeque::with_capacity(FRAME_DIAG_BUFFER_LEN),
+            next_frame: 0,
+        }
+    }
+}
+
+impl FrameDiagBuffer {
+    pub fn len(&self) -> usize { self.samples.len() }
+    pub fn is_empty(&self) -> bool { self.samples.is_empty() }
+    pub fn capacity(&self) -> usize { FRAME_DIAG_BUFFER_LEN }
+    pub fn samples(&self) -> impl Iterator<Item = &FrameSample> + '_ { self.samples.iter() }
+
+    pub fn push(&mut self, micros: u64) -> u64 {
+        let frame = self.next_frame;
+        if self.samples.len() == FRAME_DIAG_BUFFER_LEN {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(FrameSample { frame, micros });
+        self.next_frame = self.next_frame.wrapping_add(1);
+        frame
+    }
+}
+
+pub struct FrameDiagPlugin;
+
+impl Plugin for FrameDiagPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<FrameDiagBuffer>()
+            .add_systems(First, record_frame_diag);
+    }
+}
+
+fn record_frame_diag(time: Res<Time>, mut buf: ResMut<FrameDiagBuffer>) {
+    let micros = (time.delta_seconds_f64() * 1.0e6).round().max(0.0) as u64;
+    buf.push(micros);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_diag_buffer_caps_at_capacity_and_drops_oldest() {
+        let mut buf = FrameDiagBuffer::default();
+        for i in 0..(FRAME_DIAG_BUFFER_LEN as u64 + 16) {
+            buf.push(i);
+        }
+        assert_eq!(buf.len(), FRAME_DIAG_BUFFER_LEN);
+        let first = buf.samples().next().unwrap();
+        assert_eq!(first.frame, 16);
+        assert_eq!(first.micros, 16);
+        let last = buf.samples().last().unwrap();
+        assert_eq!(last.frame, FRAME_DIAG_BUFFER_LEN as u64 + 15);
+    }
+
+    #[test]
+    fn frame_diag_buffer_assigns_monotonic_frame_ids() {
+        let mut buf = FrameDiagBuffer::default();
+        let a = buf.push(100);
+        let b = buf.push(200);
+        let c = buf.push(300);
+        assert_eq!((a, b, c), (0, 1, 2));
     }
 }
 

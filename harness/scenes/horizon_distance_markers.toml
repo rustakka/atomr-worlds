@@ -1,0 +1,82 @@
+# Phase 19.2: horizon-imposter distance markers.
+#
+# Walks the FP camera in +Z, capturing screenshots after enough travel to
+# pass through several progressive distances from the warmup origin. The
+# acceptance criterion is that the *latter* shots still show non-sky
+# pixels in the distant-band rows — i.e. the polar-annulus horizon
+# imposter is filling the band between the LOD ladder's outer ring
+# (~1 km) and the geometric horizon. Phase 19.1 (no imposter) renders
+# only sky past ~1 km.
+#
+# Frame budgets target sprint speed = 12 m/s with `dt` clamped to 0.05 s
+# in `world_walk_input` (so movement / frame = ≤0.6 m). At the harness's
+# ~7 fps offscreen-capture cadence each 60 frames buys ≈ 8 s wall-clock
+# (≈ 40 m of forward motion).
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 120
+output_prefix = "horizon_dist"
+
+# --- Origin baseline -----------------------------------------------------
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "origin — imposter shell rendered out to horizon_at_m"
+
+# --- Sprint +Z.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 125
+kind  = "screenshot"
+note  = "after ~2 s of sprint — near-tier brick band advanced"
+
+[[events]]
+frame = 245
+kind  = "screenshot"
+note  = "after ~4 s of sprint — imposter rebuild fired"
+
+[[events]]
+frame = 365
+kind  = "screenshot"
+note  = "after ~6 s of sprint — leading horizon = fresh imposter terrain"
+
+[[events]]
+frame = 485
+kind  = "screenshot"
+note  = "after ~8 s of sprint — multiple imposter rebuilds elapsed"
+
+[[events]]
+frame = 487
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 487
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 545
+kind  = "screenshot"
+note  = "post-sprint settled"
+
+[[events]]
+frame = 560
+kind  = "exit"

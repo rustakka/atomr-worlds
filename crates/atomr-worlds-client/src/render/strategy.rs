@@ -6,6 +6,8 @@
 //! `Send + Sync + 'static` so they can live inside `Arc<dyn Trait>`
 //! fields of the [`RenderConfig`](super::RenderConfig) resource.
 
+use atomr_worlds_core::coord::DVec3;
+use atomr_worlds_core::shape::WorldShape;
 use atomr_worlds_view::{Framebuffer, MaterialPalette, Mesh, SliceCamera, SliceConfig, SliceTable};
 use atomr_worlds_voxel::Brick;
 use bevy::core_pipeline::bloom::BloomSettings;
@@ -13,6 +15,9 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::pbr::{CascadeShadowConfig, FogSettings};
 use bevy::prelude::*;
 use bevy::render::camera::Exposure;
+
+use crate::modes::fp::CameraMotionState;
+use crate::world_stream::LodLadder;
 
 // ---------------------------------------------------------------------------
 // Mesh strategy
@@ -176,11 +181,18 @@ pub trait FogStrategy: Send + Sync + 'static {
     /// tests / spherical-body modes still in flight). Strategies must
     /// degrade gracefully — typically by falling back to their own
     /// density / extent.
+    ///
+    /// `motion` is the current [`CameraMotionState`] (smoothed velocity
+    /// / yaw rate / sprint hold). Strategies may use it to tighten the
+    /// fog band when the camera moves fast so the visible streaming
+    /// horizon shrinks gracefully under sprint. `None` for non-FP
+    /// callers (slice / RTS / overview / Skybox bake passes).
     fn fog_settings(
         &self,
         sun: SunState,
         sky_horizon: Color,
         horizon_band_m: Option<(f32, f32)>,
+        motion: Option<&CameraMotionState>,
     ) -> FogSettings;
 }
 
@@ -233,6 +245,145 @@ pub trait LodCoveragePolicy: Send + Sync + 'static {
     /// `false` → behave like `NestedSummary` (keep — parent stays loaded
     /// as a fallback summary).
     fn mask_finer_covered(&self) -> bool;
+
+    /// Additive LOD-depth bias to apply at tier index `tier_index`
+    /// during the desired-set sweep. Positive values coarsen the tier
+    /// (use a deeper LOD = larger brick); 0 keeps the configured LOD.
+    /// Used by the motion-aware layer to drop ladder fidelity at sprint
+    /// without recomputing the radii. Default is 0 (no bias).
+    fn tier_lod_bias(&self, _tier_index: usize, _motion: Option<&CameraMotionState>) -> i8 {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Horizon-imposter shell (Phase 19.2)
+// ---------------------------------------------------------------------------
+
+/// One baked horizon-imposter shell: a polar annulus of triangles whose
+/// inner edge sits just inside the streamer's outer ring and whose outer
+/// edge extends to (a clamped fraction of) the geometric horizon for the
+/// current observer. Coordinates are *observer-relative meters* so the
+/// shell follows the camera every frame without re-baking.
+#[derive(Debug, Clone)]
+pub struct HorizonImposterMesh {
+    pub vertices: Vec<[f32; 3]>,
+    pub colors: Vec<[f32; 4]>,
+    pub indices: Vec<u32>,
+    pub r_inner_m: f32,
+    pub r_outer_m: f32,
+    /// Stable hash of the inputs (macro digest + shape + observer
+    /// bucket). Used to dedupe re-bakes; identical digests must produce
+    /// identical meshes for determinism.
+    pub source_digest: u64,
+}
+
+/// Inputs the imposter baker reads from the world. Held by reference so
+/// the baker doesn't take ownership of the macro state.
+pub struct HorizonImposterInputs<'a> {
+    /// Pre-baked elevation + biome + water + surface fields keyed by
+    /// face. The baker samples this in the annulus directions.
+    pub macro_state: &'a atomr_worlds_generate::WorldMacroState,
+    pub shape: WorldShape,
+    pub observer: DVec3,
+    /// Horizon range to fill (`outer_radius_m - inner_radius_m` ≈ ring
+    /// thickness in meters). The strategy is free to clip to its own
+    /// `max_range_m()`.
+    pub inner_radius_m: f64,
+    pub outer_radius_m: f64,
+}
+
+/// Bakes a polar-annulus mesh covering the band from the streamer's
+/// outer ring out to the geometric horizon. The mesh is observer-
+/// relative and re-baked off-thread whenever the camera drifts more
+/// than `rebuild_drift_m()`. Default impl: `PolarAnnulusShell`. The
+/// `Legacy` preset overrides to `NoHorizonImposter` whose `enabled()`
+/// is false.
+pub trait HorizonImposterStrategy: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    /// Whether to spawn / refresh a horizon shell at all. When `false`,
+    /// the [`super::HorizonShellPlugin`] keeps the entity hidden and
+    /// nothing else in the pipeline reads the imposter.
+    fn enabled(&self) -> bool {
+        true
+    }
+    /// Inner radius — slightly inside the streamer's outer load radius
+    /// so the shell overlaps the LOD ring under fog. Default is 95% of
+    /// the streamer outer.
+    fn inner_radius_m(&self, streamer_outer_m: f64) -> f64 {
+        streamer_outer_m * 0.95
+    }
+    /// Outer radius — clamped to [`Self::max_range_m`] so a sphere with
+    /// a 6371 km radius doesn't try to fill a 256 km annulus.
+    fn outer_radius_m(&self, shape: WorldShape, observer: DVec3) -> f64 {
+        shape.horizon_at_m(observer).min(self.max_range_m())
+    }
+    /// Hard cap on the shell's outer radius. Default 16 km — enough for
+    /// "see all the way to the horizon" on the default world without
+    /// inflating the imposter mesh past `MAX_SHELL_VERTS`.
+    fn max_range_m(&self) -> f64 {
+        16_000.0
+    }
+    /// How far the observer must drift (meters) before the shell needs
+    /// to be re-baked. Loose because the shell is a low-fidelity
+    /// approximation — 64 m is ≈ 0.4% of a 16 km outer radius.
+    fn rebuild_drift_m(&self) -> f64 {
+        64.0
+    }
+    /// Bake the shell from the supplied macro state + observer. Returns
+    /// an empty mesh if `enabled() == false`. Pure / off-thread safe —
+    /// no Bevy types in or out.
+    fn bake(&self, inputs: &HorizonImposterInputs<'_>) -> HorizonImposterMesh;
+}
+
+// ---------------------------------------------------------------------------
+// Speed-aware strategy layer (Phase 19.2)
+// ---------------------------------------------------------------------------
+
+/// Pick the LOD ladder ([`LodLadder`]) to apply to the streamer this
+/// frame. Returning `None` means "keep whatever ladder is currently
+/// configured" — used by the rest-state default to avoid churning the
+/// ladder on every frame. Motion-aware impls return `Some(coarser)`
+/// while sustained sprint is detected and `None` once a hysteresis
+/// window has elapsed since the last swap.
+pub trait LodLadderPolicy: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    fn ladder(&self, motion: &CameraMotionState) -> Option<LodLadder>;
+}
+
+/// Per-frame budget for converting completed brick payloads into Bevy
+/// entities ([`crate::brick_gen::DEFAULT_SPAWN_BUDGET`] replacement).
+/// Counter-intuitively the motion-scaled default *lowers* the budget at
+/// sprint so the GPU-upload spike from a fresh batch is spread across
+/// more frames instead of stacking into one expensive frame.
+pub trait SpawnBudgetStrategy: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    fn budget_this_frame(&self, motion: &CameraMotionState) -> usize;
+}
+
+/// Stride at which `fp_update_lod_visibility` runs. 1 = every frame, 2
+/// = every other, etc. Visibility updates are cheap-ish now (Step 4
+/// made them O(n_q)) but still scale with brick count, so striding
+/// them under sprint trades crispness for headroom on the
+/// streaming-heavy frames.
+pub trait VisibilityCadenceStrategy: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    /// Run the visibility pass on frames where `frame % stride == 0`.
+    /// Return 1 to never skip.
+    fn stride(&self, motion: &CameraMotionState) -> u32;
+}
+
+/// Thresholds for the plan rebuild trigger ([`crate::world_stream::DesiredChunksCache::should_rebuild`]).
+/// `drift_m` is the position-drift trigger; `fwd_cos` is the
+/// rotation-trigger cosine threshold (rebuild when
+/// `forward · last_forward < fwd_cos`). The motion-scaled default
+/// widens both when the camera is moving fast, but only when the
+/// horizon imposter is active — otherwise the loose threshold leaves
+/// outer-rim streaming gaps that the imposter would normally hide.
+pub trait RebuildThresholdStrategy: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    fn drift_m(&self, motion: &CameraMotionState) -> f64;
+    fn fwd_cos(&self, motion: &CameraMotionState) -> f64;
 }
 
 // ---------------------------------------------------------------------------

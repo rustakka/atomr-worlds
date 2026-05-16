@@ -42,6 +42,7 @@
 //! instead of popping.
 
 use std::collections::HashMap;
+use std::sync::{mpsc, Arc, Mutex};
 
 use atomr_worlds_core::coord::{DVec3, IVec3};
 use atomr_worlds_core::lod::Lod;
@@ -303,6 +304,12 @@ pub struct LoadedChunk {
     /// Last frame the chunk was in the desired set. Used for hysteresis:
     /// `frame - last_seen >= hysteresis_ticks` ⇒ eligible for despawn.
     pub last_seen_frame: u64,
+    /// Mirrors `BrickFadeOut` presence on the ECS entity. Tracked here so
+    /// [`LoadedChunks::child_counts`] can be maintained incrementally
+    /// without a per-frame ECS query of `With<BrickFadeOut>`. Set true by
+    /// [`LoadedChunks::mark_fading_out`] when the streamer attaches a
+    /// `BrickFadeOut`; reset to false on every fresh `insert`.
+    pub is_fading_out: bool,
 }
 
 impl LoadedChunk {
@@ -312,18 +319,150 @@ impl LoadedChunk {
     }
 }
 
+/// `(coord, depth)` of the parent brick that immediately covers
+/// `(coord, depth)`. Uses `div_euclid` rather than `/` so the
+/// child→parent relationship stays correct for negative coords (Rust's
+/// truncating division would give `-1 / 2 == 0` but our voxel grid
+/// wants `(-1).div_euclid(2) == -1`).
+#[inline]
+pub(crate) fn parent_key(key: (IVec3, u8)) -> (IVec3, u8) {
+    let (coord, depth) = key;
+    (
+        IVec3::new(
+            coord.x.div_euclid(2),
+            coord.y.div_euclid(2),
+            coord.z.div_euclid(2),
+        ),
+        depth + 1,
+    )
+}
+
 /// HashMap-backed registry of loaded chunks keyed by `(coord, lod.depth)`.
 /// Keying by depth lets us briefly hold both a `(c, 0)` and `(c, 1)`
 /// entry during a tier change without one stomping the other.
+///
+/// Also maintains an incremental `child_counts` index of how many
+/// *non-fading-out* immediate children each parent key has. This used
+/// to be rebuilt every frame inside `fp_update_lod_visibility` as an
+/// O(n_loaded) HashMap walk; keeping it incrementally maintained on
+/// insert / mark_fading_out / remove makes the visibility pass O(n_q)
+/// (query size) instead of O(n_q + n_loaded).
 #[derive(Resource, Default, Debug)]
-pub struct LoadedChunks(pub HashMap<(IVec3, u8), LoadedChunk>);
+pub struct LoadedChunks {
+    inner: HashMap<(IVec3, u8), LoadedChunk>,
+    child_counts: HashMap<(IVec3, u8), u32>,
+}
 
 impl LoadedChunks {
+    /// Read-only access to the underlying map. Mutating callers must use
+    /// [`Self::insert`] / [`Self::remove`] / [`Self::mark_fading_out`]
+    /// so the `child_counts` index stays in sync. Borrow at call sites
+    /// where the prior code used `loaded.0.iter()` / `loaded.0.get()`.
+    #[inline]
+    pub fn map(&self) -> &HashMap<(IVec3, u8), LoadedChunk> { &self.inner }
+
+    /// Number of *non-fading-out* immediate children that cover the
+    /// parent `key`. Returns 0 when the parent has no live children.
+    #[inline]
+    pub fn child_count(&self, parent: &(IVec3, u8)) -> u32 {
+        self.child_counts.get(parent).copied().unwrap_or(0)
+    }
+
+    /// Insert or replace an entry. Increments the parent's child count
+    /// unless the entry being replaced was already counted. Resets
+    /// `is_fading_out` to false (re-inserting a brick brings it back
+    /// into the "counts toward coverage" set).
+    pub fn insert(&mut self, key: (IVec3, u8), mut chunk: LoadedChunk) {
+        chunk.is_fading_out = false;
+        let parent = parent_key(key);
+        let prev_counted = self
+            .inner
+            .get(&key)
+            .map(|c| !c.is_fading_out)
+            .unwrap_or(false);
+        if !prev_counted {
+            *self.child_counts.entry(parent).or_insert(0) += 1;
+        }
+        self.inner.insert(key, chunk);
+    }
+
+    /// Mutable access to an entry's `last_seen_frame` without
+    /// disturbing the `child_counts` invariant. The streamer uses this
+    /// every frame to refresh hysteresis bookkeeping for desired
+    /// chunks; nothing else about the chunk's coverage status changes.
+    #[inline]
+    pub fn touch_last_seen(&mut self, key: &(IVec3, u8), frame: u64) {
+        if let Some(entry) = self.inner.get_mut(key) {
+            entry.last_seen_frame = frame;
+        }
+    }
+
+    /// Read a chunk by key.
+    #[inline]
+    pub fn get(&self, key: &(IVec3, u8)) -> Option<&LoadedChunk> { self.inner.get(key) }
+
+    /// Whether a chunk with this key is currently loaded.
+    #[inline]
+    pub fn contains_key(&self, key: &(IVec3, u8)) -> bool { self.inner.contains_key(key) }
+
+    /// Number of loaded chunks (including those mid-fade-out).
+    #[inline]
+    pub fn len(&self) -> usize { self.inner.len() }
+
+    /// Whether no chunks are loaded.
+    #[inline]
+    pub fn is_empty(&self) -> bool { self.inner.is_empty() }
+
+    /// Mark an existing entry as fading out. Decrements its parent's
+    /// child count if it wasn't already marked. Idempotent.
+    pub fn mark_fading_out(&mut self, key: &(IVec3, u8)) {
+        let Some(entry) = self.inner.get_mut(key) else { return };
+        if entry.is_fading_out {
+            return;
+        }
+        entry.is_fading_out = true;
+        let parent = parent_key(*key);
+        if let Some(n) = self.child_counts.get_mut(&parent) {
+            *n -= 1;
+            if *n == 0 {
+                self.child_counts.remove(&parent);
+            }
+        }
+    }
+
+    /// Remove an entry. Decrements the parent's child count only if
+    /// the removed entry was still counted (i.e. not previously marked
+    /// fading out).
+    pub fn remove(&mut self, key: &(IVec3, u8)) -> Option<LoadedChunk> {
+        let removed = self.inner.remove(key)?;
+        if !removed.is_fading_out {
+            let parent = parent_key(*key);
+            if let Some(n) = self.child_counts.get_mut(&parent) {
+                *n -= 1;
+                if *n == 0 {
+                    self.child_counts.remove(&parent);
+                }
+            }
+        }
+        Some(removed)
+    }
+
+    /// Iterate entries (read-only) without exposing the underlying
+    /// HashMap type.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = (&(IVec3, u8), &LoadedChunk)> + '_ {
+        self.inner.iter()
+    }
+
+    /// Iterate keys (read-only).
+    #[inline]
+    pub fn keys(&self) -> impl Iterator<Item = &(IVec3, u8)> + '_ { self.inner.keys() }
+
     /// Whether the entry should be despawned this tick under the given
     /// hysteresis window.
     #[inline]
     pub fn is_stale(&self, key: &(IVec3, u8), now: u64, hysteresis: u64) -> bool {
-        match self.0.get(key) {
+        match self.inner.get(key) {
             Some(c) => now.saturating_sub(c.last_seen_frame) >= hysteresis,
             None => false,
         }
@@ -340,6 +479,21 @@ impl LoadedChunks {
 /// [`PLAN_REBUILD_DRIFT_M`] or the camera forward direction rotates
 /// past [`PLAN_REBUILD_FWD_COS`] (so the view-priority ordering can
 /// be re-applied when the player turns).
+///
+/// Rebuilds run on a background thread via [`Self::spawn_rebuild`]; the
+/// streaming system polls for completion each frame with
+/// [`Self::poll_rebuild`] and installs the result when it arrives. The
+/// rebuild itself (4-tier AABB sweep + view-priority sort over ~11 k
+/// entries) costs ~2 ms — too long for the main thread. Running it off-
+/// thread is what eliminates the per-rebuild frame spike that used to
+/// fire every ~20 frames at sprint pace.
+///
+/// The cached plan therefore lags the observer pose by 1-2 frames after
+/// a rebuild trigger. That's harmless: rebuilds are already drift-
+/// triggered (every 4 m of motion), so the loader was always working
+/// off a slightly stale plan — moving the staleness from "0-frame, but
+/// the main thread paid 2 ms" to "1-2 frame, main thread paid nothing"
+/// is a strict win for frame pacing.
 #[derive(Resource, Default, Debug)]
 pub struct DesiredChunksCache {
     /// `(observer, forward)` pair the cached plan was built for.
@@ -348,22 +502,65 @@ pub struct DesiredChunksCache {
     /// Sorted brick keys, closest-first with view-priority bias if a
     /// forward direction was supplied at rebuild time.
     pub plan: Vec<(IVec3, Lod)>,
+    /// Next index into [`Self::plan`] for the dispatch loop. Persists
+    /// across frames so a saturated worker pool stops the dispatch scan
+    /// without redoing the front-of-plan walk every frame. Reset to 0
+    /// whenever a fresh plan is installed (via [`Self::set`] or a
+    /// completed [`Self::poll_rebuild`]).
+    pub cursor: usize,
+    /// Receiver for an in-flight background rebuild, plus the pose the
+    /// rebuild was dispatched for. `None` ⇒ no rebuild in flight.
+    rebuild: Option<RebuildHandle>,
+}
+
+#[derive(Debug)]
+struct RebuildHandle {
+    /// `Mutex` so the cache (a `Resource`, which Bevy requires
+    /// `Send + Sync`) stays `Sync` — `mpsc::Receiver` is `Send` but not
+    /// `Sync`. Uncontended in practice: only the streaming system
+    /// touches it, on the main thread.
+    rx: Mutex<mpsc::Receiver<Vec<(IVec3, Lod)>>>,
+    pose: (DVec3, DVec3),
 }
 
 impl DesiredChunksCache {
     /// Whether the cache should be invalidated and the plan rebuilt
     /// given the current observer pose. Returns `true` on first frame
     /// or if either the position-drift or yaw-drift threshold is
-    /// exceeded.
+    /// exceeded. Compares against the in-flight rebuild's pose if one is
+    /// outstanding, so a fresh rebuild isn't dispatched on top of an
+    /// already-running one for the same pose.
     pub fn should_rebuild(&self, observer: DVec3, forward: DVec3) -> bool {
-        match self.built_for {
+        self.should_rebuild_with(observer, forward, PLAN_REBUILD_DRIFT_M, PLAN_REBUILD_FWD_COS)
+    }
+
+    /// Strategy-driven variant of [`Self::should_rebuild`]. The caller
+    /// supplies the drift and fwd-cos thresholds for this frame
+    /// (typically from
+    /// [`crate::render::RebuildThresholdStrategy`]) so the motion-aware
+    /// layer can widen them under sustained sprint. Both thresholds
+    /// equal the historical constants at rest, so default behavior
+    /// matches [`Self::should_rebuild`] exactly.
+    pub fn should_rebuild_with(
+        &self,
+        observer: DVec3,
+        forward: DVec3,
+        drift_threshold_m: f64,
+        fwd_cos_threshold: f64,
+    ) -> bool {
+        let reference = self
+            .rebuild
+            .as_ref()
+            .map(|h| h.pose)
+            .or(self.built_for);
+        match reference {
             None => true,
             Some((last_obs, last_fwd)) => {
                 let dx = observer.x - last_obs.x;
                 let dy = observer.y - last_obs.y;
                 let dz = observer.z - last_obs.z;
                 let drift = (dx * dx + dy * dy + dz * dz).sqrt();
-                if drift > PLAN_REBUILD_DRIFT_M {
+                if drift > drift_threshold_m {
                     return true;
                 }
                 let dot = forward.x * last_fwd.x
@@ -371,15 +568,84 @@ impl DesiredChunksCache {
                     + forward.z * last_fwd.z;
                 // forward dirs are unit-length; dot < threshold ⇒ angle
                 // grew past the rebuild cone.
-                dot < PLAN_REBUILD_FWD_COS
+                dot < fwd_cos_threshold
             }
         }
     }
 
     /// Replace the cached plan, recording the pose it was built for.
+    /// Synchronous path — exposed for tests and the (rare) case where
+    /// a caller wants to install a plan inline. Always resets the
+    /// dispatch cursor to 0 so callers don't have to remember.
     pub fn set(&mut self, observer: DVec3, forward: DVec3, plan: Vec<(IVec3, Lod)>) {
         self.built_for = Some((observer, forward));
         self.plan = plan;
+        self.cursor = 0;
+    }
+
+    /// Whether a background rebuild is currently in flight.
+    #[inline]
+    pub fn is_rebuilding(&self) -> bool {
+        self.rebuild.is_some()
+    }
+
+    /// Spawn a [`desired_chunks`] + [`prioritize_view`] rebuild on a
+    /// background thread. The streamer state is cheap to clone (a small
+    /// `Vec<LodTier>` plus a few scalars); the coverage policy is an
+    /// `Arc` so cloning is also free. Does nothing if a rebuild is
+    /// already in flight.
+    pub fn spawn_rebuild(
+        &mut self,
+        streamer: ChunkStreamer,
+        observer: DVec3,
+        forward: DVec3,
+        horizon_m: f64,
+        coverage: Arc<dyn LodCoveragePolicy>,
+    ) {
+        if self.rebuild.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.rebuild = Some(RebuildHandle {
+            rx: Mutex::new(rx),
+            pose: (observer, forward),
+        });
+        std::thread::spawn(move || {
+            let mut plan = desired_chunks(&streamer, observer, horizon_m, coverage.as_ref());
+            prioritize_view(&mut plan, observer, forward);
+            // Best-effort send: if the cache has been dropped (app
+            // exit) the receiver is gone and the send fails silently,
+            // which is fine — the worker just unwinds.
+            let _ = tx.send(plan);
+        });
+    }
+
+    /// Drain a completed background rebuild, if any. Returns `true`
+    /// when a plan was installed this frame. The caller is expected to
+    /// invoke this once per frame before consulting [`Self::plan`].
+    pub fn poll_rebuild(&mut self) -> bool {
+        let Some(handle) = self.rebuild.as_ref() else { return false; };
+        let result = {
+            let rx = handle.rx.lock().expect("rebuild rx poisoned");
+            rx.try_recv()
+        };
+        match result {
+            Ok(plan) => {
+                let pose = handle.pose;
+                self.rebuild = None;
+                self.built_for = Some(pose);
+                self.plan = plan;
+                self.cursor = 0;
+                true
+            }
+            Err(mpsc::TryRecvError::Empty) => false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                // Worker panicked or was dropped without sending.
+                // Clear the slot so the next frame can re-dispatch.
+                self.rebuild = None;
+                false
+            }
+        }
     }
 }
 
@@ -950,19 +1216,108 @@ mod tests {
     fn hysteresis_lets_chunks_linger() {
         let mut loaded = LoadedChunks::default();
         let key = LoadedChunk::key(IVec3::new(0, 0, 0), Lod::new(0));
-        loaded.0.insert(
+        loaded.insert(
             key,
             LoadedChunk {
                 coord: IVec3::new(0, 0, 0),
                 lod: Lod::new(0),
                 entity: None,
                 last_seen_frame: 5,
+                is_fading_out: false,
             },
         );
         // At frame 6 (1 tick later), still fresh.
         assert!(!loaded.is_stale(&key, 6, HYSTERESIS_TICKS));
         // At frame 7 (2 ticks later), stale.
         assert!(loaded.is_stale(&key, 7, HYSTERESIS_TICKS));
+    }
+
+    // -----------------------------------------------------------------
+    // Incremental child_counts
+    // -----------------------------------------------------------------
+
+    fn mk_chunk(coord: IVec3, depth: u8) -> LoadedChunk {
+        LoadedChunk {
+            coord,
+            lod: Lod::new(depth),
+            entity: None,
+            last_seen_frame: 0,
+            is_fading_out: false,
+        }
+    }
+
+    #[test]
+    fn insert_increments_parent_child_count() {
+        let mut loaded = LoadedChunks::default();
+        let key = LoadedChunk::key(IVec3::new(2, 4, 6), Lod::new(0));
+        loaded.insert(key, mk_chunk(IVec3::new(2, 4, 6), 0));
+        // Parent of (2,4,6)@d0 is (1,2,3)@d1 (no negative coords ⇒ /2).
+        assert_eq!(loaded.child_count(&(IVec3::new(1, 2, 3), 1)), 1);
+    }
+
+    #[test]
+    fn insert_uses_div_euclid_for_negative_coords() {
+        let mut loaded = LoadedChunks::default();
+        let key = LoadedChunk::key(IVec3::new(-1, 0, 0), Lod::new(0));
+        loaded.insert(key, mk_chunk(IVec3::new(-1, 0, 0), 0));
+        // Truncation would give (0,0,0)@d1 — wrong. div_euclid gives (-1,0,0)@d1.
+        assert_eq!(loaded.child_count(&(IVec3::new(-1, 0, 0), 1)), 1);
+        assert_eq!(loaded.child_count(&(IVec3::new(0, 0, 0), 1)), 0);
+    }
+
+    #[test]
+    fn mark_fading_out_decrements_count_and_is_idempotent() {
+        let mut loaded = LoadedChunks::default();
+        let parent = (IVec3::new(0, 0, 0), 1u8);
+        for i in 0..3 {
+            let key = LoadedChunk::key(IVec3::new(i, 0, 0), Lod::new(0));
+            loaded.insert(key, mk_chunk(IVec3::new(i, 0, 0), 0));
+        }
+        assert_eq!(loaded.child_count(&parent), 2); // (0,0,0) and (1,0,0)
+        let k0 = (IVec3::new(0, 0, 0), 0u8);
+        loaded.mark_fading_out(&k0);
+        assert_eq!(loaded.child_count(&parent), 1);
+        // Idempotent: re-marking doesn't double-decrement.
+        loaded.mark_fading_out(&k0);
+        assert_eq!(loaded.child_count(&parent), 1);
+    }
+
+    #[test]
+    fn remove_skips_decrement_for_already_fading_entry() {
+        let mut loaded = LoadedChunks::default();
+        let key = LoadedChunk::key(IVec3::new(0, 0, 0), Lod::new(0));
+        let parent = (IVec3::new(0, 0, 0), 1u8);
+        loaded.insert(key, mk_chunk(IVec3::new(0, 0, 0), 0));
+        assert_eq!(loaded.child_count(&parent), 1);
+        loaded.mark_fading_out(&key);
+        assert_eq!(loaded.child_count(&parent), 0);
+        loaded.remove(&key);
+        // Already 0; remove on a fading entry must not underflow.
+        assert_eq!(loaded.child_count(&parent), 0);
+    }
+
+    #[test]
+    fn remove_decrements_count_when_entry_was_not_fading() {
+        let mut loaded = LoadedChunks::default();
+        let key = LoadedChunk::key(IVec3::new(0, 0, 0), Lod::new(0));
+        let parent = (IVec3::new(0, 0, 0), 1u8);
+        loaded.insert(key, mk_chunk(IVec3::new(0, 0, 0), 0));
+        assert_eq!(loaded.child_count(&parent), 1);
+        loaded.remove(&key);
+        assert_eq!(loaded.child_count(&parent), 0);
+    }
+
+    #[test]
+    fn reinsert_after_fade_out_brings_back_into_count() {
+        let mut loaded = LoadedChunks::default();
+        let key = LoadedChunk::key(IVec3::new(0, 0, 0), Lod::new(0));
+        let parent = (IVec3::new(0, 0, 0), 1u8);
+        loaded.insert(key, mk_chunk(IVec3::new(0, 0, 0), 0));
+        loaded.mark_fading_out(&key);
+        assert_eq!(loaded.child_count(&parent), 0);
+        // Replace the fading entry with a fresh one — should increment back.
+        loaded.insert(key, mk_chunk(IVec3::new(0, 0, 0), 0));
+        assert_eq!(loaded.child_count(&parent), 1);
     }
 
     // -----------------------------------------------------------------
@@ -1056,6 +1411,133 @@ mod tests {
         let theta = 5.0_f64.to_radians();
         let fwd1 = DVec3::new(theta.sin(), 0.0, theta.cos());
         assert!(!cache.should_rebuild(obs, fwd1));
+    }
+
+    #[test]
+    fn spawn_rebuild_runs_in_background_and_polls_in() {
+        // End-to-end exercise of the async rebuild path: spawn, wait for
+        // the worker thread to finish, poll, and verify the plan + pose
+        // were installed and the in-flight slot was cleared.
+        let mut cache = DesiredChunksCache::default();
+        let streamer = ChunkStreamer::default();
+        let obs = DVec3::new(0.0, 0.0, 0.0);
+        let fwd = DVec3::new(0.0, 0.0, 1.0);
+        let coverage: Arc<dyn LodCoveragePolicy> = Arc::new(MaskedShells);
+
+        assert!(!cache.is_rebuilding());
+        cache.spawn_rebuild(streamer.clone(), obs, fwd, f64::INFINITY, coverage.clone());
+        assert!(cache.is_rebuilding());
+
+        // Block until the worker pushes its result. Polling here is
+        // unrealistic for the streaming loop (which polls once per
+        // frame), but it lets the test deterministically wait for
+        // completion without sleeping.
+        let mut installed = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if cache.poll_rebuild() {
+                installed = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(installed, "background rebuild never landed within deadline");
+        assert!(!cache.is_rebuilding(), "rebuild slot should be cleared after poll");
+        assert_eq!(cache.built_for, Some((obs, fwd)));
+        // Same pose as a synchronous rebuild — should produce an
+        // identical plan length.
+        let mut sync_plan = desired_chunks(&streamer, obs, f64::INFINITY, coverage.as_ref());
+        prioritize_view(&mut sync_plan, obs, fwd);
+        assert_eq!(cache.plan.len(), sync_plan.len());
+        assert_eq!(cache.plan, sync_plan);
+    }
+
+    #[test]
+    fn spawn_rebuild_is_idempotent_while_in_flight() {
+        // Two back-to-back spawn calls for the same pose must not stack
+        // up — the second call returns without dispatching a second
+        // worker thread.
+        let mut cache = DesiredChunksCache::default();
+        let streamer = ChunkStreamer::default();
+        let obs = DVec3::new(0.0, 0.0, 0.0);
+        let fwd = DVec3::new(0.0, 0.0, 1.0);
+        let coverage: Arc<dyn LodCoveragePolicy> = Arc::new(MaskedShells);
+
+        cache.spawn_rebuild(streamer.clone(), obs, fwd, f64::INFINITY, coverage.clone());
+        assert!(cache.is_rebuilding());
+        // Second call is a no-op — the in-flight slot is still occupied.
+        cache.spawn_rebuild(streamer, obs, fwd, f64::INFINITY, coverage);
+        assert!(cache.is_rebuilding());
+
+        // Drain so the worker thread isn't orphaned for the test runner.
+        while !cache.poll_rebuild() {
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn cursor_resets_when_set_installs_fresh_plan() {
+        let mut cache = DesiredChunksCache::default();
+        let obs = DVec3::new(0.0, 0.0, 0.0);
+        let fwd = DVec3::new(0.0, 0.0, 1.0);
+        // Pretend the dispatch loop advanced the cursor partway through.
+        cache.set(obs, fwd, vec![(IVec3::new(0, 0, 0), Lod::new(0)); 32]);
+        cache.cursor = 20;
+        // A fresh `set` (e.g. a synchronous plan replacement) resets
+        // the cursor so the priority-sorted front is always re-scanned.
+        cache.set(obs, fwd, vec![(IVec3::new(1, 0, 0), Lod::new(0)); 8]);
+        assert_eq!(cache.cursor, 0);
+    }
+
+    #[test]
+    fn cursor_resets_when_poll_rebuild_installs_plan() {
+        let mut cache = DesiredChunksCache::default();
+        let streamer = ChunkStreamer::default();
+        let obs = DVec3::new(0.0, 0.0, 0.0);
+        let fwd = DVec3::new(0.0, 0.0, 1.0);
+        let coverage: Arc<dyn LodCoveragePolicy> = Arc::new(MaskedShells);
+        // Mimic a saturated dispatch loop that left cursor mid-plan.
+        cache.cursor = 999;
+        cache.spawn_rebuild(streamer, obs, fwd, f64::INFINITY, coverage);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if cache.poll_rebuild() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            cache.cursor, 0,
+            "cursor must reset to 0 when a fresh plan is installed"
+        );
+    }
+
+    #[test]
+    fn should_rebuild_uses_in_flight_pose_to_dedupe() {
+        // While a rebuild is in flight for pose P, `should_rebuild` must
+        // consult P (not the previous `built_for`) when deciding whether
+        // a fresh dispatch is needed. Otherwise the streaming loop would
+        // dispatch a second rebuild for the same pose every frame until
+        // the first one finished.
+        let mut cache = DesiredChunksCache::default();
+        let streamer = ChunkStreamer::default();
+        let p0 = DVec3::new(0.0, 0.0, 0.0);
+        let p1 = DVec3::new(100.0, 0.0, 0.0);
+        let fwd = DVec3::new(0.0, 0.0, 1.0);
+        let coverage: Arc<dyn LodCoveragePolicy> = Arc::new(MaskedShells);
+
+        cache.set(p0, fwd, vec![]);
+        cache.spawn_rebuild(streamer, p1, fwd, f64::INFINITY, coverage);
+        // Same pose as the in-flight rebuild ⇒ no fresh rebuild needed.
+        assert!(!cache.should_rebuild(p1, fwd));
+        // Drift far from the in-flight pose ⇒ a fresh rebuild *is* needed.
+        let p2 = DVec3::new(200.0, 0.0, 0.0);
+        assert!(cache.should_rebuild(p2, fwd));
+
+        // Drain so the worker thread isn't orphaned for the test runner.
+        while !cache.poll_rebuild() {
+            std::thread::yield_now();
+        }
     }
 
     // -----------------------------------------------------------------

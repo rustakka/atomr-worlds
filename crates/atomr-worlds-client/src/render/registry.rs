@@ -150,6 +150,61 @@ pub fn apply_strategy_by_name(cfg: &mut RenderConfig, slot: &str, name: &str) ->
             }
             _ => false,
         },
+        "horizon_imposter" => match name {
+            "NoHorizonImposter" => {
+                cfg.horizon_imposter = Arc::new(NoHorizonImposter);
+                true
+            }
+            "PolarAnnulusShell" => {
+                cfg.horizon_imposter = Arc::new(PolarAnnulusShell::default());
+                true
+            }
+            _ => false,
+        },
+        "lod_ladder" => match name {
+            "StaticLadder" => {
+                cfg.lod_ladder = Arc::new(StaticLadder);
+                true
+            }
+            "MotionScaledLadder" => {
+                cfg.lod_ladder = Arc::new(MotionScaledLadder);
+                true
+            }
+            _ => false,
+        },
+        "spawn_budget" => match name {
+            "StaticSpawnBudget" => {
+                cfg.spawn_budget = Arc::new(StaticSpawnBudget::default());
+                true
+            }
+            "MotionScaledSpawnBudget" => {
+                cfg.spawn_budget = Arc::new(MotionScaledSpawnBudget::default());
+                true
+            }
+            _ => false,
+        },
+        "visibility_cadence" => match name {
+            "StaticVisibilityCadence" => {
+                cfg.visibility_cadence = Arc::new(StaticVisibilityCadence);
+                true
+            }
+            "MotionScaledCadence" => {
+                cfg.visibility_cadence = Arc::new(MotionScaledCadence);
+                true
+            }
+            _ => false,
+        },
+        "rebuild_threshold" => match name {
+            "StaticRebuildThreshold" => {
+                cfg.rebuild_threshold = Arc::new(StaticRebuildThreshold);
+                true
+            }
+            "MotionScaledRebuildThreshold" => {
+                cfg.rebuild_threshold = Arc::new(MotionScaledRebuildThreshold);
+                true
+            }
+            _ => false,
+        },
         _ => false,
     }
 }

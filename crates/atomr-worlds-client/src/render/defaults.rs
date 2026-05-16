@@ -5,9 +5,9 @@
 use std::f32::consts::PI;
 
 use atomr_worlds_view::{
-    bake_ao, bake_sky_light, dual_contouring_mesh, greedy_mesh, marching_cubes_mesh,
-    marching_cubes_mesh_with_iso, naive_mesh, render_slice, Framebuffer, MaterialEntry,
-    MaterialPalette, Mesh, SliceShading,
+    bake_ao, bake_polar_annulus, bake_sky_light, dual_contouring_mesh, greedy_mesh,
+    marching_cubes_mesh, marching_cubes_mesh_with_iso, naive_mesh, render_slice, Framebuffer,
+    MaterialEntry, MaterialPalette, Mesh, SliceShading,
 };
 use atomr_worlds_voxel::Brick;
 use bevy::core_pipeline::bloom::BloomSettings;
@@ -19,6 +19,8 @@ use bevy::prelude::*;
 use bevy::render::camera::Exposure;
 
 use super::strategy::*;
+use crate::modes::fp::CameraMotionState;
+use crate::world_stream::LodLadder;
 
 // ---------------------------------------------------------------------------
 // Mesh — greedy (today's path)
@@ -546,6 +548,7 @@ impl FogStrategy for NoFog {
         _sun: SunState,
         _sky_horizon: Color,
         _horizon_band_m: Option<(f32, f32)>,
+        _motion: Option<&crate::modes::fp::CameraMotionState>,
     ) -> FogSettings {
         FogSettings {
             color: Color::NONE,
@@ -592,6 +595,7 @@ impl FogStrategy for ExpSquaredSkyTintedFog {
         _sun: SunState,
         sky_horizon: Color,
         horizon_band_m: Option<(f32, f32)>,
+        _motion: Option<&crate::modes::fp::CameraMotionState>,
     ) -> FogSettings {
         // Auto-tune density from the streamer horizon so fog reaches
         // HORIZON_TRANSMITTANCE exactly at `band.end`. Solve
@@ -655,6 +659,7 @@ impl FogStrategy for BiomeBlendedFog {
         _sun: SunState,
         sky_horizon: Color,
         horizon_band_m: Option<(f32, f32)>,
+        _motion: Option<&crate::modes::fp::CameraMotionState>,
     ) -> FogSettings {
         let density = match horizon_band_m {
             Some((_start, end)) if end > 0.0 => {
@@ -757,6 +762,308 @@ impl LodCoveragePolicy for NestedSummary {
     }
     fn mask_finer_covered(&self) -> bool {
         false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Horizon imposter strategies (Phase 19.2)
+// ---------------------------------------------------------------------------
+
+/// Default horizon-imposter baker. Emits a polar annulus of triangles
+/// (32 rings × 128 sectors, log-spaced radii) covering the band from
+/// the streamer's outer ring out to the clamped geometric horizon.
+/// Each vertex samples [`WorldMacroState`] to derive an elevation +
+/// biome color so the shell reads as representative terrain rather
+/// than a painted skybox.
+///
+/// Wiring (Step 8) and the actual sample loop land later in the phase
+/// — this skeleton produces a placeholder mesh so the trait, registry,
+/// and `RenderConfig` slot can be in place. Step 8 fills in the real
+/// macro-sampling path; Step 9 adds the sphere-shape curvature drop.
+pub struct PolarAnnulusShell {
+    pub n_rings: u32,
+    pub n_sectors: u32,
+    /// Hard cap on vertex count regardless of `n_rings * n_sectors`,
+    /// so misconfiguration can't blow up the imposter mesh.
+    pub max_verts: usize,
+}
+
+impl Default for PolarAnnulusShell {
+    fn default() -> Self {
+        Self { n_rings: 32, n_sectors: 128, max_verts: 16_384 }
+    }
+}
+
+impl HorizonImposterStrategy for PolarAnnulusShell {
+    fn name(&self) -> &'static str {
+        "PolarAnnulusShell"
+    }
+    fn bake(&self, inputs: &HorizonImposterInputs<'_>) -> HorizonImposterMesh {
+        let baked = bake_polar_annulus(
+            inputs.macro_state,
+            inputs.shape,
+            inputs.observer,
+            inputs.inner_radius_m,
+            inputs.outer_radius_m,
+            self.n_rings,
+            self.n_sectors,
+        );
+        // Digest the inputs so the runtime can skip identical re-bakes.
+        // Hash the observer in a coarse 32 m bucket so micro-drift
+        // doesn't churn the digest.
+        let bucket_x = (inputs.observer.x / 32.0).round() as i64;
+        let bucket_z = (inputs.observer.z / 32.0).round() as i64;
+        let digest = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            inputs.macro_state.digest.hash(&mut h);
+            bucket_x.hash(&mut h);
+            bucket_z.hash(&mut h);
+            (inputs.inner_radius_m.to_bits()).hash(&mut h);
+            (inputs.outer_radius_m.to_bits()).hash(&mut h);
+            h.finish()
+        };
+        HorizonImposterMesh {
+            vertices: baked.vertices,
+            colors: baked.colors,
+            indices: baked.indices,
+            r_inner_m: baked.r_inner_m,
+            r_outer_m: baked.r_outer_m,
+            source_digest: digest,
+        }
+    }
+}
+
+/// Legacy / disabled imposter — `enabled() == false` so the shell
+/// pipeline does nothing. Selected by `RenderPreset::Legacy`.
+#[derive(Default)]
+pub struct NoHorizonImposter;
+
+impl HorizonImposterStrategy for NoHorizonImposter {
+    fn name(&self) -> &'static str {
+        "NoHorizonImposter"
+    }
+    fn enabled(&self) -> bool {
+        false
+    }
+    fn bake(&self, inputs: &HorizonImposterInputs<'_>) -> HorizonImposterMesh {
+        HorizonImposterMesh {
+            vertices: Vec::new(),
+            colors: Vec::new(),
+            indices: Vec::new(),
+            r_inner_m: inputs.inner_radius_m as f32,
+            r_outer_m: inputs.outer_radius_m as f32,
+            source_digest: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Speed-aware strategy defaults (Phase 19.2)
+// ---------------------------------------------------------------------------
+
+/// Static-ladder policy: always returns `None`, leaving the streamer's
+/// configured ladder untouched. Used by `RenderPreset::Quality` and as
+/// the baseline that all behavior tests measure against.
+#[derive(Default)]
+pub struct StaticLadder;
+
+impl LodLadderPolicy for StaticLadder {
+    fn name(&self) -> &'static str {
+        "StaticLadder"
+    }
+    fn ladder(&self, _motion: &CameraMotionState) -> Option<LodLadder> {
+        None
+    }
+}
+
+/// Motion-scaled ladder policy. Returns a coarser ladder while the
+/// smoothed velocity stays above `SPRINT_VELOCITY_M_S`; back to `None`
+/// (i.e. keep the configured ladder) otherwise. Hysteresis is applied
+/// upstream by [`crate::modes::fp::fp_update_ladder`] via
+/// [`crate::modes::fp::LadderHysteresis`] so a brief shift-tap doesn't
+/// thrash the streamer.
+///
+/// The coarsened ladder keeps tiers 0–1 unchanged (sharp foreground)
+/// but bumps tier 2 from L2 (4 m voxels) to L3 (8 m voxels) and tier 3
+/// from L3 (8 m voxels) to L4 (16 m voxels). Radii stay the same so the
+/// shape of the streamed volume doesn't change — only the brick
+/// fidelity in the outer band. Combined with the horizon imposter
+/// behind it the visual delta is undetectable in normal play.
+#[derive(Default)]
+pub struct MotionScaledLadder;
+
+/// Smoothed velocity (m/s) above which `MotionScaledLadder` switches
+/// to the coarsened tier set. 6 m/s ≈ player walk + sprint multiplier
+/// in the default config.
+const SPRINT_VELOCITY_M_S: f32 = 6.0;
+
+impl LodLadderPolicy for MotionScaledLadder {
+    fn name(&self) -> &'static str {
+        "MotionScaledLadder"
+    }
+    fn ladder(&self, motion: &CameraMotionState) -> Option<LodLadder> {
+        if motion.smoothed_velocity_m_s <= SPRINT_VELOCITY_M_S && !motion.sprint_held {
+            return None;
+        }
+        use atomr_worlds_core::lod::Lod;
+        use crate::world_stream::{LodTier, DEFAULT_BRICKS_PER_TICK};
+        Some(LodLadder {
+            tiers: vec![
+                LodTier { lod: Lod::new(0), outer_radius_m: 128.0 },
+                LodTier { lod: Lod::new(1), outer_radius_m: 256.0 },
+                // L2 → L3 (coarser tier 2).
+                LodTier { lod: Lod::new(3), outer_radius_m: 512.0 },
+                // L3 → L4 (coarser tier 3).
+                LodTier { lod: Lod::new(4), outer_radius_m: 1024.0 },
+            ],
+            bricks_per_tick: DEFAULT_BRICKS_PER_TICK,
+        })
+    }
+}
+
+/// Static spawn-budget policy: always returns the historical
+/// `DEFAULT_SPAWN_BUDGET` (24 / frame). Quality preset uses this.
+pub struct StaticSpawnBudget {
+    pub budget: usize,
+}
+
+impl Default for StaticSpawnBudget {
+    fn default() -> Self {
+        Self { budget: crate::brick_gen::DEFAULT_SPAWN_BUDGET }
+    }
+}
+
+impl SpawnBudgetStrategy for StaticSpawnBudget {
+    fn name(&self) -> &'static str {
+        "StaticSpawnBudget"
+    }
+    fn budget_this_frame(&self, _motion: &CameraMotionState) -> usize {
+        self.budget
+    }
+}
+
+/// Motion-scaled spawn-budget policy. Lerps from `rest_budget` (24) at
+/// stand-still down to `sprint_budget` (8) at sustained sprint
+/// (`smoothed_velocity_m_s >= 12.0`). Counter-intuitively *lower* at
+/// sprint: the goal is to spread the GPU-upload spike from a batch of
+/// new bricks across more frames, not to push more bricks per frame.
+/// The streamer's rebuild loop still feeds the in-flight queue at full
+/// pace; this only throttles main-thread mesh→GPU uploads.
+pub struct MotionScaledSpawnBudget {
+    pub rest_budget: usize,
+    pub sprint_budget: usize,
+}
+
+impl Default for MotionScaledSpawnBudget {
+    fn default() -> Self {
+        Self {
+            rest_budget: crate::brick_gen::DEFAULT_SPAWN_BUDGET,
+            sprint_budget: 8,
+        }
+    }
+}
+
+impl SpawnBudgetStrategy for MotionScaledSpawnBudget {
+    fn name(&self) -> &'static str {
+        "MotionScaledSpawnBudget"
+    }
+    fn budget_this_frame(&self, motion: &CameraMotionState) -> usize {
+        let t = (motion.smoothed_velocity_m_s / 12.0).clamp(0.0, 1.0);
+        let rest = self.rest_budget as f32;
+        let sprint = self.sprint_budget as f32;
+        let lerp = rest + (sprint - rest) * t;
+        lerp.round().clamp(self.sprint_budget as f32, self.rest_budget as f32) as usize
+    }
+}
+
+/// Static visibility cadence: stride = 1 (run every frame).
+#[derive(Default)]
+pub struct StaticVisibilityCadence;
+
+impl VisibilityCadenceStrategy for StaticVisibilityCadence {
+    fn name(&self) -> &'static str {
+        "StaticVisibilityCadence"
+    }
+    fn stride(&self, _motion: &CameraMotionState) -> u32 {
+        1
+    }
+}
+
+/// Motion-scaled visibility cadence. Stride 1 at rest, 2 at moderate
+/// motion (≥ 3 m/s), 3 at full sprint (≥ 8 m/s). The LOD-visibility
+/// pass is O(loaded brick count) so striding it out at sprint shaves
+/// a measurable chunk off the per-frame cost without visibly affecting
+/// crossfade behavior — bricks just fade in/out over 2–3 frames
+/// instead of 1.
+#[derive(Default)]
+pub struct MotionScaledCadence;
+
+impl VisibilityCadenceStrategy for MotionScaledCadence {
+    fn name(&self) -> &'static str {
+        "MotionScaledCadence"
+    }
+    fn stride(&self, motion: &CameraMotionState) -> u32 {
+        if motion.smoothed_velocity_m_s >= 8.0 {
+            3
+        } else if motion.smoothed_velocity_m_s >= 3.0 {
+            2
+        } else {
+            1
+        }
+    }
+}
+
+/// Static rebuild thresholds: matches the historical
+/// [`crate::world_stream::PLAN_REBUILD_DRIFT_M`] /
+/// [`crate::world_stream::PLAN_REBUILD_FWD_COS`] constants. Used by
+/// the Quality preset to disable the motion-aware tightening.
+#[derive(Default)]
+pub struct StaticRebuildThreshold;
+
+impl RebuildThresholdStrategy for StaticRebuildThreshold {
+    fn name(&self) -> &'static str {
+        "StaticRebuildThreshold"
+    }
+    fn drift_m(&self, _motion: &CameraMotionState) -> f64 {
+        crate::world_stream::PLAN_REBUILD_DRIFT_M
+    }
+    fn fwd_cos(&self, _motion: &CameraMotionState) -> f64 {
+        crate::world_stream::PLAN_REBUILD_FWD_COS
+    }
+}
+
+/// Motion-scaled rebuild thresholds. Widens both at sustained sprint —
+/// drift 4 m → 16 m, fwd-cos 0.9659 → 0.93 — but only when the horizon
+/// imposter is active (`motion.imposter_active == true`); the imposter
+/// carries the outer-band terrain so the wider thresholds don't
+/// expose streaming gaps. With no imposter (Legacy preset) we stay at
+/// the historical constants to keep the LOD ladder ring-edge clean.
+#[derive(Default)]
+pub struct MotionScaledRebuildThreshold;
+
+impl RebuildThresholdStrategy for MotionScaledRebuildThreshold {
+    fn name(&self) -> &'static str {
+        "MotionScaledRebuildThreshold"
+    }
+    fn drift_m(&self, motion: &CameraMotionState) -> f64 {
+        if !motion.imposter_active {
+            return crate::world_stream::PLAN_REBUILD_DRIFT_M;
+        }
+        let t = (motion.smoothed_velocity_m_s / 12.0).clamp(0.0, 1.0);
+        let rest = crate::world_stream::PLAN_REBUILD_DRIFT_M;
+        let sprint = 16.0_f64;
+        rest + (sprint - rest) * t as f64
+    }
+    fn fwd_cos(&self, motion: &CameraMotionState) -> f64 {
+        if !motion.imposter_active {
+            return crate::world_stream::PLAN_REBUILD_FWD_COS;
+        }
+        let t = (motion.smoothed_velocity_m_s / 12.0).clamp(0.0, 1.0);
+        let rest = crate::world_stream::PLAN_REBUILD_FWD_COS;
+        let sprint = 0.93_f64;
+        rest + (sprint - rest) * t as f64
     }
 }
 
@@ -918,7 +1225,7 @@ mod tests {
         let fog = BiomeBlendedFog::default();
         let sun = SunState::default();
         let horizon = Color::rgb(0.4, 0.5, 0.8);
-        let s = fog.fog_settings(sun, horizon, Some((400.0, 1024.0)));
+        let s = fog.fog_settings(sun, horizon, Some((400.0, 1024.0)), None);
         // Without a biome bias (tint == 0.5,0.5,0.5, mix=0.3) the result
         // should stay close to the horizon color.
         let rgba = s.color.as_linear_rgba_f32();
@@ -932,7 +1239,7 @@ mod tests {
         let fog = BiomeBlendedFog { density: 0.002, biome_tint: [0.1, 0.6, 0.2], mix: 0.8 };
         let sun = SunState::default();
         let horizon = Color::rgb_linear(0.9, 0.9, 0.9);
-        let s = fog.fog_settings(sun, horizon, None);
+        let s = fog.fog_settings(sun, horizon, None, None);
         let rgba = s.color.as_linear_rgba_f32();
         // mix=0.8 toward biome (0.1, 0.6, 0.2): red should drop well below 0.9.
         assert!(rgba[0] < 0.5, "red should bend toward biome low: {}", rgba[0]);

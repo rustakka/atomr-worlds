@@ -1,0 +1,75 @@
+# Phase 19.2: sustained sprint frame-time benchmark.
+#
+# Holds Shift+W for ~4 s, dumps FRAME_DIAG ring buffer at the end. The
+# acceptance bar from Phase 19.1 is p99 ≤ 1145 µs / max ≤ 1859 µs over the
+# sample window — Phase 19.2's motion-aware strategies (LOD coarsening,
+# spawn-budget ramp-down, visibility stride 1→3) should keep us under that
+# while also rendering the imposter shell.
+#
+# Frame timings come from `time.delta_seconds_f64()` and depend on system
+# load; under software-GL CI they bottom out at the WinitSettings cadence
+# (~7-15 fps) so the absolute numbers compare to *Phase 19.1 numbers
+# measured on the same machine*, not a fixed budget.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 120
+output_prefix = "perf_sprint_hold"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "origin pre-sprint"
+
+# 4 s sustained sprint (~240 frames at the assumed 60 fps).
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 120
+kind  = "dump_motion"
+note  = "mid-sprint snapshot"
+
+[[events]]
+frame = 245
+kind  = "screenshot"
+note  = "+4 s sprint endpoint"
+
+[[events]]
+frame = 247
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 247
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 250
+kind  = "dump_motion"
+note  = "release — velocity ramps down via EWMA"
+
+# Drain the ring buffer. 1024 entries — covers the whole post-warmup run.
+[[events]]
+frame = 252
+kind  = "dump_frame_diag"
+note  = "full-run frame-time histogram"
+
+[[events]]
+frame = 270
+kind  = "exit"

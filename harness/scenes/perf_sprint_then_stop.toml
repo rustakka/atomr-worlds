@@ -1,0 +1,71 @@
+# Phase 19.2: sprint → idle visual-fidelity check.
+#
+# Sprints for 2 s then idles 2 s. The final screenshot must match the
+# `fp_lookup` baseline within tolerance — i.e. all motion-aware strategies
+# returned to their static rest values once EWMA-smoothed velocity decayed
+# back below the threshold. Validates that `MotionScaledLadder` /
+# `MotionScaledSpawnBudget` / `MotionScaledCadence` / `MotionScaledRebuildThreshold`
+# are *transient* effects, not sticky.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 120
+output_prefix = "perf_sprint_stop"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "origin baseline (compare against fp_lookup_0000.png)"
+
+# 2 s sprint.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 125
+kind  = "screenshot"
+note  = "mid-sprint — coarsened ladder + tighter fog"
+
+[[events]]
+frame = 127
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 127
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# 2 s of idle for EWMA to settle (τ = 0.3 s ⇒ 2 s ≈ 6 τ → ≥ 99.7 % decayed).
+[[events]]
+frame = 130
+kind  = "dump_motion"
+note  = "immediately after release"
+
+[[events]]
+frame = 247
+kind  = "dump_motion"
+note  = "+2 s idle — smoothed_velocity should be ≈ 0"
+
+[[events]]
+frame = 249
+kind  = "screenshot"
+note  = "rest after sprint — strategy state == cold start"
+
+[[events]]
+frame = 270
+kind  = "exit"

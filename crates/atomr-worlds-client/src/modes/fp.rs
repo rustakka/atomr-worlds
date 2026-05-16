@@ -57,9 +57,7 @@ use crate::render::{
 };
 use crate::view_mode::ViewMode;
 use crate::world_runtime::{ActiveWorld, WorldRuntime};
-use crate::world_stream::{
-    desired_chunks, prioritize_view, ChunkStreamer, DesiredChunksCache, LoadedChunk, LoadedChunks,
-};
+use crate::world_stream::{ChunkStreamer, DesiredChunksCache, LoadedChunk, LoadedChunks};
 
 pub struct FpPlugin;
 
@@ -68,6 +66,8 @@ impl Plugin for FpPlugin {
         app.init_resource::<FpState>()
             .init_resource::<MaterialPool>()
             .init_resource::<VoxelMaterialPool>()
+            .init_resource::<CameraMotionState>()
+            .init_resource::<LadderHysteresis>()
             .add_systems(Startup, setup_fp_scene)
             .add_systems(
                 Update,
@@ -75,7 +75,9 @@ impl Plugin for FpPlugin {
                     grab_cursor,
                     world_walk_input,
                     fp_input_look,
+                    fp_update_motion_state,
                     fp_sync_camera,
+                    fp_update_ladder,
                     fp_stream_bricks,
                     fp_update_lod_visibility,
                     fp_animate_fade_in,
@@ -85,6 +87,110 @@ impl Plugin for FpPlugin {
                     .chain(),
             );
     }
+}
+
+/// Tracks the last frame the [`crate::world_stream::LodLadder`] was
+/// swapped, so [`fp_update_ladder`] can apply hysteresis: the ladder
+/// can't change again until `LADDER_HYSTERESIS_S` seconds have elapsed.
+/// Prevents rapid-tap sprint flips from churning the streamer ladder.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct LadderHysteresis {
+    pub last_swap_secs: f32,
+}
+
+/// Minimum dwell between ladder swaps. 0.5 s is wide enough that a
+/// sub-second sprint tap doesn't flip tiers, narrow enough that a
+/// genuine sustained sprint settles into the coarser ladder before
+/// the second wave of streaming would catch up.
+pub const LADDER_HYSTERESIS_S: f32 = 0.5;
+
+/// Per-frame: consult [`crate::render::LodLadderPolicy`] for the
+/// preferred ladder given the current [`CameraMotionState`]. If the
+/// policy wants to swap, `LadderHysteresis` gates the change to no
+/// more than once per `LADDER_HYSTERESIS_S`.
+///
+/// Step 7 wires this in with the behavior-preserving default
+/// (`MotionScaledLadder` always returns `None`), so this system is a
+/// no-op until Step 10 activates the actual swap.
+fn fp_update_ladder(
+    render_cfg: Res<RenderConfig>,
+    motion: Res<CameraMotionState>,
+    time: Res<Time>,
+    mut streamer: ResMut<ChunkStreamer>,
+    mut hyst: ResMut<LadderHysteresis>,
+) {
+    let Some(want) = render_cfg.lod_ladder.ladder(&motion) else {
+        return;
+    };
+    let now = time.elapsed_seconds();
+    if now - hyst.last_swap_secs < LADDER_HYSTERESIS_S {
+        return;
+    }
+    streamer.set_ladder(want);
+    hyst.last_swap_secs = now;
+}
+
+/// Camera-motion telemetry consumed by speed-aware strategies. Updated
+/// each frame by [`fp_update_motion_state`] from [`FpState::walk`] +
+/// keyboard sprint state.
+///
+/// `velocity_m_s` is the raw frame-over-frame speed (may spike on dt
+/// jitter). `smoothed_velocity_m_s` is the EWMA with `τ = 0.3 s` —
+/// strategies that want a non-flickering speed should read this. The
+/// discrete `sprint_held` flag is read straight from `KeyCode::Shift*`
+/// so harness scenarios can drive sprint behavior without waiting for
+/// the EWMA to warm up.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct CameraMotionState {
+    pub position: DVec3,
+    pub forward: DVec3,
+    pub last_position: Option<DVec3>,
+    pub last_forward: Option<DVec3>,
+    pub velocity_m_s: f32,
+    pub smoothed_velocity_m_s: f32,
+    pub smoothed_yaw_rate_rad_s: f32,
+    pub sprint_held: bool,
+    /// Mirror of `HorizonImposterActive.0` so motion-aware strategies
+    /// (notably `MotionScaledRebuildThreshold`) can gate their
+    /// widening on whether the imposter is carrying the outer band.
+    /// Refreshed each frame by `fp_update_motion_state`.
+    pub imposter_active: bool,
+}
+
+impl Default for CameraMotionState {
+    fn default() -> Self {
+        Self {
+            position: DVec3::new(0.0, 0.0, 0.0),
+            forward: DVec3::new(0.0, 0.0, 1.0),
+            last_position: None,
+            last_forward: None,
+            velocity_m_s: 0.0,
+            smoothed_velocity_m_s: 0.0,
+            smoothed_yaw_rate_rad_s: 0.0,
+            sprint_held: false,
+            imposter_active: false,
+        }
+    }
+}
+
+/// Time-constant for the velocity / yaw-rate EWMAs. 0.3 s is wide
+/// enough that a 60 ms shift-key tap doesn't flicker downstream
+/// strategies, narrow enough that releasing Shift settles within
+/// roughly a half-second.
+pub const CAMERA_MOTION_TAU_S: f32 = 0.30;
+
+fn ewma_alpha(dt_s: f32, tau_s: f32) -> f32 {
+    1.0 - (-dt_s / tau_s).exp()
+}
+
+fn unit_forward_from_yaw_pitch(yaw: f32, pitch: f32) -> DVec3 {
+    let (sin_y, cos_y) = yaw.sin_cos();
+    let (sin_p, cos_p) = pitch.sin_cos();
+    DVec3::new(
+        (sin_y * cos_p) as f64,
+        sin_p as f64,
+        (cos_y * cos_p) as f64,
+    )
 }
 
 /// Tags a freshly-spawned brick entity that is mid-fade-in. The
@@ -382,7 +488,7 @@ fn setup_fp_scene(
     // `Query<&mut FogSettings>` finds the component on frame 0.
     let initial_sun = render_cfg.sun_curve.sun_state(12.0);
     let initial_horizon = render_cfg.sky.horizon_color(initial_sun);
-    camera_ent.insert(render_cfg.fog.fog_settings(initial_sun, initial_horizon, None));
+    camera_ent.insert(render_cfg.fog.fog_settings(initial_sun, initial_horizon, None, None));
     let shadows_on = render_cfg.shadow.enabled();
     let cascades = render_cfg.shadow.cascade_config();
     let (shadow_depth_bias, shadow_normal_bias) = render_cfg.shadow.biases();
@@ -562,6 +668,52 @@ fn fp_input_look(
     );
 }
 
+/// Refresh [`CameraMotionState`] from the current [`FpState`] + sprint
+/// keys. Runs every frame regardless of [`ViewMode`] (TP/RTS also
+/// observe the walk camera), so downstream strategies see motion data
+/// uniformly. Skipped while [`FpState::ready`] is false to avoid feeding
+/// the EWMAs a synthetic spawn-position warp.
+pub fn fp_update_motion_state(
+    state: Res<FpState>,
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    imposter_active: Res<crate::render::HorizonImposterActive>,
+    mut motion: ResMut<CameraMotionState>,
+) {
+    motion.imposter_active = imposter_active.0;
+    if !state.ready {
+        return;
+    }
+    let dt = time.delta_seconds().clamp(1.0e-3, 0.1);
+    let alpha = ewma_alpha(dt, CAMERA_MOTION_TAU_S);
+
+    let position = state.walk.observer.position;
+    let forward = unit_forward_from_yaw_pitch(state.walk.yaw, state.walk.pitch);
+
+    let raw_v = match motion.last_position {
+        Some(last) => ((position - last).length() / dt as f64) as f32,
+        None => 0.0,
+    };
+    let yaw_rate = match motion.last_forward {
+        Some(last) => {
+            let dot = (last.x * forward.x + last.y * forward.y + last.z * forward.z)
+                .clamp(-1.0, 1.0);
+            (dot.acos() / dt as f64) as f32
+        }
+        None => 0.0,
+    };
+
+    motion.velocity_m_s = raw_v;
+    motion.smoothed_velocity_m_s += alpha * (raw_v - motion.smoothed_velocity_m_s);
+    motion.smoothed_yaw_rate_rad_s += alpha * (yaw_rate - motion.smoothed_yaw_rate_rad_s);
+    motion.last_position = Some(position);
+    motion.last_forward = Some(forward);
+    motion.position = position;
+    motion.forward = forward;
+    motion.sprint_held =
+        keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+}
+
 /// Copy the FP [`WalkCamera`]'s eye + look-at pose onto the Bevy
 /// camera entity each frame. No-op outside FP mode; the entity's
 /// transform is owned by other view modes' systems then.
@@ -588,11 +740,13 @@ fn fp_sync_camera(
 /// Per-frame streaming loop for the 3D world entities.
 ///
 /// 1. Bump the streamer frame counter for hysteresis bookkeeping.
-/// 2. Recompute the desired `(coord, lod)` set when the observer
-///    drifts / turns past the cache-rebuild thresholds (see
-///    [`crate::world_stream::DesiredChunksCache`]); the new policy
-///    parameter from [`RenderConfig::coverage`] controls shell vs
-///    nested-summary shape.
+/// 2. Poll the [`DesiredChunksCache`] for a completed background
+///    rebuild; if the observer drifted / turned past the rebuild
+///    thresholds and no rebuild is in flight, dispatch a fresh one
+///    on a worker thread. The rebuild itself (4-tier AABB sweep +
+///    view-priority sort) used to run inline and cost ~2 ms; running
+///    it off-thread eliminates the per-rebuild frame spike that used
+///    to fire every ~20 frames at sprint pace.
 /// 3. Refresh `last_seen_frame` on every desired entry so the
 ///    hysteresis window resets while the brick is in the ring.
 /// 4. Convert stale entries to [`BrickFadeOut`] (instead of immediate
@@ -609,6 +763,7 @@ fn fp_stream_bricks(
     pool: Res<MaterialPool>,
     voxel_pool: Res<VoxelMaterialPool>,
     render_cfg: Res<RenderConfig>,
+    motion: Res<CameraMotionState>,
     mut streamer: ResMut<ChunkStreamer>,
     mut loaded: ResMut<LoadedChunks>,
     mut plan_cache: ResMut<DesiredChunksCache>,
@@ -645,30 +800,44 @@ fn fp_stream_bricks(
     }
 
     // Rebuild the desired-chunks plan only when the observer drifts or
-    // the camera turns past the configured thresholds. The full sweep
-    // costs ms on the default 4-tier ladder — caching it lets quiet
-    // frames spend almost no time in the streamer.
-    if plan_cache.should_rebuild(observer, forward) {
-        // Body-aware horizon: sphere/cylinder worlds clamp the streamer's
-        // outer radius to the geometric horizon at the observer's
-        // altitude (`sqrt(2*R*h + h²)`). Cube worlds short-circuit to
-        // `f64::INFINITY` and the streamer's full ladder reach is used
-        // unchanged — preserves the pre-Phase-17.x behaviour for the
-        // default cube world.
+    // the camera turns past the configured thresholds. The sweep + sort
+    // costs ~2 ms on the default 4-tier ladder — too long for the main
+    // thread, so it runs on a background worker:
+    //
+    //   poll → install completed rebuild (if any)
+    //   should_rebuild + !is_rebuilding → spawn a fresh background task
+    //
+    // The cached plan can lag the observer by 1-2 frames after a trigger,
+    // but rebuilds were already drift-triggered (only every 4 m of
+    // motion), so the loader was always working off a slightly stale
+    // plan. Moving the staleness off-thread eliminates the per-rebuild
+    // frame spike entirely without changing the loading behaviour in any
+    // observable way.
+    plan_cache.poll_rebuild();
+    // Pull the per-frame rebuild thresholds from the strategy registry.
+    // At rest both impls (Motion-scaled default + Static for Quality
+    // preset) return the historical constants, so behavior matches
+    // pre-Phase-19.2 until Step 10 activates the sprint widening.
+    let drift_threshold = render_cfg.rebuild_threshold.drift_m(&motion);
+    let fwd_cos_threshold = render_cfg.rebuild_threshold.fwd_cos(&motion);
+    if plan_cache.should_rebuild_with(observer, forward, drift_threshold, fwd_cos_threshold)
+        && !plan_cache.is_rebuilding()
+    {
         let horizon_m = active.shape.horizon_at_m(observer);
-        let mut plan =
-            desired_chunks(&streamer, observer, horizon_m, render_cfg.coverage.as_ref());
-        prioritize_view(&mut plan, observer, forward);
-        plan_cache.set(observer, forward, plan);
+        plan_cache.spawn_rebuild(
+            streamer.clone(),
+            observer,
+            forward,
+            horizon_m,
+            std::sync::Arc::clone(&render_cfg.coverage),
+        );
     }
 
     // Mark every desired chunk as "seen this frame" so the hysteresis
     // window resets while we're inside the ring.
     for (coord, lod) in &plan_cache.plan {
         let key = LoadedChunk::key(*coord, *lod);
-        if let Some(entry) = loaded.0.get_mut(&key) {
-            entry.last_seen_frame = frame;
-        }
+        loaded.touch_last_seen(&key, frame);
     }
 
     // Stale chunks (outside the desired set past the hysteresis window)
@@ -680,7 +849,6 @@ fn fp_stream_bricks(
     // hidden until the crossfade hands off.
     let hyst = streamer.hysteresis_ticks;
     let stale_keys: Vec<(IVec3, u8)> = loaded
-        .0
         .iter()
         .filter_map(|(k, v)| {
             if frame.saturating_sub(v.last_seen_frame) >= hyst {
@@ -691,17 +859,28 @@ fn fp_stream_bricks(
         })
         .collect();
     for k in stale_keys {
-        let Some(chunk) = loaded.0.get(&k) else { continue };
-        let Some(ent) = chunk.entity else {
-            // Empty-brick placeholder; nothing to fade. Drop it.
-            loaded.0.remove(&k);
-            continue;
+        let (ent, from_scale) = match loaded.get(&k) {
+            Some(chunk) => match chunk.entity {
+                Some(ent) => (ent, (1u64 << chunk.lod.depth as u32) as f32),
+                None => {
+                    // Empty-brick placeholder; nothing to fade. Drop it
+                    // (decrements parent count for the empty coverage).
+                    loaded.remove(&k);
+                    continue;
+                }
+            },
+            None => continue,
         };
-        let from_scale = (1u64 << chunk.lod.depth as u32) as f32;
         commands
             .entity(ent)
             .remove::<BrickFadeIn>()
             .insert(BrickFadeOut { age: 0.0, from_scale, key: k });
+        // Mirror the BrickFadeOut on the ECS into LoadedChunks so the
+        // visibility pass's child_counts index stays incremental — this
+        // is the "begin fade-out" decrement that lets the parent be
+        // uncovered immediately, without waiting for the fade animation
+        // to complete.
+        loaded.mark_fading_out(&k);
     }
 
     // Dispatch async fetches for desired-but-not-loaded bricks. The
@@ -709,25 +888,39 @@ fn fp_stream_bricks(
     // during initial world fill; remaining work resumes next frame.
     // We walk the (already view-priority-sorted) plan front-to-back so
     // forward-facing bricks resolve first.
-    for (bc, lod) in plan_cache.plan.iter() {
+    //
+    // The cursor persists across frames so a saturated worker pool
+    // doesn't force the next frame to re-walk the already-loaded
+    // front of the plan — at 11k entries with most already resident,
+    // that scan was a multi-thousand-hashmap-lookup tax. New plan
+    // installs reset the cursor to 0 (see `DesiredChunksCache::set` /
+    // `poll_rebuild`) so freshly-re-prioritized plans get re-scanned
+    // from the front.
+    let mut cursor = plan_cache.cursor;
+    while cursor < plan_cache.plan.len() {
         if workers.is_saturated() {
             break;
         }
-        let key = LoadedChunk::key(*bc, *lod);
-        if loaded.0.contains_key(&key) {
+        let (bc, lod) = plan_cache.plan[cursor];
+        cursor += 1;
+        let key = LoadedChunk::key(bc, lod);
+        if loaded.contains_key(&key) {
             continue;
         }
         if workers.contains(&key) {
             continue;
         }
-        workers.dispatch(state.addr, *bc, *lod);
+        workers.dispatch(state.addr, bc, lod);
     }
+    plan_cache.cursor = cursor;
 
     // Drain completed brick fetches and convert them into Bevy entities.
-    // Capped per frame so mesh-asset upload stays inside the frame
-    // budget — running a 64-brick backlog through `meshes.add` on one
-    // frame produces a visible hitch.
-    let ready_batch = workers.drain(DEFAULT_SPAWN_BUDGET);
+    // The per-frame budget comes from `SpawnBudgetStrategy` (default:
+    // motion-scaled; Quality preset: static) — at rest both return the
+    // historical `DEFAULT_SPAWN_BUDGET`, so behavior is preserved until
+    // Step 10 activates the sprint-time ramp.
+    let budget = render_cfg.spawn_budget.budget_this_frame(&motion);
+    let ready_batch = workers.drain(budget);
     for ready in ready_batch {
         spawn_brick_entity(
             ready,
@@ -756,7 +949,7 @@ fn fp_stream_bricks(
         let mut sum_cx = 0.0f64;
         let mut sum_cz = 0.0f64;
         let mut count_mesh = 0u32;
-        for ((coord, depth), chunk) in loaded.0.iter() {
+        for ((coord, depth), chunk) in loaded.iter() {
             let edge_m = BRICK_EDGE as f64 * (1u64 << *depth as u32) as f64;
             let cx = (coord.x as f64 + 0.5) * edge_m - observer.x;
             let cz = (coord.z as f64 + 0.5) * edge_m - observer.z;
@@ -813,9 +1006,15 @@ fn spawn_brick_entity(
     let lod_scale = (1u64 << lod.depth as u32) as f32;
     let edge_m = BRICK_EDGE as f32 * lod_scale;
     if by_material.is_empty() {
-        loaded.0.insert(
+        loaded.insert(
             key,
-            LoadedChunk { coord: bc, lod, entity: None, last_seen_frame: frame },
+            LoadedChunk {
+                coord: bc,
+                lod,
+                entity: None,
+                last_seen_frame: frame,
+                is_fading_out: false,
+            },
         );
         return;
     }
@@ -872,9 +1071,15 @@ fn spawn_brick_entity(
         }
         ShadingMode::PaletteVoxelMaterial => {
             let Some(voxel_handle) = voxel_pool.handle.as_ref() else {
-                loaded.0.insert(
+                loaded.insert(
                     key,
-                    LoadedChunk { coord: bc, lod, entity: Some(parent), last_seen_frame: frame },
+                    LoadedChunk {
+                        coord: bc,
+                        lod,
+                        entity: Some(parent),
+                        last_seen_frame: frame,
+                        is_fading_out: false,
+                    },
                 );
                 return;
             };
@@ -894,9 +1099,15 @@ fn spawn_brick_entity(
             }
         }
     }
-    loaded.0.insert(
+    loaded.insert(
         key,
-        LoadedChunk { coord: bc, lod, entity: Some(parent), last_seen_frame: frame },
+        LoadedChunk {
+            coord: bc,
+            lod,
+            entity: Some(parent),
+            last_seen_frame: frame,
+            is_fading_out: false,
+        },
     );
 }
 
@@ -953,7 +1164,13 @@ fn fp_animate_fade_out(
         let scale = fade.from_scale * (1.0 - s);
         tf.scale = Vec3::splat(scale.max(0.0));
         if t >= 1.0 {
-            loaded.0.remove(&fade.key);
+            // Fade-out complete: drop the LoadedChunks entry. The
+            // parent's child_count was already decremented when the
+            // BrickFadeOut was attached (see `mark_fading_out` in
+            // `fp_stream_bricks`), so this remove must be a no-op for
+            // the count — `LoadedChunks::remove` skips the decrement
+            // when the entry was already flagged fading.
+            loaded.remove(&fade.key);
             commands.entity(ent).despawn_recursive();
         }
     }
@@ -981,7 +1198,9 @@ fn fp_animate_fade_out(
 ///    blooms in smoothly rather than appearing in one frame.
 fn fp_update_lod_visibility(
     loaded: Res<LoadedChunks>,
-    fading_out: Query<(), With<BrickFadeOut>>,
+    render_cfg: Res<RenderConfig>,
+    motion: Res<CameraMotionState>,
+    streamer: Res<ChunkStreamer>,
     mut commands: Commands,
     mut q: Query<(
         Entity,
@@ -990,43 +1209,23 @@ fn fp_update_lod_visibility(
         Option<&BrickFadeIn>,
     )>,
 ) {
-    // Build a `parent_key → child_count` table from the loaded set,
-    // excluding children that are currently fading out (they're on
-    // their way to despawn; the parent should already be uncovered).
-    let mut child_counts: std::collections::HashMap<(IVec3, u8), u32> =
-        std::collections::HashMap::new();
-    for ((coord, depth), chunk) in loaded.0.iter() {
-        // Children only — depth 0 has no finer children that could
-        // cover it. Bricks with `entity: None` (empty placeholders)
-        // still count: they "cover" their parent's region because the
-        // region really is empty there.
-        let _ = chunk;
-        // Bricks mid-fade-out don't contribute to coverage so the
-        // parent gets revealed before the child fully disappears.
-        if let Some(ent) = chunk.entity {
-            if fading_out.get(ent).is_ok() {
-                continue;
-            }
-        }
-        // Parent of `(c, d)` lives at `(c.div_euclid(2), d+1)`. Using
-        // `div_euclid` (not `/2`) keeps the relationship correct for
-        // negative coords — `-1 / 2 == 0` in Rust truncation but
-        // `(-1).div_euclid(2) == -1`, which matches our voxel-grid
-        // convention.
-        let parent = (
-            IVec3::new(
-                coord.x.div_euclid(2),
-                coord.y.div_euclid(2),
-                coord.z.div_euclid(2),
-            ),
-            depth + 1,
-        );
-        *child_counts.entry(parent).or_insert(0) += 1;
+    // Strategy-controlled cadence — at rest stride == 1 (every frame).
+    // Step 10 lifts it to 2 / 3 under motion to free up headroom on
+    // streaming-heavy frames. Use the streamer's monotonic frame counter
+    // so the stride is deterministic across runs.
+    let stride = render_cfg.visibility_cadence.stride(&motion).max(1);
+    if streamer.frame % (stride as u64) != 0 {
+        return;
     }
-
+    // The parent → live-child-count map is now maintained incrementally
+    // inside `LoadedChunks` (decremented at fade-out begin, restored on
+    // re-insert), so this pass is O(n_q) instead of the prior O(n_q +
+    // n_loaded). Bricks mid-fade-out were already removed from the count
+    // when `mark_fading_out` was called, so the parent gets revealed in
+    // the same frame the child starts to disappear.
     for (ent, lod, mut vis, fade_in) in q.iter_mut() {
         let key = (lod.coord, lod.depth);
-        let covered = child_counts.get(&key).map(|n| *n == 8).unwrap_or(false);
+        let covered = loaded.child_count(&key) == 8;
         if covered {
             if *vis != Visibility::Hidden {
                 *vis = Visibility::Hidden;

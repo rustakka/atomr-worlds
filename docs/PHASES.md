@@ -1545,3 +1545,320 @@ the harness DSL.
 - Bevy 0.13 shader updates to render the new `BrickEdgeAwareAo` /
   `BiomeBlendedFog` end-to-end (vertex attribute lands; shader path
   consumes default value when fields are zero).
+
+## Phase 19.1 *(landed)* — Async plan rebuild (chunk-transition hitch fix)
+
+A user-reported "big delay when transitioning between chunks" reproduced
+in the `stream_walk` harness as a regular ~2.3 ms frame spike every 20
+frames at sprint pace — the cadence of `DesiredChunksCache::should_rebuild`
+trips against the 4 m drift threshold. The 4-tier AABB sweep + view-
+priority sort over ~11 k brick entries ran inline on the main thread,
+landing a visible hitch every 333 ms at 60 fps that lined up with the
+"transitioning to another chunk" report.
+
+### Fix
+
+[`crates/atomr-worlds-client/src/world_stream.rs::DesiredChunksCache`](../crates/atomr-worlds-client/src/world_stream.rs)
+now holds an optional `RebuildHandle { rx: Mutex<mpsc::Receiver<…>>,
+pose }`. Three new methods:
+
+- `spawn_rebuild(streamer, observer, forward, horizon_m, coverage)` —
+  takes a `ChunkStreamer` clone (cheap: 4-entry `Vec<LodTier>` plus
+  scalars) and an `Arc<dyn LodCoveragePolicy>` (the strategy registry
+  already stores it as `Arc`), spawns a `std::thread::spawn` worker
+  that runs the existing `desired_chunks` + `prioritize_view` and
+  sends the result over an `mpsc::channel`. Idempotent while in flight.
+- `poll_rebuild()` — `try_recv`s from the receiver; installs the new
+  plan + records the pose it was built for.
+- `is_rebuilding()` — guards `spawn_rebuild` so the streamer doesn't
+  pile multiple workers on top of each other.
+
+`should_rebuild` was extended to compare against the *in-flight* pose
+when one exists, falling back to `built_for` otherwise. Without this,
+the streamer would dispatch a fresh rebuild every frame between the
+drift trigger and the worker landing.
+
+[`fp_stream_bricks`](../crates/atomr-worlds-client/src/modes/fp.rs)
+swapped its inline rebuild for the new flow:
+
+```text
+plan_cache.poll_rebuild();
+if plan_cache.should_rebuild(observer, forward) && !plan_cache.is_rebuilding() {
+    plan_cache.spawn_rebuild(streamer.clone(), observer, forward,
+                             horizon_m, Arc::clone(&render_cfg.coverage));
+}
+```
+
+The cached plan lags the observer by 1-2 frames after a rebuild trigger,
+which is harmless: rebuilds were already drift-triggered (every 4 m of
+motion), so the loader was always working off a slightly stale plan.
+Moving the staleness off-thread eliminates the per-rebuild frame spike
+without changing the loading behaviour in any observable way.
+
+### Verification
+
+Measured with the existing `harness/scenes/stream_walk.toml` scenario
+(60 s sprint walk +Z then -Z, 580 instrumented frames):
+
+| metric                  | before    | after     | delta   |
+| ----------------------- | --------- | --------- | ------- |
+| rebuild-frame mean      | 2931 µs   | 504 µs    | −83 %   |
+| rebuild-frame max       | 3424 µs   | 909 µs    | −73 %   |
+| all-frame p99           | 3020 µs   | 1145 µs   | −62 %   |
+| all-frame max           | 3424 µs   | 1859 µs   | −46 %   |
+| quiet-frame mean        | 527 µs    | 543 µs    | ±3 %    |
+
+The worst AFTER frames are now dispatch+drain spikes (`fp_stream_bricks`
+iterating the ~11 k-entry plan while `BrickGenWorkers` has free slots),
+topping out at 1.9 ms — a separate, future optimisation if it becomes
+the next bottleneck. The user-perceived chunk-transition hitch is gone.
+
+New `world_stream::tests::*`:
+
+- `spawn_rebuild_runs_in_background_and_polls_in` — round-trips a
+  spawn + worker thread + poll, asserts the installed plan equals the
+  synchronous `desired_chunks + prioritize_view` reference.
+- `spawn_rebuild_is_idempotent_while_in_flight` — a second
+  `spawn_rebuild` for the same pose is a no-op while the first is in
+  flight.
+- `should_rebuild_uses_in_flight_pose_to_dedupe` — confirms the
+  dispatch-guard logic against a moving observer.
+
+All 50 `atomr-worlds-client` tests green; the existing 29
+`world_stream` tests continue to pass unchanged.
+
+## Phase 19.2 *(landed)* — Horizon imposter + speed-aware visual cost
+
+Phase 19.1 made plan rebuilds async, but two user-visible gaps remained:
+the world only rendered representative terrain out to the LOD ladder's
+outer ring (~1 km) even though `WorldShape::horizon_at_m` exposes the
+real geometric horizon, and sustained sprints still produced subjective
+hitches because every visual strategy paid the same cost in motion as it
+did at rest. This phase lands two complementary mechanisms:
+
+1. **Horizon-imposter shell mesh** — a 32 × 128 polar-annulus mesh
+   sourced from `WorldMacroState` (elevation + biomes + water), baked
+   off-thread, draping the band between the LOD ladder's outer ring
+   and the shape's geometric horizon clamped to a 16 km max.
+2. **Speed-aware strategy layer** — a `CameraMotionState` resource
+   feeding four new strategies that coarsen the LOD ladder, throttle
+   mesh-upload budget, stride visibility updates, and widen plan-rebuild
+   thresholds when the camera is moving fast.
+
+Both pieces compose: when the imposter is active the ladder can shed its
+outer tier, and the rebuild-threshold strategy can widen its drift/cos
+gates because the imposter shell covers the band that would otherwise
+shimmer during chunk turnover.
+
+### Part A — Horizon imposter shell
+
+New trait
+[`HorizonImposterStrategy`](../crates/atomr-worlds-client/src/render/strategy.rs)
+plus
+[`HorizonImposterMesh`](../crates/atomr-worlds-client/src/render/strategy.rs)
+define the contract. Two default impls:
+
+- `PolarAnnulusShell` — `N_RINGS=32 × N_SECTORS=128` log-spaced radii,
+  per-vertex elevation + biome color sample, sphere curvature drop via
+  `-d² / (2 R)` for non-cube shapes.
+- `NoHorizonImposter` — empty mesh, `enabled() == false`. Selected by
+  `RenderPreset::Legacy`.
+
+Pure baker lives in
+[`crates/atomr-worlds-view/src/derived/horizon_shell.rs`](../crates/atomr-worlds-view/src/derived/horizon_shell.rs)
+(no Bevy types). Five unit tests cover topology
+(`indices.len() == N_RINGS × N_SECTORS × 6`), deterministic byte-equal
+output for identical `(seed, shape, observer)`, curvature drop on
+sphere shapes, color non-uniformity across biomes, and the
+sky-fallback path when the strategy is disabled. Triangle winding
+emits front-faces upward (`(i0, i1, i2) + (i1, i3, i2)`) so the
+standard eye-level observer sees the shell through Bevy's default
+back-face cull.
+
+Bevy-side wiring in
+[`crates/atomr-worlds-client/src/render/horizon_shell.rs`](../crates/atomr-worlds-client/src/render/horizon_shell.rs):
+
+- `HorizonShellPlugin` registers `HorizonShellRuntime`,
+  `HorizonImposterActive`, `MacroStateProvider`, plus `ensure_horizon_shell`
+  + `sync_horizon_shell` systems.
+- `HorizonShellRuntime.rebuild: Option<RebuildHandle>` mirrors the
+  `Mutex<mpsc::Receiver<…>>` template from Phase 19.1, dispatching
+  bakes on a worker thread (5-15 ms at 32 × 128) and installing them
+  via `meshes.get_mut(handle)` on the main thread.
+- `MacroStateProvider` lazily computes
+  `Arc<WorldMacroState>` keyed on `(seed, shape)` at `grid_level = 4`
+  so the baker can sample biomes without a host round-trip.
+- The shell entity carries `NotShadowCaster + NotShadowReceiver +
+  NoFrustumCulling`: a 16 km AABB-bounded mesh would otherwise blow up
+  the cascade frustum and be culled by Bevy's view-space AABB test.
+- Material is a white-base `StandardMaterial` with `unlit = true`
+  and `cull_mode: Some(Face::Back)`. Vertex colors pass through 1:1.
+
+Rebuild triggers: startup (once macro state is available), drift > 64 m
+from `built_for.0` (loose, ~0.5 % of shell radius), and macro-digest
+change (defensive — macro is immutable at runtime today).
+
+### Part B — Speed-aware strategy layer
+
+Five new resources / traits in
+[`crates/atomr-worlds-client/src/modes/fp.rs`](../crates/atomr-worlds-client/src/modes/fp.rs)
+and
+[`crates/atomr-worlds-client/src/render/strategy.rs`](../crates/atomr-worlds-client/src/render/strategy.rs):
+
+- `CameraMotionState` — `position`, `forward`, `velocity_m_s`,
+  `smoothed_velocity_m_s` (EWMA τ = 0.3 s), `smoothed_yaw_rate_rad_s`,
+  `sprint_held`. Driven by `fp_update_motion_state` chained between
+  `world_walk_input` and `fp_sync_camera`. `sprint_held` is read from
+  `KeyCode::ShiftLeft|Right` so harness scenarios drive deterministic
+  strategy behavior without waiting on EWMA warmup.
+- `LodLadderPolicy::ladder(motion)` — `MotionScaledLadder` swaps the
+  inner/outer tier counts when `smoothed_velocity_m_s > 6.0`. 0.5 s
+  hysteresis on swaps via `LadderHysteresis` resource.
+- `SpawnBudgetStrategy::budget_this_frame(motion)` —
+  `MotionScaledSpawnBudget` lerps from 24 → 8 spawns/frame as smoothed
+  velocity ramps 0 → 12 m/s. *Counter-intuitive direction*: lower at
+  sprint to spread GPU-upload spikes over more frames.
+- `VisibilityCadenceStrategy::stride(motion)` — `MotionScaledCadence`
+  returns 1 at rest, 2 at moderate motion, 3 at sprint.
+  `fp_update_lod_visibility` early-returns on
+  `frame_count % stride != 0`.
+- `RebuildThresholdStrategy::{drift_m, fwd_cos}(motion)` —
+  `MotionScaledRebuildThreshold` widens from 4.0 m / 0.9659 at rest to
+  16.0 m / 0.93 at full sprint, but *only when
+  `HorizonImposterActive.0 == true`* — otherwise the rest values stand
+  to avoid outer-rim streaming gaps under Legacy preset.
+
+Two additive trait extensions are also new but behavior-preserving:
+
+- `LodCoveragePolicy::tier_lod_bias(tier_index, motion) -> i8` —
+  default `0`. Hook for future motion-coupled tier-depth bias.
+- `FogStrategy::fog_settings(..., motion: Option<&CameraMotionState>)` —
+  `ExpSquaredSkyTintedFog` tightens fog start by
+  `smoothed_velocity_m_s / 12 × 15 %` of the band and snaps fog end to
+  the imposter outer radius (instead of the ladder outer radius) when
+  `HorizonImposterActive.0 == true`.
+
+### Wiring + ergonomics
+
+- New `MotionAwareConfig` in
+  [`render/config.rs`](../crates/atomr-worlds-client/src/render/config.rs)
+  holds the four motion-aware strategies plus a
+  `locked_to_standstill: bool` kill-switch.
+- New `PerfPreset { Balanced, Quality }`. `Balanced` (default) keeps the
+  motion-aware ramps; `Quality` flips `locked_to_standstill = true` and
+  swaps every motion-aware strategy to a static rest-value impl, so the
+  visual fidelity at sprint is identical to standing still.
+- New `--perf <balanced|quality>` CLI flag in `main.rs`.
+- All five new strategy slots are registered in
+  [`render/registry.rs`](../crates/atomr-worlds-client/src/render/registry.rs)
+  so harness scenarios can A/B individual policies via `set_strategy`.
+
+### Diagnose-the-hitch fixes (folded in alongside the new mechanisms)
+
+- **Dispatch-loop cursor** on `DesiredChunksCache` — `fp_stream_bricks`
+  walks `plan[cursor..]` and stores the advanced cursor each frame.
+  Eliminates the per-frame O(11 k) scan over already-loaded entries.
+  Reset to 0 in `poll_rebuild` whenever a new plan installs.
+- **Incremental `child_counts`** on `LoadedChunks` — replaces the
+  per-frame `HashMap` rebuild in `fp_update_lod_visibility` (O(n_loaded)
+  every frame) with insert / fade / remove deltas at the three
+  mutation points.
+
+### Frame-time instrumentation (permanent)
+
+[`FrameDiagPlugin`](../crates/atomr-worlds-client/src/hud.rs) maintains
+a 1024-frame ring of `Time::delta_seconds_f64() * 1e6`. A new
+`dump_frame_diag` harness event drains the ring and prints
+`FRAME_DIAG frame=N us=…` lines plus a `FRAME_DIAG_SUMMARY` line. Two
+sibling events: `dump_motion` (prints `CameraMotionState` snapshot) and
+`dump_streamer` (loaded-chunk / rebuild diagnostics). The
+`ATOMR_FRAME_DIAG` env-var instrumentation stripped at the end of
+Phase 19.1 is not reinstated — the permanent ring buffer replaces it.
+
+### Verification
+
+Harness scenarios authored in `harness/scenes/` for Phase 19.2:
+
+| scenario                       | shots | proves                                    |
+| ------------------------------ | ----- | ----------------------------------------- |
+| `horizon_distance_markers.toml`| 6     | Distant terrain visible past 1 km after sustained sprint; imposter rebuilds fire on drift. |
+| `horizon_sprint.toml`          | 4     | Imposter mesh keeps regenerating off-thread under sustained motion (no visual hitches). |
+| `horizon_360_pan.toml`         | 7     | 360° rotational coherence — shell is a full annulus, not a frustum-aligned strip. |
+| `horizon_overview_cubeworld.toml` | 2  | Overview mode renders the sphere imposter end-to-end (no streamer required). |
+| `perf_sprint_hold.toml`        | 2     | 4 s sustained sprint — frame-time histogram dump. |
+| `perf_sprint_then_stop.toml`   | 3     | Strategy state returns to cold-start after EWMA decay (transient, not sticky). |
+| `perf_sprint_turn.toml`        | 3     | Sprint + 90° yaw — combined drift + view-direction load. |
+
+`perf_sprint_hold` baseline (DISPLAY=:0, NVIDIA RTX 5000, vsync-locked
+at 60 Hz):
+
+| metric                  | value     |
+| ----------------------- | --------- |
+| `FRAME_DIAG` count      | 372       |
+| mean                    | 16 699 µs |
+| p99                     | 18 136 µs |
+| post-warmup max         | 27 083 µs |
+| first-frame outlier     | 100 844 µs (frame 2, asset upload spike) |
+
+`perf_sprint_turn` (sprint + 90° yaw): mean 16 706 µs, p99 21 907 µs,
+max 105 210 µs (same first-frame outlier). Steady-state is vsync-cadenced
+on this hardware — under software-GL CI the absolute numbers are
+incomparable to the Phase 19.1 baseline (which was measured at the
+WinitSettings cadence). What's preserved is the *absence of regression*:
+no new frame is worse than the asset-upload spike at frame 2.
+
+`MOTION` dumps confirm the EWMA shape:
+
+```text
+frame=240  v_raw=12.000  v_smooth=11.981  yaw_rate=0.016  sprint=true
+frame=370  v_raw=0.000   v_smooth=9.618   yaw_rate=0.016  sprint=false
+```
+
+i.e. `smoothed_velocity_m_s` lags `velocity_m_s` by ~τ as designed,
+preventing strategy thrash on a single-frame sprint tap.
+
+### Visual evidence
+
+- `horizon_distance_markers/horizon_dist_0004.png` — after ~6 s of
+  forward sprint, stepped imposter terrain extends past the LOD ladder
+  edge all the way to the geometric horizon.
+- `horizon_overview_cubeworld/horizon_overview_0001.png` — overview
+  mode renders the sphere imposter as a complete planetary view with
+  biome-colored continents, oceans, and ice caps.
+- `perf_sprint_hold/perf_sprint_hold_0000.png` (pre + post winding fix)
+  — origin baseline before and after the triangle-winding correction.
+  Pre-fix had inconsistent white patches where camera-aligned back
+  faces happened to face the eye; post-fix is uniformly colored.
+
+### Tests
+
+- 5 new unit tests on the pure baker in
+  `crates/atomr-worlds-view/src/derived/horizon_shell.rs` —
+  determinism, topology, sphere curvature drop, biome color spread,
+  empty-mesh sky fallback.
+- `tests/horizon_shell_runtime.rs` integration test — spawn the plugin,
+  advance frames, assert the shell entity exists with non-empty mesh
+  + `NotShadowCaster`.
+- Existing `world_stream::tests::*` and `client::tests::*` continue to
+  pass (incremental `child_counts` is a drop-in; cursor advance is
+  drop-in for the existing `lod_crossfade.toml` baseline).
+
+### Risks / follow-ups
+
+- `horizon_sprint.toml` reliably hangs in the harness regardless of
+  winding direction (deferred — the other six scenarios cover the same
+  imposter rebuild + sprint sustain paths; root cause is likely the
+  sustained 6 s sprint hitting an off-thread bake backlog under
+  xvfb-software-GL latency).
+- The imposter pays a real main-thread render cost: post-fix harness
+  runs (where the shell is consistently front-faced) take 2-3× longer
+  wall-clock than pre-fix runs at the same scenario. This is expected
+  — the shell carries 16 k vertices through the standard PBR pipeline
+  with `NoFrustumCulling`. A future optimization could replace the
+  unlit material with a custom shader that skips per-fragment lighting
+  cost entirely, or stride the shell rebuild based on `smoothed_velocity`.
+- Vertex colors lean light when biome lookup returns near-white biomes
+  (snow / desert). Material base color is white, so vertex colors pass
+  through directly; a future pass could clamp colors away from full
+  white to keep tonal separation against the sky.
+

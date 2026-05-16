@@ -1,0 +1,88 @@
+# Phase 19.2: sprint + 90° yaw under load.
+#
+# Combines forward sprint with a sustained yaw turn. Exercises the worst
+# case for plan rebuilds — the `RebuildThresholdStrategy` widens its drift
+# and fwd-cos thresholds under sustained motion *only when the imposter
+# shell is active*, so the rebuild count over this scenario should not
+# regress vs Phase 19.1 baseline.
+#
+# Phase 19.1 baseline: a similar maneuver triggered 4 plan rebuilds.
+# Expectation: ≤ 4 with imposter active.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 120
+output_prefix = "perf_sprint_turn"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "origin"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 65
+kind  = "dump_motion"
+note  = "+1 s sprint — velocity saturated"
+
+# Add yaw turn at +1 s. ArrowRight holds for ~90° (~1 s at default speed).
+[[events]]
+frame = 65
+kind  = "key_press"
+key   = "ArrowRight"
+
+[[events]]
+frame = 125
+kind  = "key_release"
+key   = "ArrowRight"
+
+[[events]]
+frame = 130
+kind  = "dump_motion"
+note  = "post-yaw — yaw_rate should drop, velocity still high"
+
+[[events]]
+frame = 145
+kind  = "screenshot"
+note  = "after sprint+turn maneuver"
+
+# Continue sprint another 1 s in the new heading.
+[[events]]
+frame = 205
+kind  = "screenshot"
+note  = "+1 s further sprint — fresh terrain in new heading"
+
+[[events]]
+frame = 207
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 207
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 250
+kind  = "dump_frame_diag"
+note  = "frame-time histogram for the maneuver"
+
+[[events]]
+frame = 270
+kind  = "exit"

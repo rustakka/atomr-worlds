@@ -34,6 +34,7 @@ pub mod world_query;
 
 pub use camera::{Camera, Projection};
 pub use decals::{render_decals, Decal};
+pub use derived::horizon_shell::{bake_polar_annulus, HorizonShellMesh, MAX_SHELL_VERTS};
 pub use derived::slice_index::{build_slice_table, SliceColumn, SliceKey, SliceTable};
 pub use derived::surface_raster::{
     build_surface_raster, surface_raster_to_mesh, SurfaceKey, SurfaceRaster,

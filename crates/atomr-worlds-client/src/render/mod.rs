@@ -9,6 +9,7 @@
 
 pub mod config;
 pub mod defaults;
+pub mod horizon_shell;
 pub mod materials;
 pub mod offscreen;
 pub mod plugin;
@@ -18,7 +19,11 @@ pub mod skybox;
 pub mod strategy;
 pub mod sun;
 
-pub use config::{RenderConfig, RenderPreset};
+pub use config::{PerfPreset, RenderConfig, RenderPreset};
+pub use horizon_shell::{
+    HorizonImposterActive, HorizonShell, HorizonShellPlugin, HorizonShellRuntime,
+    MacroStateProvider,
+};
 pub use materials::{PaletteEntryGpu, SkyDomeMaterial, VoxelMaterial, VoxelMaterialExt};
 pub use offscreen::{
     CaptureOutcome, CaptureOutcomes, CaptureQueueHandle, OffscreenCapturePlugin,
@@ -33,8 +38,10 @@ pub use skybox::{
     NIGHT_BRIGHTNESS, SKYBOX_FACE_RESOLUTION,
 };
 pub use strategy::{
-    AoStrategy, FogStrategy, LodCoveragePolicy, MeshStrategy, PaletteStrategy, ShadingMode,
-    ShadingStrategy, ShadowStrategy, SkyStrategy, SliceRenderInputs, SliceRenderStrategy, SunCurveStrategy,
-    SunState, TonemapStrategy,
+    AoStrategy, FogStrategy, HorizonImposterInputs, HorizonImposterMesh, HorizonImposterStrategy,
+    LodCoveragePolicy, LodLadderPolicy, MeshStrategy, PaletteStrategy, RebuildThresholdStrategy,
+    ShadingMode, ShadingStrategy, ShadowStrategy, SkyStrategy, SliceRenderInputs,
+    SliceRenderStrategy, SpawnBudgetStrategy, SunCurveStrategy, SunState, TonemapStrategy,
+    VisibilityCadenceStrategy,
 };
 pub use sun::{advance_world_time, sync_sky_and_fog, sync_sun, WorldSunMarker, WorldTime};

@@ -126,7 +126,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(active)
         .insert_resource(initial_mode)
         .insert_resource(ClearColor(Color::rgb(0.45, 0.65, 0.85)))
+        .insert_resource({
+            let mut cfg = render::RenderConfig::default();
+            cfg.apply_perf_preset(match cli.perf {
+                cli::PerfPreset::Balanced => render::PerfPreset::Balanced,
+                cli::PerfPreset::Quality => render::PerfPreset::Quality,
+            });
+            cfg
+        })
         .add_plugins(render::RenderPlugin)
+        .add_plugins(render::HorizonShellPlugin)
         .add_plugins(world_stream::ChunkStreamerPlugin)
         .add_plugins(brick_gen::BrickGenPlugin)
         .add_plugins(modes::fp::FpPlugin)
@@ -136,6 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_plugins(modes::rts::RtsPlugin)
         .add_plugins(modes::overview::OverviewPlugin)
         .add_plugins(hud::HudPlugin)
+        .add_plugins(hud::FrameDiagPlugin)
         .add_systems(Update, view_mode_input_system);
 
     if let Some((scenario, out_abs)) = harness_bits {

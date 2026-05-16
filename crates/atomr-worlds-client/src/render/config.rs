@@ -34,6 +34,27 @@ pub struct RenderConfig {
     /// `HillshadeSlice` (the default — relief-shaded) or `FlatSlice`
     /// (historical flat fill).
     pub slice:     Arc<dyn SliceRenderStrategy>,
+    /// Polar-annulus terrain shell drawn between the streamer's outer
+    /// ring and the geometric horizon. `PolarAnnulusShell` (default)
+    /// fills the band with elevation-shaded representative terrain;
+    /// `NoHorizonImposter` (Legacy preset) disables the shell.
+    pub horizon_imposter: Arc<dyn HorizonImposterStrategy>,
+    /// LOD ladder policy — returns a coarser ladder under sustained
+    /// motion or `None` to keep the configured one. `StaticLadder`
+    /// (Quality preset) always returns `None`.
+    pub lod_ladder:        Arc<dyn LodLadderPolicy>,
+    /// Per-frame brick-spawn budget. `MotionScaledSpawnBudget` (default)
+    /// ramps down at sprint to smooth GPU-upload spikes.
+    pub spawn_budget:      Arc<dyn SpawnBudgetStrategy>,
+    /// Stride for `fp_update_lod_visibility`. `StaticVisibilityCadence`
+    /// (Quality preset) keeps it at 1; `MotionScaledCadence` lifts it
+    /// to 2/3 under motion.
+    pub visibility_cadence: Arc<dyn VisibilityCadenceStrategy>,
+    /// Drift / cosine thresholds for the plan rebuild trigger.
+    /// `StaticRebuildThreshold` matches the historical constants;
+    /// `MotionScaledRebuildThreshold` widens them at sprint when the
+    /// horizon imposter is active.
+    pub rebuild_threshold: Arc<dyn RebuildThresholdStrategy>,
     /// If true, [`super::WorldTime`] advances each frame; if false (the
     /// default), it only moves when the harness or user code sets it.
     pub time_advances_automatically: bool,
@@ -62,6 +83,11 @@ impl Default for RenderConfig {
             tonemap:   Arc::new(AcesTonemap),
             coverage:  Arc::new(NestedSummary),
             slice:     Arc::new(HillshadeSlice::default()),
+            horizon_imposter:   Arc::new(PolarAnnulusShell::default()),
+            lod_ladder:         Arc::new(MotionScaledLadder),
+            spawn_budget:       Arc::new(MotionScaledSpawnBudget::default()),
+            visibility_cadence: Arc::new(MotionScaledCadence),
+            rebuild_threshold:  Arc::new(MotionScaledRebuildThreshold),
             time_advances_automatically: false,
             seconds_per_hour: 60.0,
         }
@@ -69,6 +95,28 @@ impl Default for RenderConfig {
 }
 
 impl RenderConfig {
+    /// Apply a [`PerfPreset`]. `Balanced` (default) leaves the
+    /// motion-aware strategy slots untouched; `Quality` swaps all four
+    /// to static no-op implementations so motion stops driving any
+    /// behavior. Exists so the `--perf` CLI flag can hand off the
+    /// preset choice without leaking the strategy types into `main.rs`.
+    pub fn apply_perf_preset(&mut self, preset: PerfPreset) {
+        match preset {
+            PerfPreset::Balanced => {
+                self.lod_ladder = Arc::new(MotionScaledLadder);
+                self.spawn_budget = Arc::new(MotionScaledSpawnBudget::default());
+                self.visibility_cadence = Arc::new(MotionScaledCadence);
+                self.rebuild_threshold = Arc::new(MotionScaledRebuildThreshold);
+            }
+            PerfPreset::Quality => {
+                self.lod_ladder = Arc::new(StaticLadder);
+                self.spawn_budget = Arc::new(StaticSpawnBudget::default());
+                self.visibility_cadence = Arc::new(StaticVisibilityCadence);
+                self.rebuild_threshold = Arc::new(StaticRebuildThreshold);
+            }
+        }
+    }
+
     /// Apply a named preset. Returns `false` if the name is unknown so
     /// callers (the harness) can surface a clear error.
     pub fn apply_preset(&mut self, preset: RenderPreset) {
@@ -88,6 +136,8 @@ impl RenderConfig {
                 self.tonemap = Arc::new(DefaultTonemap);
                 self.coverage = Arc::new(MaskedShells);
                 self.slice = Arc::new(FlatSlice);
+                // No imposter — legacy renders only the LOD ladder.
+                self.horizon_imposter = Arc::new(NoHorizonImposter);
             }
             RenderPreset::Stylized => {
                 self.ao = Arc::new(MinecraftCornerAo);
@@ -111,6 +161,20 @@ impl RenderConfig {
             }
         }
     }
+}
+
+/// Performance preset. `Balanced` (default) wires the motion-aware
+/// strategy layer ([`MotionScaledLadder`], [`MotionScaledSpawnBudget`],
+/// [`MotionScaledCadence`], [`MotionScaledRebuildThreshold`]) — these
+/// coarsen LOD, throttle spawn budget, stride visibility, and widen
+/// rebuild thresholds when the camera is moving fast. `Quality` swaps
+/// all four to static no-ops, fixing visual fidelity at the rest-state
+/// level whether the player is moving or not. Surfaced by
+/// [`crate::cli::PerfPreset`] via `--perf`.
+#[derive(Clone, Copy, Debug)]
+pub enum PerfPreset {
+    Balanced,
+    Quality,
 }
 
 /// One-line strategy bundles. Steps 1–10 wire individual strategies; this

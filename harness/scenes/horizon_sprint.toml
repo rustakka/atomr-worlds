@@ -1,0 +1,69 @@
+# Phase 19.2: sustained sprint with horizon imposter active.
+#
+# Holds Shift+W for ~6 s, capturing every 2 s. Goal is to verify the
+# imposter mesh keeps regenerating off-thread under sustained motion
+# without visual hitches — and that the LOD ladder coarsens (via
+# `MotionScaledLadder`) without dropping the horizon coverage that the
+# imposter shell carries.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 120
+output_prefix = "horizon_sprint"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "origin baseline pre-sprint"
+
+# Hold sprint for ~6 s real time at the assumed 60 fps frame rate.
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 125
+kind  = "screenshot"
+note  = "+2 s sprint"
+
+[[events]]
+frame = 245
+kind  = "screenshot"
+note  = "+4 s sprint"
+
+[[events]]
+frame = 365
+kind  = "screenshot"
+note  = "+6 s sprint — imposter rebuilds elapsed"
+
+[[events]]
+frame = 367
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 367
+kind  = "key_release"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 425
+kind  = "dump_motion"
+note  = "post-sprint — velocity ramps back to zero on EWMA"
+
+[[events]]
+frame = 440
+kind  = "exit"

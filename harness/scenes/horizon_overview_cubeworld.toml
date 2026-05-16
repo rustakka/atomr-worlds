@@ -1,0 +1,52 @@
+# Phase 19.2: overview mode in a cube world — confirm the horizon shell
+# plugin doesn't panic when no `ChunkStreamer` resource is present.
+#
+# Overview is the planet-scale view; it doesn't run the brick streamer.
+# `HorizonShellPlugin::sync_horizon_shell` reads `Option<Res<ChunkStreamer>>`
+# and falls back to a 1024 m default outer radius. The shell entity is
+# spawned regardless so swapping back into FP mode (TODO future scenario)
+# finds it ready. Acceptance: no crash, before/after screenshots succeed,
+# globe visible.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "overview"
+width = 1280
+height = 720
+warmup_frames = 60
+output_prefix = "horizon_overview"
+
+[[events]]
+frame = 1
+kind  = "key_tap"
+key   = "KeyP"
+
+[[events]]
+frame = 5
+kind  = "key_tap"
+key   = "KeyP"
+
+[[events]]
+frame = 20
+kind  = "screenshot"
+note  = "overview baseline — globe visible, no streamer running"
+
+# Rotate a bit to make sure the per-frame `sync_horizon_shell` path
+# survives multiple ticks without a streamer.
+[[events]]
+frame = 25
+kind  = "key_press"
+key   = "ArrowDown"
+
+[[events]]
+frame = 85
+kind  = "key_release"
+key   = "ArrowDown"
+
+[[events]]
+frame = 95
+kind  = "screenshot"
+note  = "after pitch — still no panic"
+
+[[events]]
+frame = 100
+kind  = "exit"

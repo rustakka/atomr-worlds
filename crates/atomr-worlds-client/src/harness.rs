@@ -43,6 +43,8 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, Window};
 use serde::Deserialize;
 
+use crate::hud::FrameDiagBuffer;
+use crate::modes::fp::CameraMotionState;
 use crate::render::{
     CaptureOutcomes, CaptureQueueHandle, OffscreenTarget, RenderConfig, RenderPreset,
     WorldTime,
@@ -95,7 +97,8 @@ pub struct ScenarioEvent {
     pub frame: u64,
     /// One of: `"key_press" | "key_release" | "key_tap" | "screenshot" |
     /// "mouse_move" | "mouse_button_press" | "mouse_button_release" |
-    /// "exit" | "set_time_of_day" | "set_render_preset" | "set_strategy"`.
+    /// "exit" | "set_time_of_day" | "set_render_preset" | "set_strategy" |
+    /// "dump_frame_diag" | "dump_motion"`.
     pub kind: String,
     #[serde(default)]
     pub key: Option<String>,
@@ -207,7 +210,7 @@ impl Scenario {
                     }
                     expanded.push(ev.clone());
                 }
-                "screenshot" | "exit" => {
+                "screenshot" | "exit" | "dump_frame_diag" | "dump_motion" => {
                     expanded.push(ev.clone());
                 }
                 "set_time_of_day" => {
@@ -391,7 +394,16 @@ impl Plugin for HarnessPlugin {
             // that read `just_pressed` (view-mode switches, z-band cycling).
             .add_systems(PreUpdate, drive_input_events.after(bevy::input::InputSystem))
             .add_systems(PostUpdate, drive_screenshots)
-            .add_systems(Last, (drain_capture_outcomes, drive_exit).chain());
+            .add_systems(
+                Last,
+                (
+                    drain_capture_outcomes,
+                    drive_frame_diag_dump,
+                    drive_motion_dump,
+                    drive_exit,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -649,6 +661,80 @@ fn mask_to_shift(mask: u32) -> Result<u32, String> {
         return Err("zero colour mask".into());
     }
     Ok(mask.trailing_zeros())
+}
+
+/// Drain the [`FrameDiagBuffer`] when a `dump_frame_diag` event fires.
+/// Emits one `FRAME_DIAG frame=N us=M` line per sample to stderr plus a
+/// summary line `FRAME_DIAG_SUMMARY count=N mean_us=X p99_us=Y max_us=Z`.
+fn drive_frame_diag_dump(
+    clock: Res<HarnessClock>,
+    cfg: Res<HarnessConfig>,
+    buf: Option<Res<FrameDiagBuffer>>,
+) {
+    let now = clock.frame;
+    let dump_now = cfg
+        .scenario
+        .events
+        .iter()
+        .any(|e| e.frame == now && e.kind == "dump_frame_diag");
+    if !dump_now {
+        return;
+    }
+    let Some(buf) = buf else {
+        eprintln!("HARNESS_WARNING dump_frame_diag: FrameDiagBuffer missing");
+        return;
+    };
+    if buf.is_empty() {
+        eprintln!("FRAME_DIAG_SUMMARY count=0 mean_us=0 p99_us=0 max_us=0");
+        return;
+    }
+    let mut samples: Vec<u64> = Vec::with_capacity(buf.len());
+    for s in buf.samples() {
+        eprintln!("FRAME_DIAG frame={} us={}", s.frame, s.micros);
+        samples.push(s.micros);
+    }
+    samples.sort_unstable();
+    let count = samples.len();
+    let max = *samples.last().unwrap();
+    let mean: f64 = samples.iter().sum::<u64>() as f64 / count as f64;
+    let p99_idx = ((count as f64 * 0.99).ceil() as usize).saturating_sub(1).min(count - 1);
+    let p99 = samples[p99_idx];
+    eprintln!(
+        "FRAME_DIAG_SUMMARY count={} mean_us={:.0} p99_us={} max_us={}",
+        count, mean, p99, max
+    );
+}
+
+/// Print the current [`CameraMotionState`] to stderr when `dump_motion`
+/// fires. Useful for asserting that strategy gating fires at the
+/// expected frames in a harness scenario.
+fn drive_motion_dump(
+    clock: Res<HarnessClock>,
+    cfg: Res<HarnessConfig>,
+    motion: Option<Res<CameraMotionState>>,
+) {
+    let now = clock.frame;
+    let dump_now = cfg
+        .scenario
+        .events
+        .iter()
+        .any(|e| e.frame == now && e.kind == "dump_motion");
+    if !dump_now {
+        return;
+    }
+    let Some(motion) = motion else {
+        eprintln!("HARNESS_WARNING dump_motion: CameraMotionState missing");
+        return;
+    };
+    eprintln!(
+        "MOTION frame={} pos=({:.3},{:.3},{:.3}) fwd=({:.3},{:.3},{:.3}) v_raw={:.3} v_smooth={:.3} yaw_rate={:.3} sprint={}",
+        now,
+        motion.position.x, motion.position.y, motion.position.z,
+        motion.forward.x, motion.forward.y, motion.forward.z,
+        motion.velocity_m_s, motion.smoothed_velocity_m_s,
+        motion.smoothed_yaw_rate_rad_s,
+        motion.sprint_held,
+    );
 }
 
 fn drive_exit(

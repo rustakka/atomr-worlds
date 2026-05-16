@@ -1,0 +1,78 @@
+# Phase 19.2: stationary 360° pan with horizon imposter active.
+#
+# Elevates the FP camera (Space to jump) then sweeps the yaw a full 360°,
+# capturing every ~60°. The imposter shell is a polar annulus (360°
+# coverage) so each shot should reveal fresh representative terrain —
+# distinct silhouettes per heading, no rotational symmetry artefacts.
+#
+# `ArrowRight` rotates yaw at the configured `look_speed` (rad/s); we hold
+# it for ~6 s to complete a full sweep, capturing on the way.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 240
+output_prefix = "horizon_360"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Elevate one jump to clear close terrain occluding the horizon band.
+[[events]]
+frame = 2
+kind  = "key_tap"
+key   = "Space"
+
+[[events]]
+frame = 8
+kind  = "screenshot"
+note  = "facing +Z (north)"
+
+# Sweep ArrowRight to rotate yaw. Time the captures by frame.
+[[events]]
+frame = 10
+kind  = "key_press"
+key   = "ArrowRight"
+
+# Pan ~60° per ~70 frames (≈1.2 s @ 60 fps; assumes yaw rate ≈ 1 rad/s).
+[[events]]
+frame = 80
+kind  = "screenshot"
+note  = "~60° yaw — north-east heading"
+
+[[events]]
+frame = 150
+kind  = "screenshot"
+note  = "~120° — south-east heading"
+
+[[events]]
+frame = 220
+kind  = "screenshot"
+note  = "~180° — south heading"
+
+[[events]]
+frame = 290
+kind  = "screenshot"
+note  = "~240° — south-west heading"
+
+[[events]]
+frame = 360
+kind  = "screenshot"
+note  = "~300° — north-west heading"
+
+[[events]]
+frame = 430
+kind  = "screenshot"
+note  = "~360° back to north"
+
+[[events]]
+frame = 432
+kind  = "key_release"
+key   = "ArrowRight"
+
+[[events]]
+frame = 470
+kind  = "exit"

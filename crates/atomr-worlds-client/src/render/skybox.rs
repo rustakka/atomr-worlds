@@ -212,7 +212,7 @@ pub fn bake_skybox(
     let mut nodes: Vec<MeshNode> = Vec::new();
     let lod_scale = (1u64 << far_depth as u32) as f32;
     let edge_m = BRICK_EDGE as f32 * lod_scale;
-    for ((_, depth), chunk) in loaded.0.iter() {
+    for ((_, depth), chunk) in loaded.iter() {
         if *depth != far_depth {
             continue;
         }

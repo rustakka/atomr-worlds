@@ -5,6 +5,7 @@
 //! AABB-intersection invalidation driven by host `VoxelDelta`/`RegionDelta`
 //! events.
 
+pub mod horizon_shell;
 pub mod slice_index;
 pub mod surface_raster;
 pub mod world_summary;

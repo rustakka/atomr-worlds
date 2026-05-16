@@ -90,6 +90,7 @@ pub fn sync_sky_and_fog(
     cfg: Res<RenderConfig>,
     world_time: Res<WorldTime>,
     streamer: Res<ChunkStreamer>,
+    motion: Option<Res<crate::modes::fp::CameraMotionState>>,
     mut clear: ResMut<ClearColor>,
     mut fog_q: Query<&mut FogSettings>,
 ) {
@@ -98,8 +99,13 @@ pub fn sync_sky_and_fog(
     clear.0 = horizon;
     let (start, end) = streamer.fog_band_m();
     let band = Some((start as f32, end as f32));
+    // `motion` is `Option<Res<_>>` so non-FP modes (slice / RTS /
+    // overview) — which don't initialise the resource — still run the
+    // fog sync without panicking. Fog strategies treat `None` as
+    // "static, no speed-aware tightening".
+    let motion_ref = motion.as_ref().map(|m| m.as_ref());
     for mut fog in fog_q.iter_mut() {
-        let next = cfg.fog.fog_settings(sun_state, horizon, band);
+        let next = cfg.fog.fog_settings(sun_state, horizon, band, motion_ref);
         fog.color = next.color;
         fog.falloff = next.falloff;
     }
