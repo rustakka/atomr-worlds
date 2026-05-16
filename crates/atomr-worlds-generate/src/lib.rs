@@ -11,6 +11,7 @@ pub mod brick;
 pub mod error;
 pub mod macro_state;
 pub mod material_selection;
+pub mod pipeline;
 pub mod registry;
 pub mod strategies;
 pub mod terrain;
@@ -28,10 +29,18 @@ pub use macro_state::{
     MacroSample, MacroStateCache, PlateConfig, PlateMap, ReliefConfig, SurfaceGrid, WaterField,
     WorldMacroState,
 };
+pub use pipeline::{
+    apply_worldgen_strategy_by_name, build_advanced, build_showcase, build_vanilla,
+    BiomeBlendStrategy, BiomeMatrixStrategy, BrickPipeline, BrickWorkspace, CaveStrategy,
+    DensityFieldStrategy, ErosionStrategy, FeatureAnchor, FeatureAnchorCache, FeatureKind,
+    FeatureSeederStrategy, FloraStrategy, FluidStrategy, LayeredBrickPipeline, LayeredGenerator,
+    MonolithicTerrainPass, OreVeinStrategy, PlacementStrategy, SkyLightStrategy, StrataStrategy,
+    StructureStrategy, WorldGenConfig, WorldGenPreset, WS_APRON_EDGE,
+};
 pub use registry::{
     default_registry, strategy_id, BuiltinSelector, GenerationPolicy, GeneratorRegistry,
     GeneratorRegistryBuilder, ResolveError, Resolved, StrategyId, StrategySelector, ASTEROID_BELT,
-    EMPTY_PLANETOID, GAS_GIANT, TERRAIN,
+    EMPTY_PLANETOID, GAS_GIANT, TERRAIN, TERRAIN_LAYERED,
 };
 pub use material_selection::{
     DynMaterialStrategy, LayeredWithFeatures, LegacyBanded, MaterialContext,

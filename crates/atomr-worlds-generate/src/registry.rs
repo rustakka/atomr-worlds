@@ -51,6 +51,7 @@ pub const fn strategy_id(name: &str) -> StrategyId {
 }
 
 pub const TERRAIN: StrategyId = strategy_id("terrain");
+pub const TERRAIN_LAYERED: StrategyId = strategy_id("terrain_layered");
 pub const GAS_GIANT: StrategyId = strategy_id("gas_giant");
 pub const ASTEROID_BELT: StrategyId = strategy_id("asteroid_belt");
 pub const EMPTY_PLANETOID: StrategyId = strategy_id("empty_planetoid");
@@ -221,6 +222,7 @@ pub fn default_registry() -> GeneratorRegistry {
     use crate::strategies;
     GeneratorRegistry::builder()
         .register(TERRAIN, Arc::new(strategies::terrain::default_terrain()))
+        .register(TERRAIN_LAYERED, Arc::new(crate::pipeline::LayeredGenerator::default()))
         .register(GAS_GIANT, Arc::new(strategies::gas_giant::GasGiantStub))
         .register(ASTEROID_BELT, Arc::new(strategies::asteroid_belt::AsteroidBeltStub))
         .register(EMPTY_PLANETOID, Arc::new(strategies::empty_planetoid::EmptyPlanetoidStrategy))
@@ -234,6 +236,7 @@ impl From<crate::tiers::WorldGen> for GeneratorRegistry {
         let terrain_arc: Arc<dyn BrickGenerator> = Arc::new(wg.brick_gen());
         GeneratorRegistry::builder()
             .register(TERRAIN, terrain_arc)
+            .register(TERRAIN_LAYERED, Arc::new(crate::pipeline::LayeredGenerator::default()))
             .register(GAS_GIANT, Arc::new(strategies::gas_giant::GasGiantStub))
             .register(ASTEROID_BELT, Arc::new(strategies::asteroid_belt::AsteroidBeltStub))
             .register(EMPTY_PLANETOID, Arc::new(strategies::empty_planetoid::EmptyPlanetoidStrategy))
@@ -254,6 +257,18 @@ mod tests {
         assert_ne!(TERRAIN, GAS_GIANT);
         assert_ne!(TERRAIN, ASTEROID_BELT);
         assert_ne!(TERRAIN, EMPTY_PLANETOID);
+        assert_ne!(TERRAIN, TERRAIN_LAYERED);
+        assert_ne!(TERRAIN_LAYERED, GAS_GIANT);
+    }
+
+    #[test]
+    fn default_registry_resolves_layered_via_custom() {
+        let r = default_registry();
+        let addr = Address::World(WorldAddr::ROOT);
+        match r.resolve(&addr, 0xCAFE, GenerationPolicy::Custom(TERRAIN_LAYERED)).unwrap() {
+            Resolved::Generate { strategy, .. } => assert_eq!(strategy, TERRAIN_LAYERED),
+            Resolved::Empty => panic!("expected Generate"),
+        }
     }
 
     #[test]
