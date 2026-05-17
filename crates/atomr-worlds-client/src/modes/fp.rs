@@ -106,28 +106,41 @@ pub const LADDER_HYSTERESIS_S: f32 = 0.5;
 
 /// Per-frame: consult [`crate::render::LodLadderPolicy`] for the
 /// preferred ladder given the current [`CameraMotionState`]. If the
-/// policy wants to swap, `LadderHysteresis` gates the change to no
-/// more than once per `LADDER_HYSTERESIS_S`.
+/// policy returns `None` ("keep current"), do nothing. Otherwise, if
+/// the desired ladder differs from the one currently installed,
+/// `LadderHysteresis` gates the change to no more than once per
+/// `LADDER_HYSTERESIS_S`. Equality on the desired ladder is the
+/// no-swap signal — that's what lets `MotionScaledLadder` return the
+/// default progressive ladder every rest frame without churning the
+/// streamer.
 ///
-/// Step 7 wires this in with the behavior-preserving default
-/// (`MotionScaledLadder` always returns `None`), so this system is a
-/// no-op until Step 10 activates the actual swap.
+/// When a swap is actually applied, we also invalidate
+/// [`DesiredChunksCache`]. The cached plan was computed against the
+/// old ladder and would otherwise stay in use until the next drift /
+/// rotation trigger — which the user would experience as "the new LOD
+/// only kicks in after I move the camera". Invalidating forces a
+/// rebuild on the next streaming tick.
 fn fp_update_ladder(
     render_cfg: Res<RenderConfig>,
     motion: Res<CameraMotionState>,
     time: Res<Time>,
     mut streamer: ResMut<ChunkStreamer>,
     mut hyst: ResMut<LadderHysteresis>,
+    mut plan_cache: ResMut<DesiredChunksCache>,
 ) {
     let Some(want) = render_cfg.lod_ladder.ladder(&motion) else {
         return;
     };
+    if want == streamer.ladder {
+        return;
+    }
     let now = time.elapsed_seconds();
     if now - hyst.last_swap_secs < LADDER_HYSTERESIS_S {
         return;
     }
     streamer.set_ladder(want);
     hyst.last_swap_secs = now;
+    plan_cache.invalidate();
 }
 
 /// Camera-motion telemetry consumed by speed-aware strategies. Updated

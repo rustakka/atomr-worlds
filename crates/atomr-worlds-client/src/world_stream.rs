@@ -112,7 +112,7 @@ pub struct LodTier {
 /// horizon. Tiers must satisfy:
 /// - `outer_radius_m` strictly increasing.
 /// - `lod.depth` non-decreasing (coarser farther out).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LodLadder {
     pub tiers: Vec<LodTier>,
     pub bricks_per_tick: u32,
@@ -581,6 +581,25 @@ impl DesiredChunksCache {
         self.built_for = Some((observer, forward));
         self.plan = plan;
         self.cursor = 0;
+    }
+
+    /// Mark the cache stale so the next [`Self::should_rebuild`] call
+    /// returns `true` regardless of observer drift, and discard any
+    /// in-flight background rebuild (it was started against the old
+    /// streamer state, so its result is now wrong). Use this when a
+    /// streamer parameter (e.g. the active ladder) changes mid-session
+    /// — without it the cached plan would stay in effect until the
+    /// camera drifted past the rebuild threshold, which manifests to
+    /// the user as "LOD doesn't update until I look around".
+    ///
+    /// Dropping the in-flight `RebuildHandle` releases our receiver;
+    /// the spawned worker thread runs to completion and silently fails
+    /// the send. We don't try to join it (would block the main thread)
+    /// — the next frame will dispatch a fresh rebuild against the new
+    /// ladder.
+    pub fn invalidate(&mut self) {
+        self.built_for = None;
+        self.rebuild = None;
     }
 
     /// Whether a background rebuild is currently in flight.
@@ -1538,6 +1557,44 @@ mod tests {
         while !cache.poll_rebuild() {
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn invalidate_forces_rebuild_without_drift() {
+        // Scenario: cache is freshly built for the current pose. Without
+        // `invalidate`, `should_rebuild` returns false because the
+        // observer hasn't moved past the drift threshold. After
+        // `invalidate`, `should_rebuild` must return true so the next
+        // streaming tick rebuilds against whatever streamer state
+        // changed (e.g. a new LOD ladder).
+        let mut cache = DesiredChunksCache::default();
+        let obs = DVec3::new(50.0, 0.0, 50.0);
+        let fwd = DVec3::new(0.0, 0.0, 1.0);
+        cache.set(obs, fwd, vec![(IVec3::new(0, 0, 0), Lod::new(0))]);
+        assert!(!cache.should_rebuild(obs, fwd), "fresh cache should reuse");
+        cache.invalidate();
+        assert!(cache.should_rebuild(obs, fwd), "invalidate must force a rebuild on the next tick");
+    }
+
+    #[test]
+    fn invalidate_discards_in_flight_rebuild() {
+        // An in-flight rebuild was started against the previous streamer
+        // state; if `invalidate` left it running, its completion would
+        // install a now-stale plan on top of the new state. Make sure
+        // `invalidate` drops the handle so `is_rebuilding()` returns
+        // false and the next tick dispatches a fresh rebuild.
+        let mut cache = DesiredChunksCache::default();
+        let streamer = ChunkStreamer::default();
+        let obs = DVec3::new(0.0, 0.0, 0.0);
+        let fwd = DVec3::new(0.0, 0.0, 1.0);
+        let coverage: Arc<dyn LodCoveragePolicy> = Arc::new(MaskedShells);
+        cache.spawn_rebuild(streamer, obs, fwd, f64::INFINITY, coverage);
+        assert!(cache.is_rebuilding());
+        cache.invalidate();
+        assert!(!cache.is_rebuilding(), "invalidate must drop the in-flight rebuild handle");
+        // The worker thread is now orphaned — it still runs to completion
+        // and sends to a dropped receiver (silent failure). We don't
+        // try to join it; the test runner is allowed to outlive it.
     }
 
     // -----------------------------------------------------------------

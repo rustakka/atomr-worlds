@@ -341,11 +341,38 @@ pub trait HorizonImposterStrategy: Send + Sync + 'static {
 // ---------------------------------------------------------------------------
 
 /// Pick the LOD ladder ([`LodLadder`]) to apply to the streamer this
-/// frame. Returning `None` means "keep whatever ladder is currently
-/// configured" — used by the rest-state default to avoid churning the
-/// ladder on every frame. Motion-aware impls return `Some(coarser)`
-/// while sustained sprint is detected and `None` once a hysteresis
-/// window has elapsed since the last swap.
+/// frame.
+///
+/// Return semantics:
+///
+/// - `None` ⇒ "I have no opinion — keep the configured ladder."
+///   `StaticLadder` uses this; so does anything that wants to defer
+///   ladder selection to construction-time configuration.
+/// - `Some(ladder)` ⇒ "this is the ladder I want active this frame."
+///   `fp_update_ladder` swaps the streamer only if the returned ladder
+///   differs from the one currently installed (via `PartialEq` on
+///   `LodLadder`); `LadderHysteresis` enforces a minimum dwell between
+///   swaps; `DesiredChunksCache::invalidate` is called when a swap
+///   actually applies so the new ladder takes effect on the next
+///   streaming tick instead of waiting for the next drift-triggered
+///   rebuild.
+///
+/// **Active impls must return `Some` *every* frame**, including frames
+/// where they want to drop a previous transient ladder change.
+/// Returning `None` after a one-off swap would leave the prior ladder
+/// installed indefinitely — that's the recovery bug the Phase 19.2
+/// follow-up fixed.
+///
+/// **Don't coarsen the ladder under motion.** Coarsening the ladder
+/// while bricks are resident at a finer LOD evicts those bricks (their
+/// keys disappear from `desired_chunks`, hysteresis expires,
+/// `BrickFadeOut` attaches). The user-visible regression — outer-band
+/// detail vanishing during sprint and re-streaming after — outweighed
+/// the budget savings on the only configuration where it shipped.
+/// `MotionScaledLadder` now always returns the default progressive
+/// ladder; motion-aware perf is carried by `SpawnBudgetStrategy`,
+/// `VisibilityCadenceStrategy`, and `RebuildThresholdStrategy`, all of
+/// which throttle new work without touching resident bricks.
 pub trait LodLadderPolicy: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn ladder(&self, motion: &CameraMotionState) -> Option<LodLadder>;

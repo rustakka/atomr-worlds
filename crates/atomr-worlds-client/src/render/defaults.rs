@@ -878,48 +878,48 @@ impl LodLadderPolicy for StaticLadder {
     }
 }
 
-/// Motion-scaled ladder policy. Returns a coarser ladder while the
-/// smoothed velocity stays above `SPRINT_VELOCITY_M_S`; back to `None`
-/// (i.e. keep the configured ladder) otherwise. Hysteresis is applied
-/// upstream by [`crate::modes::fp::fp_update_ladder`] via
-/// [`crate::modes::fp::LadderHysteresis`] so a brief shift-tap doesn't
-/// thrash the streamer.
+/// Motion-aware ladder policy.
 ///
-/// The coarsened ladder keeps tiers 0–1 unchanged (sharp foreground)
-/// but bumps tier 2 from L2 (4 m voxels) to L3 (8 m voxels) and tier 3
-/// from L3 (8 m voxels) to L4 (16 m voxels). Radii stay the same so the
-/// shape of the streamed volume doesn't change — only the brick
-/// fidelity in the outer band. Combined with the horizon imposter
-/// behind it the visual delta is undetectable in normal play.
+/// Historically this swapped tiers 2/3 from L2/L3 to L3/L4 during
+/// sustained sprint to cut the streamed brick count by ~40 %. That
+/// approach is **abandoned** because it had two user-visible problems
+/// the perf win didn't justify:
+///
+/// 1. A coarsened ladder *evicts* the resident fine bricks at the new
+///    coarse tier's radii (their (coord, lod) keys no longer appear in
+///    [`crate::world_stream::desired_chunks`], so the hysteresis
+///    window expires and the streamer attaches `BrickFadeOut`). The
+///    user sees outer-ring detail disappear during sprint, then a
+///    visible streaming wave to refill it after sprint ends.
+/// 2. The recovery wave costs more frame budget *after* sprint than
+///    the eviction saved *during* sprint — net negative.
+///
+/// The user-facing directive is "be strategic about what you *load* at
+/// speed; never *unload* high-detail." So this policy now always
+/// returns the default progressive ladder. The motion-aware perf budget
+/// is carried entirely by the other Phase 19.2 strategies, which throttle
+/// *new* work without evicting *existing* work:
+///
+/// - [`MotionScaledSpawnBudget`] lowers main-thread GPU upload budget
+///   under sprint so the upload spike spreads across more frames.
+/// - [`MotionScaledCadence`] runs the visibility pass less often.
+/// - [`MotionScaledRebuildThreshold`] widens the plan-rebuild drift
+///   trigger so the AABB sweep fires less frequently.
+///
+/// Together those three throttle the per-frame streaming cost during
+/// sprint without touching the resident brick set. Fine bricks stay
+/// visible; only the *rate of new loads* tracks the motion budget.
 #[derive(Default)]
 pub struct MotionScaledLadder;
-
-/// Smoothed velocity (m/s) above which `MotionScaledLadder` switches
-/// to the coarsened tier set. 6 m/s ≈ player walk + sprint multiplier
-/// in the default config.
-const SPRINT_VELOCITY_M_S: f32 = 6.0;
 
 impl LodLadderPolicy for MotionScaledLadder {
     fn name(&self) -> &'static str {
         "MotionScaledLadder"
     }
-    fn ladder(&self, motion: &CameraMotionState) -> Option<LodLadder> {
-        if motion.smoothed_velocity_m_s <= SPRINT_VELOCITY_M_S && !motion.sprint_held {
-            return None;
-        }
-        use atomr_worlds_core::lod::Lod;
-        use crate::world_stream::{LodTier, DEFAULT_BRICKS_PER_TICK};
-        Some(LodLadder {
-            tiers: vec![
-                LodTier { lod: Lod::new(0), outer_radius_m: 128.0 },
-                LodTier { lod: Lod::new(1), outer_radius_m: 256.0 },
-                // L2 → L3 (coarser tier 2).
-                LodTier { lod: Lod::new(3), outer_radius_m: 512.0 },
-                // L3 → L4 (coarser tier 3).
-                LodTier { lod: Lod::new(4), outer_radius_m: 1024.0 },
-            ],
-            bricks_per_tick: DEFAULT_BRICKS_PER_TICK,
-        })
+    fn ladder(&self, _motion: &CameraMotionState) -> Option<LodLadder> {
+        // Always the default progressive ladder. See the type-level
+        // comment for why coarsening at sprint was removed.
+        Some(LodLadder::default_progressive())
     }
 }
 
@@ -1244,5 +1244,60 @@ mod tests {
         // mix=0.8 toward biome (0.1, 0.6, 0.2): red should drop well below 0.9.
         assert!(rgba[0] < 0.5, "red should bend toward biome low: {}", rgba[0]);
         assert!(rgba[1] < 0.8 && rgba[1] > 0.4, "green should bend toward biome: {}", rgba[1]);
+    }
+
+    // -----------------------------------------------------------------
+    // MotionScaledLadder regression guard
+    // -----------------------------------------------------------------
+    //
+    // The historical Phase 19.2 behaviour was to coarsen tiers 2/3 from
+    // L2/L3 to L3/L4 once smoothed velocity exceeded 6 m/s. That swap
+    // *evicted* the resident fine bricks in those bands and produced a
+    // visible LOD pop. The behaviour was reverted: the policy now
+    // returns the rest ladder regardless of motion. These tests pin the
+    // new contract so a future refactor can't quietly restore the
+    // coarsening.
+
+    fn rest_motion() -> CameraMotionState {
+        CameraMotionState::default()
+    }
+
+    fn sustained_sprint_motion() -> CameraMotionState {
+        let mut m = CameraMotionState::default();
+        m.smoothed_velocity_m_s = 12.0; // well above the historical 6 m/s threshold
+        m.sprint_held = true;
+        m
+    }
+
+    #[test]
+    fn motion_scaled_ladder_returns_default_progressive_at_rest() {
+        let policy = MotionScaledLadder;
+        let got = policy.ladder(&rest_motion()).expect("rest should yield Some");
+        assert_eq!(got, LodLadder::default_progressive());
+    }
+
+    #[test]
+    fn motion_scaled_ladder_does_not_coarsen_under_sprint() {
+        // The whole point of the revert: sprint must NOT change the
+        // ladder. If this ever fails the fine-LOD-eviction bug is back.
+        let policy = MotionScaledLadder;
+        let rest = policy.ladder(&rest_motion()).expect("rest should yield Some");
+        let sprint = policy
+            .ladder(&sustained_sprint_motion())
+            .expect("sprint should yield Some");
+        assert_eq!(
+            rest, sprint,
+            "MotionScaledLadder must not coarsen under sprint — that evicts fine bricks"
+        );
+    }
+
+    #[test]
+    fn static_ladder_keeps_returning_none() {
+        // Passive policy: never expresses an opinion. Quality preset
+        // relies on this so its statically-configured ladder isn't
+        // overridden mid-frame.
+        let policy = StaticLadder;
+        assert!(policy.ladder(&rest_motion()).is_none());
+        assert!(policy.ladder(&sustained_sprint_motion()).is_none());
     }
 }

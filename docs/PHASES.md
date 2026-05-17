@@ -1862,3 +1862,84 @@ preventing strategy thrash on a single-frame sprint tap.
   through directly; a future pass could clamp colors away from full
   white to keep tonal separation against the sky.
 
+### Phase 19.2 follow-up — Ladder coarsening reverted (resident fine LOD preserved at sprint)
+
+Two user-reported bugs surfaced in the Phase 19.2 ladder-coarsening
+behaviour (`MotionScaledLadder` swapping tiers 2/3 from L2/L3 to L3/L4
+at `smoothed_velocity_m_s > 6 m/s`) and were fixed by reverting the
+coarsening entirely. Cache invalidation on ladder swap was added as a
+robustness fix for any future policy that does swap ladders mid-session
+(e.g. preset changes).
+
+**Bug 1 — recovery required camera movement.**
+`fp_update_ladder` originally early-returned on `policy.ladder(motion)
+== None`, treating "no opinion" as "keep the prior swap." Once
+`MotionScaledLadder` coarsened during sprint and then returned `None`
+at rest, the streamer was permanently stuck on the coarse ladder until
+the next deliberate swap. Even after fixing that, a second issue
+emerged: when the ladder *did* swap back to the rest progression, the
+[`DesiredChunksCache`](../crates/atomr-worlds-client/src/world_stream.rs)
+still held the plan computed against the coarse ladder. The plan only
+rebuilds on observer drift (>4 m) or yaw rotation (>15°), so a player
+who stopped moving and stood still saw the coarse outer ring persist
+until they wiggled the camera.
+
+Fix: `DesiredChunksCache::invalidate()` now exists, drops any in-flight
+rebuild handle, and clears `built_for` so the next streaming tick
+dispatches a fresh rebuild. `fp_update_ladder` calls it whenever
+`streamer.set_ladder` actually applies a non-trivial swap. Hysteresis
++ equality gating are preserved so this isn't called on no-op frames.
+
+**Bug 2 — fine LOD evicted during sprint.**
+The coarsened ladder's tier-2 radius (256-512 m at L3 = 8 m voxels)
+replaced the resident L2 bricks (4 m voxels) in that band. Because
+`desired_chunks` is computed strictly from the active ladder, the L2
+keys dropped out of the desired set, the hysteresis window expired,
+and the streamer attached `BrickFadeOut` to bricks that had already
+been paid for. After sprint ended the rest ladder's L2 keys came back
+and the streamer paid the cost a second time to refill them. Net cost
+was higher than the inter-sprint savings, and the user-visible LOD pop
+was unambiguously a regression.
+
+The user's directive on this was: *"be strategic about what you load
+at speed; never unload high-detail."* So `MotionScaledLadder` now
+always returns `LodLadder::default_progressive()` — coarsening is
+gone. The motion-aware perf budget is carried by the three remaining
+Phase 19.2 strategies, all of which throttle *new* work without
+touching resident bricks:
+
+| strategy                       | what it throttles                       | resident bricks affected |
+| ------------------------------ | --------------------------------------- | ------------------------- |
+| `MotionScaledSpawnBudget`      | main-thread GPU-upload spawns / frame   | never                     |
+| `MotionScaledCadence`          | visibility-pass run frequency           | never                     |
+| `MotionScaledRebuildThreshold` | how often `desired_chunks` re-runs      | never                     |
+
+Resident fine bricks therefore stay live throughout a sprint; the
+streamer's "less work per frame" budget just slows the rate at which
+*newly-revealed* areas backfill. After sprint ends those strategies
+return to rest values and the streamer catches up.
+
+**Verification.**
+
+- `perf_sprint_then_stop.toml` re-run, mid-sprint and post-sprint
+  screenshots are now visually indistinguishable; total MESH count
+  climbs steadily through sprint (2136 mid-sprint → 3635 post-sprint)
+  instead of dropping into a coarsened plateau and re-filling on
+  recovery.
+- `perf_sprint_hold.toml` shows the same monotone-climb shape during a
+  4 s sustained sprint (1872 → 2542) — proves resident fine bricks are
+  never evicted while sprint is active.
+- Five new unit tests pin the contract: `MotionScaledLadder` returns
+  `default_progressive` at rest *and* at sprint, `StaticLadder` keeps
+  returning `None`, `DesiredChunksCache::invalidate` forces a rebuild
+  without observer drift, and `invalidate` discards an in-flight
+  rebuild handle so its stale plan can't land.
+
+**Why this is a strict win for frame budget.**
+The "savings" from coarsening were ~600 fewer keys in the outer band,
+all at the lower-cost coarse LOD. The cost was: (a) eviction
+crossfades during sprint, (b) refill on recovery, (c) the user-visible
+LOD pop. Removing coarsening preserves the keys that already paid
+their setup cost; the spawn budget + cadence strategies still throttle
+the per-frame *new-work* spike that motivated Phase 19.2.
+
