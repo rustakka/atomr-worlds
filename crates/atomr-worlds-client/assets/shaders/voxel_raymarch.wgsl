@@ -43,8 +43,15 @@ struct RaymarchMeta {
     root: u32,
     brick_edge: u32,
     shading_tier: u32,
+    aabb_min: u32,   // occupancy AABB min corner, packed x | y<<8 | z<<16
+    aabb_max: u32,   // inclusive max corner, packed; continuous bound = max + 1
     flags: u32,
 };
+
+// Unpack a RaymarchMeta AABB corner (x | y<<8 | z<<16) into voxel coords.
+fn unpack_aabb(c: u32) -> vec3<f32> {
+    return vec3<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu), f32((c >> 16u) & 0xffu));
+}
 
 @group(3) @binding(0) var<storage, read> nodes: array<u32>;
 @group(3) @binding(1) var<storage, read> colors: array<u32>;     // material ids (u16 widened)
@@ -75,11 +82,19 @@ struct RaymarchOutput {
 @vertex
 fn vertex(v: Vertex) -> Varyings {
     var out: Varyings;
+    // Tighten the [0, edge]^3 proxy box to the brick's occupancy AABB so the
+    // empty rim is never rasterized (and the DDA's empty prefix is skipped).
+    // aabb_max is the inclusive max voxel, so the continuous upper bound is +1.
+    let edge = f32(dag_meta.brick_edge);
+    let amin = unpack_aabb(dag_meta.aabb_min);
+    let amax = unpack_aabb(dag_meta.aabb_max) + vec3<f32>(1.0);
+    let vpos = amin + (v.position / edge) * (amax - amin);
+
     let world_from_local = get_world_from_local(v.instance_index);
     let local_from_world = get_local_from_world(v.instance_index);
-    let world_pos = world_from_local * vec4<f32>(v.position, 1.0);
+    let world_pos = world_from_local * vec4<f32>(vpos, 1.0);
     out.clip_position = view.clip_from_world * world_pos;
-    out.local_pos = v.position;
+    out.local_pos = vpos;
     out.cam_local = (local_from_world * vec4<f32>(view.world_position, 1.0)).xyz;
     let clip_from_local = view.clip_from_world * world_from_local;
     out.m0 = clip_from_local[0];
@@ -91,8 +106,10 @@ fn vertex(v: Vertex) -> Varyings {
 
 // Point lookup into the flat DAG — a line-for-line port of
 // `atomr_worlds_voxel::gpu_get`. Returns the material id at (x, y, z), or -1 for
-// empty space. Keeping this in lock-step with `gpu_get` is the determinism gate
-// (see the Rust DDA-mirror test in render/raymarch.rs).
+// empty space. The CPU mirror trio is `gpu_get` (point) + `ray_dda_first_hit`
+// (ray, in atomr-worlds-voxel/src/raymarch.rs) + this shader; keeping all three
+// in lock-step is the determinism gate (the voxel crate's parity tests guard the
+// pair, and the view crate's raymarch_golden pins the rendered CPU output).
 fn dag_lookup(x: u32, y: u32, z: u32) -> i32 {
     if (dag_meta.root == DAG_GPU_EMPTY_ROOT) {
         return -1;
@@ -171,13 +188,16 @@ fn fragment(in: Varyings) -> RaymarchOutput {
     let frag_local = in.local_pos;
     let dir = normalize(frag_local - cam_local);
 
-    let edge = f32(dag_meta.brick_edge);
     let edge_i = i32(dag_meta.brick_edge);
 
-    // Slab-intersect the ray against the [0, edge]^3 box.
+    // Slab-intersect the ray against the occupancy AABB [amin, amax+1] (tighter
+    // than the full [0, edge]^3 cube — skips the brick's empty rim). The DDA
+    // still indexes cells in [0, edge); the tight slab only moves the entry t.
+    let amin = unpack_aabb(dag_meta.aabb_min);
+    let amax = unpack_aabb(dag_meta.aabb_max) + vec3<f32>(1.0);
     let inv_dir = 1.0 / dir;                       // inf for axis-parallel rays (handled by min/max)
-    let ta = (vec3<f32>(0.0) - cam_local) * inv_dir;
-    let tb = (vec3<f32>(edge) - cam_local) * inv_dir;
+    let ta = (amin - cam_local) * inv_dir;
+    let tb = (amax - cam_local) * inv_dir;
     let tmin3 = min(ta, tb);
     let tmax3 = max(ta, tb);
     let t_enter = max(max(tmin3.x, tmin3.y), tmin3.z);

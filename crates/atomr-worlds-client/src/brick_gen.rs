@@ -33,6 +33,7 @@ use atomr_worlds_host::WorldHost;
 use atomr_worlds_proto::{Envelope, WorldEvent, WorldRequest};
 use atomr_worlds_view::{greedy_mesh_by_material, Mesh as ViewMesh};
 use atomr_worlds_voxel::brick::Brick;
+use atomr_worlds_voxel::{DagBrick, DagGpuWithDigest};
 use bevy::prelude::*;
 use std::sync::mpsc;
 use tokio::runtime::Handle;
@@ -68,6 +69,12 @@ pub struct BrickReady {
     #[allow(dead_code)]
     pub brick: Option<Arc<Brick>>,
     pub meshes: std::collections::HashMap<u16, ViewMesh>,
+    /// Flattened DAG + content digest + occupancy AABB for the raymarch path,
+    /// built on the blocking pool alongside the mesh (so `spawn_brick_entity`
+    /// never builds a DAG inline). Built unconditionally — strategy-agnostic, so
+    /// a mid-run swap to/from raymarch needs no main-thread rebuild. `None` for
+    /// empty/missing bricks.
+    pub dag: Option<DagGpuWithDigest>,
 }
 
 /// Bevy resource owning the dispatcher half of the async pipeline.
@@ -149,25 +156,29 @@ impl BrickGenWorkers {
                 },
                 Err(_) => None,
             };
-            // Mesh + AO bake on tokio's blocking pool so the reactor
-            // stays free. Empty brick ⇒ empty meshes.
-            let meshes = match brick.as_ref() {
-                Some(b) => {
-                    let b = b.clone();
-                    let ao = ao.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let mut by_mat = greedy_mesh_by_material(&b);
-                        for sub in by_mat.values_mut() {
-                            ao.bake(sub, &b);
-                        }
-                        by_mat
-                    })
-                    .await
-                    .unwrap_or_default()
-                }
-                None => Default::default(),
-            };
-            let _ = tx.send(BrickReady { coord, lod, brick, meshes });
+            // Mesh + AO bake + DAG build on tokio's blocking pool so the reactor
+            // stays free. Both the mesh and the raymarch DAG are derived from the
+            // same brick here, off the main thread. Empty brick ⇒ empty meshes +
+            // no DAG.
+            let (meshes, dag): (std::collections::HashMap<u16, ViewMesh>, Option<DagGpuWithDigest>) =
+                match brick.as_ref() {
+                    Some(b) => {
+                        let b = b.clone();
+                        let ao = ao.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let mut by_mat = greedy_mesh_by_material(&b);
+                            for sub in by_mat.values_mut() {
+                                ao.bake(sub, &b);
+                            }
+                            let dag = DagBrick::from_brick(&b).to_gpu_with_digest(&b);
+                            (by_mat, dag)
+                        })
+                        .await
+                        .unwrap_or_default()
+                    }
+                    None => Default::default(),
+                };
+            let _ = tx.send(BrickReady { coord, lod, brick, meshes, dag });
         });
         true
     }

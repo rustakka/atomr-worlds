@@ -56,8 +56,8 @@ pub use modes::view_mode::ViewMode;
 pub use observer::{ObserverState, SkyboxRefreshPolicy};
 pub use raster2d::{blend_rect, blit_rgba, fill_rect, fill_rect_stipple, StipplePattern};
 pub use render::{
-    material_color, render_brick_png, render_composite, render_mesh, CompositeScene, FragmentMode,
-    Framebuffer, RenderConfig,
+    material_color, render_brick_png, render_composite, render_mesh, render_raymarch,
+    CompositeScene, FragmentMode, Framebuffer, RaymarchTier, RenderConfig,
 };
 pub use scene::{
     scene_from_bricks, CameraNode, FrameMetadata, LightKind, LightNode, MaterialEntry, MaterialPalette,

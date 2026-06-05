@@ -251,6 +251,28 @@ pub struct DagGpu {
     pub root: u32,
 }
 
+/// A flattened [`DagGpu`] bundled with the two pieces of metadata the client's
+/// GPU buffer cache needs: the stable content [`digest`](DagBrick::digest) — the
+/// dedup key, so structurally-identical bricks share one set of GPU buffers — and
+/// the inclusive occupancy AABB in brick-local voxel coordinates, used to size a
+/// tight proxy and clip the DDA so the empty rim of a brick is never rasterized.
+///
+/// Produced off the main thread (alongside greedy meshing) so `spawn_brick_entity`
+/// never rebuilds a DAG inline. `None` is returned for an empty brick — no proxy
+/// is drawn for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DagGpuWithDigest {
+    /// The flat GPU buffers.
+    pub gpu: DagGpu,
+    /// Stable FNV-1a content digest ([`DagBrick::digest`]) — the cache key.
+    pub digest: u64,
+    /// Inclusive min corner of the nonempty region, brick-local `[0, 16)`.
+    pub aabb_min: [u8; 3],
+    /// Inclusive max corner of the nonempty region, brick-local `[0, 16)`. The
+    /// occupied region in continuous voxel space is `[aabb_min, aabb_max + 1]`.
+    pub aabb_max: [u8; 3],
+}
+
 impl DagBrick {
     /// Flatten into GPU buffers. Materials are deduplicated into `colors`, so a
     /// uniform brick yields a single color entry regardless of node count.
@@ -299,12 +321,55 @@ impl DagBrick {
 
         DagGpu { nodes, colors, root: offset[root_id as usize] }
     }
+
+    /// Flatten into GPU buffers and bundle the dedup digest + occupancy AABB in
+    /// one pass — the shape the client's off-thread builder and GPU buffer cache
+    /// consume. `brick` must be the brick this DAG was built from (the AABB is
+    /// scanned from it). Returns `None` for an empty brick.
+    pub fn to_gpu_with_digest(&self, brick: &Brick) -> Option<DagGpuWithDigest> {
+        if self.is_empty() {
+            return None;
+        }
+        let (aabb_min, aabb_max) = occupancy_aabb(brick)?;
+        Some(DagGpuWithDigest { gpu: self.to_gpu(), digest: self.digest(), aabb_min, aabb_max })
+    }
+}
+
+/// Inclusive AABB (min/max corners) of a brick's nonempty voxels in brick-local
+/// `[0, 16)` coordinates, or `None` if the brick is empty. Scans all 4096 cells;
+/// cheap on the blocking pool and only done once per built brick.
+fn occupancy_aabb(brick: &Brick) -> Option<([u8; 3], [u8; 3])> {
+    let edge = BRICK_EDGE as i64;
+    let mut min = [u8::MAX; 3];
+    let mut max = [0u8; 3];
+    let mut any = false;
+    for z in 0..edge {
+        for y in 0..edge {
+            for x in 0..edge {
+                if !brick.get(IVec3::new(x, y, z)).is_empty() {
+                    any = true;
+                    let p = [x as u8, y as u8, z as u8];
+                    for k in 0..3 {
+                        if p[k] < min[k] {
+                            min[k] = p[k];
+                        }
+                        if p[k] > max[k] {
+                            max[k] = p[k];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    any.then_some((min, max))
 }
 
 /// Read the voxel at brick-local `(x, y, z)` by traversing the flat [`DagGpu`]
-/// buffers. This is the exact CPU mirror of the planned WGSL DDA traversal —
-/// keeping the two in lock-step is how the raymarcher's determinism gate is
-/// satisfied without hashing GPU float output.
+/// buffers. This is the exact CPU mirror of the WGSL DDA traversal's *point*
+/// lookup (`dag_lookup` in `voxel_raymarch.wgsl`); the *ray* mirror is
+/// [`ray_dda_first_hit`](crate::raymarch::ray_dda_first_hit). Keeping all three
+/// in lock-step is how the raymarcher's determinism gate is satisfied without
+/// hashing GPU float output.
 pub fn gpu_get(gpu: &DagGpu, x: u8, y: u8, z: u8) -> Voxel {
     if gpu.root == DAG_GPU_EMPTY_ROOT {
         return Voxel::EMPTY;
@@ -520,6 +585,53 @@ mod tests {
         b.set(IVec3::new(2, 2, 2), Voxel::new(5));
         let a = DagBrick::from_brick(&b).to_gpu();
         let c = DagBrick::from_brick(&b).to_gpu();
+        assert_eq!(a, c);
+    }
+
+    // --- to_gpu_with_digest (off-thread bundle: gpu + digest + occupancy AABB) ---
+
+    #[test]
+    fn gpu_with_digest_empty_is_none() {
+        let b = Brick::new();
+        assert!(DagBrick::from_brick(&b).to_gpu_with_digest(&b).is_none());
+    }
+
+    #[test]
+    fn gpu_with_digest_uniform_aabb_is_full_cube() {
+        let mut b = Brick::new();
+        for z in 0..EDGE {
+            for y in 0..EDGE {
+                for x in 0..EDGE {
+                    b.set(IVec3::new(x, y, z), Voxel::new(1));
+                }
+            }
+        }
+        let dag = DagBrick::from_brick(&b);
+        let bundle = dag.to_gpu_with_digest(&b).unwrap();
+        assert_eq!(bundle.aabb_min, [0, 0, 0]);
+        assert_eq!(bundle.aabb_max, [15, 15, 15]);
+        assert_eq!(bundle.digest, dag.digest());
+        assert_eq!(bundle.gpu, dag.to_gpu());
+    }
+
+    #[test]
+    fn gpu_with_digest_sparse_aabb_bounds_nonempty() {
+        let mut b = Brick::new();
+        b.set(IVec3::new(2, 3, 4), Voxel::new(1));
+        b.set(IVec3::new(11, 5, 9), Voxel::new(2));
+        let bundle = DagBrick::from_brick(&b).to_gpu_with_digest(&b).unwrap();
+        // Inclusive corners spanning exactly the two set voxels.
+        assert_eq!(bundle.aabb_min, [2, 3, 4]);
+        assert_eq!(bundle.aabb_max, [11, 5, 9]);
+    }
+
+    #[test]
+    fn gpu_with_digest_is_deterministic() {
+        let mut b = Brick::new();
+        b.set(IVec3::new(1, 2, 3), Voxel::new(7));
+        b.set(IVec3::new(14, 1, 9), Voxel::new(7));
+        let a = DagBrick::from_brick(&b).to_gpu_with_digest(&b);
+        let c = DagBrick::from_brick(&b).to_gpu_with_digest(&b);
         assert_eq!(a, c);
     }
 }

@@ -50,7 +50,7 @@ use atomr_worlds_proto::streaming::StreamingPolicy;
 use atomr_worlds_voxel::BRICK_EDGE;
 use bevy::prelude::*;
 
-use crate::render::LodCoveragePolicy;
+use crate::render::{LodCoveragePolicy, RaymarchShadingTier};
 
 /// Per-tick fetch budget. Sized so the 4-tier sphere (≈8 k brick keys)
 /// populates in ~1 s at 60 fps with the closest-first sort prioritising
@@ -310,6 +310,12 @@ pub struct LoadedChunk {
     /// [`LoadedChunks::mark_fading_out`] when the streamer attaches a
     /// `BrickFadeOut`; reset to false on every fresh `insert`.
     pub is_fading_out: bool,
+    /// When this brick was rendered via the DAG raymarcher, the content digest
+    /// + tier of its cached buffers/material, so eviction can decref the
+    /// [`crate::render::DagBufferCache`] in lockstep. `None` for the mesh path /
+    /// empty bricks. (Both are set together; see `spawn_brick_entity`.)
+    pub dag_digest: Option<u64>,
+    pub dag_tier: Option<RaymarchShadingTier>,
 }
 
 impl LoadedChunk {
@@ -1243,6 +1249,8 @@ mod tests {
                 entity: None,
                 last_seen_frame: 5,
                 is_fading_out: false,
+                dag_digest: None,
+                dag_tier: None,
             },
         );
         // At frame 6 (1 tick later), still fresh.
@@ -1262,6 +1270,8 @@ mod tests {
             entity: None,
             last_seen_frame: 0,
             is_fading_out: false,
+            dag_digest: None,
+            dag_tier: None,
         }
     }
 

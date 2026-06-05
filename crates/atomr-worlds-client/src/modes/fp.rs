@@ -41,8 +41,9 @@ use atomr_worlds_core::coord::{DVec3, IVec3};
 use atomr_worlds_core::vehicle::ContainingFrame;
 use atomr_worlds_view::{WalkCamera, WalkInput, WorldQuery};
 // (WorldQuery brings ground_height_m into scope.)
-use atomr_worlds_voxel::{DagBrick, BRICK_EDGE};
+use atomr_worlds_voxel::BRICK_EDGE;
 use bevy::post_process::bloom::Bloom;
+use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::camera::RenderTarget;
@@ -52,9 +53,9 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use crate::brick_gen::{BrickGenWorkers, BrickReady, DEFAULT_SPAWN_BUDGET};
 use crate::render::{
-    brick_proxy_box, build_raymarch_material, OffscreenTarget, PaletteEntryGpu, RaymarchMaterial,
-    RaymarchResources, RaymarchShadingTier, RenderConfig, ShadingMode, SkyboxRuntime,
-    VoxelMaterial, VoxelMaterialExt, WorldSunMarker,
+    brick_proxy_box, BrickGpuStats, DagBufferCache, OffscreenTarget, PaletteEntryGpu,
+    RaymarchMaterial, RaymarchResources, RaymarchShadingTier, RenderConfig, ShadingMode,
+    SkyboxRuntime, VoxelMaterial, VoxelMaterialExt, WorldSunMarker,
 };
 use crate::view_mode::ViewMode;
 use crate::world_runtime::{ActiveWorld, WorldRuntime};
@@ -781,6 +782,19 @@ fn fp_sync_camera(
     }
 }
 
+/// Grouped write-resources for the raymarch spawn path, bundled as one
+/// [`SystemParam`] so [`fp_stream_bricks`] stays under Bevy's 16-param limit
+/// (and to keep the raymarch plumbing cohesive). The `'w`/`'s` lifetimes are the
+/// standard `SystemParam` world/state lifetimes.
+#[derive(SystemParam)]
+struct RaymarchSpawn<'w> {
+    res: Res<'w, RaymarchResources>,
+    cache: ResMut<'w, DagBufferCache>,
+    stats: ResMut<'w, BrickGpuStats>,
+    materials: ResMut<'w, Assets<RaymarchMaterial>>,
+    storage_buffers: ResMut<'w, Assets<bevy::render::storage::ShaderStorageBuffer>>,
+}
+
 /// Per-frame streaming loop for the 3D world entities.
 ///
 /// 1. Bump the streamer frame counter for hysteresis bookkeeping.
@@ -801,13 +815,11 @@ fn fp_sync_camera(
 /// 6. Drain a per-frame budget of finished payloads into Bevy
 ///    entities via [`spawn_brick_entity`].
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn fp_stream_bricks(
     state: Res<FpState>,
     active: Res<crate::world_runtime::ActiveWorld>,
     pool: Res<MaterialPool>,
     voxel_pool: Res<VoxelMaterialPool>,
-    raymarch_res: Res<RaymarchResources>,
     render_cfg: Res<RenderConfig>,
     motion: Res<CameraMotionState>,
     mut streamer: ResMut<ChunkStreamer>,
@@ -815,8 +827,7 @@ fn fp_stream_bricks(
     mut plan_cache: ResMut<DesiredChunksCache>,
     mut workers: ResMut<BrickGenWorkers>,
     mut meshes: ResMut<Assets<BevyMesh>>,
-    mut raymarch_materials: ResMut<Assets<RaymarchMaterial>>,
-    mut storage_buffers: ResMut<Assets<bevy::render::storage::ShaderStorageBuffer>>,
+    mut rm: RaymarchSpawn,
     mut commands: Commands,
 ) {
     if !state.ready || pool.handles.is_empty() {
@@ -977,11 +988,13 @@ fn fp_stream_bricks(
             shading_mode,
             &pool,
             &voxel_pool,
-            &raymarch_res,
+            &rm.res,
             raymarch_tier,
+            &mut rm.cache,
+            &mut rm.stats,
             &mut meshes,
-            &mut raymarch_materials,
-            &mut storage_buffers,
+            &mut rm.materials,
+            &mut rm.storage_buffers,
             &mut commands,
             &mut loaded,
         );
@@ -1052,13 +1065,15 @@ fn spawn_brick_entity(
     voxel_pool: &VoxelMaterialPool,
     raymarch_res: &RaymarchResources,
     raymarch_tier: RaymarchShadingTier,
+    cache: &mut DagBufferCache,
+    stats: &mut BrickGpuStats,
     meshes: &mut Assets<BevyMesh>,
     raymarch_materials: &mut Assets<RaymarchMaterial>,
     storage_buffers: &mut Assets<bevy::render::storage::ShaderStorageBuffer>,
     commands: &mut Commands,
     loaded: &mut LoadedChunks,
 ) {
-    let BrickReady { coord: bc, lod, brick, meshes: mut by_material } = ready;
+    let BrickReady { coord: bc, lod, brick: _, meshes: mut by_material, dag } = ready;
     let key = LoadedChunk::key(bc, lod);
     let lod_scale = (1u64 << lod.depth as u32) as f32;
     let edge_m = BRICK_EDGE as f32 * lod_scale;
@@ -1071,10 +1086,15 @@ fn spawn_brick_entity(
                 entity: None,
                 last_seen_frame: frame,
                 is_fading_out: false,
+                dag_digest: None,
+                dag_tier: None,
             },
         );
         return;
     }
+    // Set in the raymarch arm when a proxy is spawned, so the shared
+    // `loaded.insert` below records the cache key for lockstep eviction.
+    let mut dag_release: Option<(u64, RaymarchShadingTier)> = None;
     let origin = Vec3::new(
         (bc.x as f32) * edge_m,
         (bc.y as f32) * edge_m,
@@ -1105,6 +1125,11 @@ fn spawn_brick_entity(
         .id();
     match shading_mode {
         ShadingMode::SplitPerMaterial => {
+            stats.mesh_spawns += 1;
+            for m in by_material.values() {
+                stats.mesh_vertices += m.vertices.len() as u64;
+                stats.mesh_indices += m.indices.len() as u64;
+            }
             for (mat_id, sub_mesh) in by_material.iter_mut() {
                 if sub_mesh.indices.is_empty() {
                     continue;
@@ -1122,6 +1147,11 @@ fn spawn_brick_entity(
             }
         }
         ShadingMode::PaletteVoxelMaterial => {
+            stats.mesh_spawns += 1;
+            for m in by_material.values() {
+                stats.mesh_vertices += m.vertices.len() as u64;
+                stats.mesh_indices += m.indices.len() as u64;
+            }
             let Some(voxel_handle) = voxel_pool.handle.as_ref() else {
                 loaded.insert(
                     key,
@@ -1131,6 +1161,8 @@ fn spawn_brick_entity(
                         entity: Some(parent),
                         last_seen_frame: frame,
                         is_fading_out: false,
+                        dag_digest: None,
+                        dag_tier: None,
                     },
                 );
                 return;
@@ -1148,29 +1180,41 @@ fn spawn_brick_entity(
             }
         }
         ShadingMode::RaymarchDag => {
-            // Raymarch the brick's DAG instead of meshing it. Needs the shared
-            // palette + proxy box (built in `setup_fp_scene`) and the raw brick
-            // (already carried on `BrickReady`). `build_raymarch_material`
-            // returns `None` for an empty DAG, so nothing is spawned then —
-            // the shared `loaded.insert` below still records the parent so the
-            // streamer doesn't re-dispatch the key.
-            if let (Some(palette), Some(proxy), Some(b)) = (
+            // Raymarch the brick's DAG instead of meshing it. The DAG was built
+            // off-thread (carried on `BrickReady.dag`); `DagBufferCache::acquire`
+            // dedups its GPU buffers/material across structurally-identical
+            // bricks. `acquire` returns `None` for an empty DAG, so nothing is
+            // spawned then — the shared `loaded.insert` below still records the
+            // parent so the streamer doesn't re-dispatch the key.
+            if let (Some(palette), Some(proxy), Some(bundle)) = (
                 raymarch_res.palette.as_ref(),
                 raymarch_res.proxy_box.as_ref(),
-                brick.as_ref(),
+                dag.as_ref(),
             ) {
-                let dag = DagBrick::from_brick(b).to_gpu();
-                if let Some(material) =
-                    build_raymarch_material(&dag, palette.clone(), raymarch_tier, storage_buffers)
-                {
-                    let mat_handle = raymarch_materials.add(material);
+                let t0 = std::time::Instant::now();
+                let acquired = cache.acquire(
+                    bundle,
+                    raymarch_tier,
+                    palette.clone(),
+                    storage_buffers,
+                    raymarch_materials,
+                );
+                stats.acquire_ns_total += t0.elapsed().as_nanos();
+                if let Some(acquired) = acquired {
+                    stats.raymarch_spawns += 1;
+                    if acquired.material_miss {
+                        stats.cache_misses += 1;
+                    } else {
+                        stats.cache_hits += 1;
+                    }
                     commands.entity(parent).with_children(|p| {
                         p.spawn((
                             Mesh3d(proxy.clone()),
-                            MeshMaterial3d(mat_handle),
+                            MeshMaterial3d(acquired.material),
                             BrickMesh,
                         ));
                     });
+                    dag_release = Some((bundle.digest, raymarch_tier));
                 }
             }
         }
@@ -1183,8 +1227,21 @@ fn spawn_brick_entity(
             entity: Some(parent),
             last_seen_frame: frame,
             is_fading_out: false,
+            dag_digest: dag_release.map(|(d, _)| d),
+            dag_tier: dag_release.map(|(_, t)| t),
         },
     );
+}
+
+/// Release a brick's cached raymarch buffers/material when its `LoadedChunks`
+/// entry is dropped, keeping [`DagBufferCache`] refcounts in lockstep with
+/// eviction. No-op for mesh-path / empty bricks (no `dag_digest` recorded).
+fn release_chunk_dag(loaded: &LoadedChunks, key: &(IVec3, u8), cache: &mut DagBufferCache) {
+    if let Some(chunk) = loaded.get(key) {
+        if let (Some(digest), Some(tier)) = (chunk.dag_digest, chunk.dag_tier) {
+            cache.release(digest, tier);
+        }
+    }
 }
 
 /// Smoothstep the per-brick scale from [`FADE_IN_START_FRACTION`] up to
@@ -1229,6 +1286,7 @@ fn fp_animate_fade_out(
     time: Res<Time>,
     mut commands: Commands,
     mut loaded: ResMut<LoadedChunks>,
+    mut dag_cache: ResMut<DagBufferCache>,
     mut q: Query<(Entity, &mut Transform, &mut BrickFadeOut)>,
 ) {
     let dt = time.delta_secs();
@@ -1246,6 +1304,11 @@ fn fp_animate_fade_out(
             // `fp_stream_bricks`), so this remove must be a no-op for
             // the count — `LoadedChunks::remove` skips the decrement
             // when the entry was already flagged fading.
+            //
+            // Decref the raymarch buffer cache first (in lockstep with the
+            // LoadedChunks removal) so shared DAG buffers free exactly when
+            // the last brick using them is despawned.
+            release_chunk_dag(&loaded, &fade.key, &mut dag_cache);
             loaded.remove(&fade.key);
             commands.entity(ent).despawn();
         }

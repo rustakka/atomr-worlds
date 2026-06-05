@@ -17,8 +17,10 @@
 //! The rasterizer is the acceleration structure: each fragment already knows
 //! which brick it is in and where the ray enters, so the shader only traverses
 //! one 16³ DAG with no top-level structure. The traversal kernel is a
-//! line-for-line port of [`atomr_worlds_voxel::gpu_get`] — keeping the two in
-//! lock-step is the determinism gate (see the `#[cfg(test)]` mirror below).
+//! line-for-line port of [`atomr_worlds_voxel::gpu_get`] (point lookup) and
+//! [`atomr_worlds_voxel::ray_dda_first_hit`] (ray DDA) — keeping the WGSL in
+//! lock-step with that pair is the determinism gate. The voxel crate owns the
+//! parity tests; the directed `#[cfg(test)]` checks below guard the client side.
 //!
 //! ## Binding-slot convention (Bevy 0.18)
 //!
@@ -29,7 +31,7 @@
 //! `bevy_pbr::mesh_functions` (group 2) and the camera/sun via
 //! `bevy_pbr::mesh_view_bindings` (group 0).
 
-use atomr_worlds_voxel::{DagGpu, BRICK_EDGE, DAG_GPU_EMPTY_ROOT};
+use atomr_worlds_voxel::{DagGpu, BRICK_EDGE};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, Mesh as BevyMesh, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
@@ -44,7 +46,7 @@ use bevy::shader::ShaderRef;
 /// tuning (see [`crate::render::RenderConfig::raymarch_tier`]). The value is
 /// passed to the shader in [`RaymarchMeta::shading_tier`]; adding a tier is an
 /// enum variant here plus a branch in `voxel_raymarch.wgsl`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum RaymarchShadingTier {
     /// Flat palette base color, no lighting. Cheapest; good for debugging
     /// traversal / silhouettes.
@@ -82,9 +84,8 @@ impl RaymarchShadingTier {
     }
 }
 
-/// Per-brick scalar parameters for the raymarcher. Kept to one `vec4`-worth of
-/// `u32`s so the std140 uniform is a tidy 16 bytes; the WGSL struct mirrors the
-/// field order exactly.
+/// Per-brick scalar parameters for the raymarcher. All `u32`s; the WGSL struct
+/// mirrors the field order exactly.
 #[derive(Clone, Copy, Debug, ShaderType)]
 pub struct RaymarchMeta {
     /// Word offset of the DAG root in `nodes`, or [`DAG_GPU_EMPTY_ROOT`].
@@ -94,8 +95,24 @@ pub struct RaymarchMeta {
     pub brick_edge: u32,
     /// [`RaymarchShadingTier::to_u32`].
     pub shading_tier: u32,
-    /// Reserved for future flags (kept for 16-byte alignment).
+    /// Occupancy AABB min corner, packed `x | y<<8 | z<<16` (brick-local voxel
+    /// coords). The vertex stage shrinks the proxy cube to this AABB and the
+    /// fragment slab-clips the DDA to it, so the brick's empty rim is never
+    /// rasterized or marched. See [`pack_aabb`].
+    pub aabb_min: u32,
+    /// Occupancy AABB **inclusive** max corner, packed like [`Self::aabb_min`];
+    /// the continuous upper bound is `aabb_max + 1` per axis.
+    pub aabb_max: u32,
+    /// Reserved for future flags.
     pub flags: u32,
+}
+
+/// Pack a brick-local voxel corner `[x, y, z]` (each `< 16`) into one `u32` as
+/// `x | y<<8 | z<<16` for [`RaymarchMeta`]. The WGSL unpacks with `& 0xff` /
+/// shifts.
+#[inline]
+pub fn pack_aabb(c: [u8; 3]) -> u32 {
+    c[0] as u32 | ((c[1] as u32) << 8) | ((c[2] as u32) << 16)
 }
 
 /// One brick's DAG flattened for the GPU raymarcher. A stand-alone [`Material`]
@@ -161,31 +178,49 @@ pub struct RaymarchResources {
     pub proxy_box: Option<Handle<BevyMesh>>,
 }
 
-/// Build a [`RaymarchMaterial`] for one brick's flattened DAG. Returns `None`
-/// for an empty brick (no proxy is spawned). `colors` is widened u16→u32 here.
-pub fn build_raymarch_material(
+/// Upload one brick's flattened DAG geometry + color into fresh storage buffers
+/// (colors widened u16→u32 — WGSL has no u16 storage arrays). Returns the
+/// `(nodes, colors)` handles. The [`DagBufferCache`](super::dag_cache::DagBufferCache)
+/// dedups these across structurally-identical bricks; this is the raw upload.
+pub fn upload_dag_buffers(
     dag: &DagGpu,
-    palette: Handle<ShaderStorageBuffer>,
-    tier: RaymarchShadingTier,
     storage_buffers: &mut Assets<ShaderStorageBuffer>,
-) -> Option<RaymarchMaterial> {
-    if dag.root == DAG_GPU_EMPTY_ROOT || dag.nodes.is_empty() {
-        return None;
-    }
+) -> (Handle<ShaderStorageBuffer>, Handle<ShaderStorageBuffer>) {
     let nodes = storage_buffers.add(ShaderStorageBuffer::from(dag.nodes.clone()));
     let colors_u32: Vec<u32> = dag.colors.iter().map(|&c| c as u32).collect();
     let colors = storage_buffers.add(ShaderStorageBuffer::from(colors_u32));
-    Some(RaymarchMaterial {
-        nodes,
-        colors,
-        palette,
-        meta: RaymarchMeta {
-            root: dag.root,
-            brick_edge: BRICK_EDGE as u32,
-            shading_tier: tier.to_u32(),
-            flags: 0,
-        },
-    })
+    (nodes, colors)
+}
+
+/// The [`RaymarchMeta`] for a brick: root + grid edge + shading tier + the
+/// packed occupancy AABB. Pure (no allocation) so the cache can build it per
+/// `(digest, tier)` without re-uploading buffers.
+pub fn raymarch_meta(
+    dag: &DagGpu,
+    tier: RaymarchShadingTier,
+    aabb_min: [u8; 3],
+    aabb_max: [u8; 3],
+) -> RaymarchMeta {
+    RaymarchMeta {
+        root: dag.root,
+        brick_edge: BRICK_EDGE as u32,
+        shading_tier: tier.to_u32(),
+        aabb_min: pack_aabb(aabb_min),
+        aabb_max: pack_aabb(aabb_max),
+        flags: 0,
+    }
+}
+
+/// Assemble a [`RaymarchMaterial`] from already-uploaded buffer handles + scalar
+/// params. The cache calls this with shared buffers so identical bricks reuse one
+/// buffer set; the per-`(digest, tier)` material is the only thing rebuilt.
+pub fn raymarch_material_from_parts(
+    nodes: Handle<ShaderStorageBuffer>,
+    colors: Handle<ShaderStorageBuffer>,
+    palette: Handle<ShaderStorageBuffer>,
+    meta: RaymarchMeta,
+) -> RaymarchMaterial {
+    RaymarchMaterial { nodes, colors, palette, meta }
 }
 
 /// A box mesh spanning local `[0, 16]³` (one brick's voxel extent), POSITION
@@ -233,103 +268,22 @@ pub fn brick_proxy_box() -> BevyMesh {
 
 #[cfg(test)]
 mod tests {
-    //! Determinism gate: the WGSL `dag_lookup` + ray DDA must mirror
-    //! [`atomr_worlds_voxel::gpu_get`]. `gpu_get` is a *point* lookup; the
-    //! shader is a *ray DDA*. These tests re-implement the exact DDA the shader
-    //! uses in Rust and check it against `gpu_get` as the occupancy oracle over
-    //! the same fixtures `dag.rs` uses (uniform / half / sparse), so a stepping
-    //! or octant/popcount divergence in the WGSL port is caught in CI.
+    //! Client-side determinism checks for the raymarch path. The canonical CPU
+    //! ray DDA — the line-for-line mirror of the WGSL `@fragment` — now lives in
+    //! [`atomr_worlds_voxel::ray_dda_first_hit`] (with its own exhaustive parity
+    //! suite against `gpu_get`). Here we keep a thin set of *directed* checks
+    //! (first-hit cell + material for known fixtures) plus the empty-brick guard,
+    //! so the client crate also fails loudly if the shared DDA or the material
+    //! factory regresses.
 
-    use atomr_worlds_voxel::{gpu_get, DagBrick, DagGpu, Voxel, BRICK_EDGE};
     use atomr_worlds_core::coord::IVec3;
-    use atomr_worlds_voxel::Brick;
-    use bevy::prelude::{Assets, Handle};
+    use atomr_worlds_voxel::{ray_dda_first_hit, Brick, DagBrick, Voxel, BRICK_EDGE};
 
     const E: i32 = BRICK_EDGE as i32;
 
-    fn solid_at(gpu: &DagGpu, x: i32, y: i32, z: i32) -> bool {
-        if x < 0 || y < 0 || z < 0 || x >= E || y >= E || z >= E {
-            return false;
-        }
-        gpu_get(gpu, x as u8, y as u8, z as u8) != Voxel::EMPTY
-    }
-
-    /// Amanatides–Woo DDA across the `[0, 16)³` grid — the exact stepping the
-    /// WGSL shader performs. Returns the first solid cell hit and the list of
-    /// empty cells visited before it (for the "earlier cells were empty"
-    /// assertion). `origin`/`dir` are in voxel space.
-    fn ray_dda_first_hit(
-        gpu: &DagGpu,
-        origin: [f32; 3],
-        dir: [f32; 3],
-    ) -> Option<([i32; 3], Vec<[i32; 3]>)> {
-        // Clip the ray to the [0, E] box (slab method) to find the entry t.
-        let mut t_enter = 0.0_f32;
-        let mut t_exit = f32::INFINITY;
-        for a in 0..3 {
-            let inv = 1.0 / dir[a];
-            let mut t0 = (0.0 - origin[a]) * inv;
-            let mut t1 = (E as f32 - origin[a]) * inv;
-            if t0 > t1 {
-                std::mem::swap(&mut t0, &mut t1);
-            }
-            t_enter = t_enter.max(t0);
-            t_exit = t_exit.min(t1);
-        }
-        if t_enter > t_exit || t_exit < 0.0 {
-            return None;
-        }
-        let t_start = t_enter.max(0.0);
-        let p = [
-            origin[0] + dir[0] * t_start,
-            origin[1] + dir[1] * t_start,
-            origin[2] + dir[2] * t_start,
-        ];
-        // Current cell (clamped so a hit exactly on the far face stays in range).
-        let mut cell = [
-            (p[0].floor() as i32).clamp(0, E - 1),
-            (p[1].floor() as i32).clamp(0, E - 1),
-            (p[2].floor() as i32).clamp(0, E - 1),
-        ];
-        let step = [
-            if dir[0] >= 0.0 { 1 } else { -1 },
-            if dir[1] >= 0.0 { 1 } else { -1 },
-            if dir[2] >= 0.0 { 1 } else { -1 },
-        ];
-        // Distance along the ray to the next cell boundary on each axis.
-        let mut t_max = [0.0_f32; 3];
-        let mut t_delta = [0.0_f32; 3];
-        for a in 0..3 {
-            let inv = 1.0 / dir[a].abs().max(1e-20);
-            t_delta[a] = inv;
-            let next_boundary = if step[a] > 0 {
-                (cell[a] + 1) as f32
-            } else {
-                cell[a] as f32
-            };
-            t_max[a] = t_start + (next_boundary - p[a]) / dir[a];
-        }
-        let mut visited_empty = Vec::new();
-        for _ in 0..(3 * E + 4) {
-            if solid_at(gpu, cell[0], cell[1], cell[2]) {
-                return Some((cell, visited_empty));
-            }
-            visited_empty.push(cell);
-            // Advance to the next cell across the nearest boundary.
-            let axis = if t_max[0] <= t_max[1] && t_max[0] <= t_max[2] {
-                0
-            } else if t_max[1] <= t_max[2] {
-                1
-            } else {
-                2
-            };
-            cell[axis] += step[axis];
-            t_max[axis] += t_delta[axis];
-            if cell[axis] < 0 || cell[axis] >= E {
-                return None; // walked out of the brick without a hit
-            }
-        }
-        None
+    fn norm(v: [f32; 3]) -> [f32; 3] {
+        let m = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        [v[0] / m, v[1] / m, v[2] / m]
     }
 
     fn uniform_brick() -> Brick {
@@ -357,101 +311,21 @@ mod tests {
         b
     }
 
-    fn sparse_brick() -> Brick {
-        let mut b = Brick::new();
-        b.set(IVec3::new(1, 1, 1), Voxel::new(3));
-        b.set(IVec3::new(8, 9, 10), Voxel::new(4));
-        b.set(IVec3::new(15, 15, 15), Voxel::new(5));
-        b
-    }
-
-    fn norm(v: [f32; 3]) -> [f32; 3] {
-        let m = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        [v[0] / m, v[1] / m, v[2] / m]
-    }
-
-    /// A first-solid-hit found by the DDA must (a) be solid per `gpu_get`, and
-    /// (b) have *every* earlier visited cell empty per `gpu_get`. This is the
-    /// property the WGSL relies on.
-    fn assert_dda_consistent(gpu: &DagGpu, origin: [f32; 3], dir: [f32; 3]) {
-        if let Some((hit, empties)) = ray_dda_first_hit(gpu, origin, norm(dir)) {
-            assert!(
-                solid_at(gpu, hit[0], hit[1], hit[2]),
-                "DDA reported hit at {hit:?} but gpu_get says empty"
-            );
-            for c in empties {
-                assert!(
-                    !solid_at(gpu, c[0], c[1], c[2]),
-                    "DDA skipped a solid cell at {c:?} before the reported hit"
-                );
-            }
-        }
-    }
-
     #[test]
-    fn dda_matches_gpu_get_uniform() {
+    fn uniform_brick_hits_entry_plane() {
         let gpu = DagBrick::from_brick(&uniform_brick()).to_gpu();
-        // Rays from outside, aimed into the box from several directions.
-        assert_dda_consistent(&gpu, [-5.0, 8.0, 8.0], [1.0, 0.0, 0.0]);
-        assert_dda_consistent(&gpu, [8.0, 24.0, 8.0], [0.0, -1.0, 0.0]);
-        assert_dda_consistent(&gpu, [-4.0, -4.0, -4.0], [1.0, 1.0, 1.0]);
-        // A ray from outside a fully-solid brick must hit the very first cell
-        // it enters.
-        let hit = ray_dda_first_hit(&gpu, [-5.0, 8.5, 8.5], norm([1.0, 0.0, 0.0]));
-        let (cell, empties) = hit.expect("ray should enter the solid brick");
-        assert_eq!(cell[0], 0, "first solid cell should be the entry plane x=0");
-        assert!(empties.is_empty(), "no empty cells before entering a solid brick");
+        let hit = ray_dda_first_hit(&gpu, [-5.0, 8.5, 8.5], norm([1.0, 0.0, 0.0]))
+            .expect("ray should enter the solid brick");
+        assert_eq!(hit.cell[0], 0, "first solid cell is the entry plane x=0");
+        assert_eq!(hit.material, 1);
     }
 
     #[test]
-    fn dda_matches_gpu_get_half() {
+    fn half_brick_hits_top_of_block() {
         let gpu = DagBrick::from_brick(&half_brick()).to_gpu();
-        // Downward ray through the empty upper half into the solid lower half:
-        // first hit must be y == 7 (top of the solid block).
-        let hit = ray_dda_first_hit(&gpu, [8.5, 25.0, 8.5], norm([0.0, -1.0, 0.0]));
-        let (cell, _) = hit.expect("downward ray should hit the lower half");
-        assert_eq!(cell[1], (E / 2) - 1, "first solid cell is the top of the lower half");
-        assert!(solid_at(&gpu, cell[0], cell[1], cell[2]));
-        // Several oblique rays stay consistent with the oracle.
-        assert_dda_consistent(&gpu, [-3.0, 20.0, 8.0], [1.0, -1.0, 0.2]);
-        assert_dda_consistent(&gpu, [8.0, 8.0, -3.0], [0.1, -0.3, 1.0]);
-    }
-
-    #[test]
-    fn dda_matches_gpu_get_sparse() {
-        let b = sparse_brick();
-        let gpu = DagBrick::from_brick(&b).to_gpu();
-        // Exhaustive cross-check of the point oracle against the brick itself:
-        // gpu_get must agree with the source brick for every cell (guards the
-        // to_gpu encoding the DDA reads).
-        for z in 0..E {
-            for y in 0..E {
-                for x in 0..E {
-                    let expect = b.get(IVec3::new(x as i64, y as i64, z as i64));
-                    let got = gpu_get(&gpu, x as u8, y as u8, z as u8);
-                    assert_eq!(got, expect, "gpu_get mismatch at ({x},{y},{z})");
-                }
-            }
-        }
-        // Aim a ray straight at the isolated voxel (1,1,1) along the diagonal.
-        assert_dda_consistent(&gpu, [-2.0, -2.0, -2.0], [1.0, 1.0, 1.0]);
-        // Aim at the corner voxel (15,15,15).
-        assert_dda_consistent(&gpu, [20.0, 20.0, 20.0], [-1.0, -1.0, -1.0]);
-    }
-
-    #[test]
-    fn empty_brick_yields_no_material() {
-        let gpu = DagBrick::from_brick(&Brick::new()).to_gpu();
-        // Empty DAG returns before touching storage, so a default handle +
-        // empty store suffice (no `Assets::add` needed).
-        let mut sb = Assets::<bevy::render::storage::ShaderStorageBuffer>::default();
-        let palette = Handle::<bevy::render::storage::ShaderStorageBuffer>::default();
-        let m = super::build_raymarch_material(
-            &gpu,
-            palette,
-            super::RaymarchShadingTier::Lambert,
-            &mut sb,
-        );
-        assert!(m.is_none(), "empty brick should not produce a raymarch material");
+        let hit = ray_dda_first_hit(&gpu, [8.5, 25.0, 8.5], norm([0.0, -1.0, 0.0]))
+            .expect("downward ray should hit the lower half");
+        assert_eq!(hit.cell[1], (E / 2) - 1, "first solid cell is the top of the lower half");
+        assert_eq!(hit.material, 2);
     }
 }

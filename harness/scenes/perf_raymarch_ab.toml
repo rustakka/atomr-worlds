@@ -1,0 +1,86 @@
+# Rec 1 perf gate: mesh-vs-raymarch frame-time + GPU-memory A/B.
+#
+# Run this scene TWICE with an identical camera path, switching only the
+# render path via the CLI flag (NOT a mid-run `set_strategy`, which would
+# only affect newly-streamed bricks and measure a mongrel of mesh-warmup +
+# raymarch-tail):
+#
+#   mesh:     --shading mesh     --harness harness/scenes/perf_raymarch_ab.toml --harness-out <dir>
+#   raymarch: --shading raymarch --harness harness/scenes/perf_raymarch_ab.toml --harness-out <dir>
+#
+# Then compare the two runs' `FRAME_DIAG_SUMMARY` (p50/p99/max µs) and
+# `BRICK_MEM` (dedup hit-rate, resident DAG bytes vs estimated mesh bytes,
+# main-thread acquire cost) lines against the perf bar in the plan:
+#   ray.p99 ≤ 1.15×mesh.p99 · ray.max ≤ 1.25×mesh.max & ≤ 1859 µs ·
+#   ray.p50 ≤ 1.10×mesh.p50 · acquire_us_mean ≪ frame p50 ·
+#   ray dag_bytes ≤ mesh mesh_bytes_est.
+#
+# The `dump_motion` snapshots prove both runs walk the identical path (the
+# v_smooth / pos values must match across runs). Absolute µs are machine /
+# GPU / driver dependent — compare the two runs on the SAME machine, and the
+# ratios are what the bar tests.
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 120
+output_prefix = "perf_raymarch_ab"
+
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Visual A/B frame: same camera under whichever path the CLI flag selected.
+[[events]]
+frame = 2
+kind  = "screenshot"
+note  = "origin pre-sprint (mesh vs raymarch A/B)"
+
+# ~4 s sustained sprint along an identical path (matches perf_sprint_hold).
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "ShiftLeft"
+
+[[events]]
+frame = 5
+kind  = "key_press"
+key   = "KeyW"
+
+[[events]]
+frame = 120
+kind  = "dump_motion"
+note  = "mid-sprint — identical-path proof across the two runs"
+
+[[events]]
+frame = 245
+kind  = "screenshot"
+note  = "+4 s sprint endpoint (A/B)"
+
+[[events]]
+frame = 247
+kind  = "key_release"
+key   = "KeyW"
+
+[[events]]
+frame = 247
+kind  = "key_release"
+key   = "ShiftLeft"
+
+# Drain the frame-time ring buffer (1024 entries — whole post-warmup run).
+[[events]]
+frame = 252
+kind  = "dump_frame_diag"
+note  = "full-run frame-time histogram (p50/p99/max)"
+
+# GPU-memory + dedup + acquire-cost snapshot for the mesh-vs-DAG comparison.
+[[events]]
+frame = 253
+kind  = "dump_brick_mem"
+note  = "buffer dedup hit-rate, resident VRAM, main-thread acquire cost"
+
+[[events]]
+frame = 270
+kind  = "exit"
