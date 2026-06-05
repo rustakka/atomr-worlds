@@ -18,7 +18,7 @@ pub mod voxel;
 
 pub use brick::{Brick, BrickDecodeError, BRICK_EDGE, BRICK_LEN};
 pub use codec::{BrickCodec, CodecError, PaletteRle, RawU16, Rle, Zlib};
-pub use dag::DagBrick;
+pub use dag::{gpu_get, DagBrick, DagGpu, DAG_GPU_EMPTY_ROOT, DAG_LEAF_FLAG};
 pub use error::VoxelError;
 pub use light::{LightOverlay, LIGHT_OVERLAY_BYTES};
 pub use octree::{InternalNode, NodeId, NodeKind, Octree, OCTREE_NULL};

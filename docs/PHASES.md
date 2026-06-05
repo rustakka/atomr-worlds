@@ -2023,17 +2023,27 @@ resident in VRAM for the raymarcher.
 - **API.** `from_brick`, `get(x,y,z)`, `to_brick` (exact round-trip),
   `node_count`, `digest`.
 
+**Flat GPU buffers + CPU traversal mirror (landed).** `DagBrick::to_gpu()`
+flattens the DAG into GPU-uploadable `DagGpu { nodes: Vec<u32>, colors: Vec<u16>,
+root }` with **occupancy decoupled from color**: nodes are addressed by word
+offset (leaf = `DAG_LEAF_FLAG | color_index`; internal = a `mask` word + one
+child word-offset per set octant), and materials are deduplicated into `colors`
+(a uniform brick → 37 node words, one color entry). The free `gpu_get()`
+traverses those flat buffers — the **exact CPU mirror of the planned WGSL DDA
+shader**, so the raymarcher's determinism gate is met without hashing GPU float
+output.
+
 ### Out of scope (next Rec 1 steps)
 
-- The flat GPU buffer encoding (`node_pool: Vec<u32>` + decoupled `color_array`)
-  co-designed with the WGSL DDA traversal shader (geometry/color decoupling).
-- The CPU raymarch reference + the GPU compute/proxy-cube raymarcher (gated on
-  the Bevy upgrade for the compute-pass route).
+- The GPU compute / proxy-cube raymarcher + a WGSL shader that mirrors `gpu_get`
+  (the compute-pass route is gated on the Bevy upgrade).
+- A two-level brickmap occupancy buffer for cross-brick empty-space skipping.
 
 ### Verification
 
-`cargo test -p atomr-worlds-voxel` (6 new `dag::tests::*`): empty-brick → 0
+`cargo test -p atomr-worlds-voxel` (11 new `dag::tests::*`): empty-brick → 0
 nodes, uniform-solid → 5 nodes, sparse + half-filled round-trips, deterministic
-digest, and content-sensitive digest. Clippy clean; existing voxel tests
-unchanged.
++ content-sensitive digest; plus GPU-buffer round-trip vs `Brick::get`, uniform
+word/color layout (37 words / root 28 / one color), color dedup, and
+deterministic encoding. Clippy clean; existing voxel tests unchanged.
 
