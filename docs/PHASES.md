@@ -1943,3 +1943,59 @@ LOD pop. Removing coarsening preserves the keys that already paid
 their setup cost; the spawn budget + cadence strategies still throttle
 the per-frame *new-work* spike that motivated Phase 19.2.
 
+## Phase 20 *(in progress)* — Advanced Voxel Architectures: Phase-1 foundations
+
+The first slice of the *Advanced Voxel Architectures* roadmap (full plan at
+`~/.claude/plans/take-a-look-at-groovy-sedgewick.md`, derived from
+`docs/Voxel Engine Improvement Analysis.pdf`). That roadmap lands four strategic
+recommendations — SVDAG + GPU raymarching, rapier-based voxel physics, a
+multiplayer Actor-CRDT destruction sync, and a low-latency scheduler — behind a
+foundational Bevy 0.13→0.18 upgrade (Phase 0). This entry covers the **shared,
+engine-agnostic foundations** that need neither the Bevy bump nor rapier nor GPU
+work, so they land first and stand alone.
+
+### Landed
+
+- **Material physics palette** — `atomr-worlds-core::material_physics`
+  ([`MaterialPhysicsProps`] + `default_palette()`), indexed by the same `u16`
+  material id as the render palette. Pure data; feeds rigid-body mass/inertia
+  and the fracture-yield check. Determinism-safe (read-only, seeded).
+- **`atomr-worlds-physics` crate** — Bevy-free, rapier-free, deterministic:
+  `flood_fill` (6-connected structural connectivity + floating-island
+  detection), `inertia` (mass / center-of-mass / regularized inertia tensor from
+  per-voxel density), `debris::DebrisBody` (island → local grid + mass props +
+  rigid-body state), and a minimal `math::Mat3`.
+- **Fracture protocol types** — `atomr-worlds-proto::fracture`
+  (`FractureCommand`, `FractureRequest`, `FractureApplied`, `DebrisStateDelta`,
+  `WriteRejected`, fixed-point `Force`). Defined + serde-tested; **not yet wired**
+  into `WorldRequest`/`WorldEvent` (that, plus actor handling, lands with the
+  Rec 2 / Rec 4 phases — appending enum variants later is bincode-safe).
+
+See [PHYSICS.md](PHYSICS.md) for the design, the determinism boundary, and how
+the later rapier integration builds on these pieces.
+
+### Verification
+
+- `cargo test -p atomr-worlds-core -p atomr-worlds-physics -p atomr-worlds-proto`
+  — palette lookups/ordering/determinism, flood-fill (anchored vs floating,
+  6-connectivity, deterministic labels), mass conservation + centroid + cube
+  inertia + thin-body inverse stability, `Mat3` inverse, `DebrisBody`
+  mass-from-palette, and fracture-type serde round-trips. Clippy clean.
+
+### Environment notes (pre-existing, surfaced during this work)
+
+- The `../atomr-accel` sibling repo referenced by the workspace (`Cargo.toml`,
+  optional `cuda`-feature path dep) is **absent on disk**, which blocks workspace
+  manifest loading until a stub or real checkout is present.
+- The on-disk `../atomr` sibling has drifted to **0.10.1** while the workspace
+  pins `0.9.2`; reconciling that (and verifying the host/remote/server/client
+  crates against atomr 0.10) is a separate task, intentionally **not** bundled
+  into this additive foundations change.
+
+### Out of scope (deferred to later phases)
+
+Bevy 0.13→0.18 upgrade (Phase 0); SVDAG `DagBrick` + GPU raymarcher (Rec 1);
+rapier collider/solver integration + flood-fill-driven debris spawning (Rec 2);
+CRDT destruction sync over `atomr-distributed-data` (Rec 4); physics-island
+scheduler (Rec 3); and the consolidated upstream feature requests to `atomr`.
+
