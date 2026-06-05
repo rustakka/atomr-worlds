@@ -221,6 +221,120 @@ fn intern(node: DagNode, nodes: &mut Vec<DagNode>, interner: &mut HashMap<DagNod
     id
 }
 
+// ---------------------------------------------------------------------------
+// Flat GPU buffer encoding (geometry / color decoupled).
+// ---------------------------------------------------------------------------
+
+/// High bit of a node word marks a leaf; the low 31 bits are a color index.
+pub const DAG_LEAF_FLAG: u32 = 0x8000_0000;
+/// Sentinel `root` for a fully-empty brick (no nodes).
+pub const DAG_GPU_EMPTY_ROOT: u32 = u32::MAX;
+
+/// A `DagBrick` flattened into GPU-uploadable buffers, with **occupancy
+/// decoupled from color** so the raymarcher can traverse pure geometry and
+/// fetch material separately (the layout the WGSL DDA shader consumes).
+///
+/// Addressing is by **word offset** into `nodes` (so a node's children point at
+/// other nodes' word offsets). Each node is:
+/// - **leaf**: one word, `DAG_LEAF_FLAG | color_index`, where `color_index`
+///   indexes [`colors`](DagGpu::colors).
+/// - **internal**: `1 + popcount(mask)` words — word 0 holds the 8-bit child
+///   `mask` in its low byte; the following words are the child word-offsets in
+///   ascending octant order. An absent octant (clear bit) is empty space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DagGpu {
+    /// Flat node-word array (see the struct docs for the per-node encoding).
+    pub nodes: Vec<u32>,
+    /// Deduplicated material palette: `colors[color_index]` is a `Voxel` value.
+    pub colors: Vec<u16>,
+    /// Word offset of the root node, or [`DAG_GPU_EMPTY_ROOT`] when empty.
+    pub root: u32,
+}
+
+impl DagBrick {
+    /// Flatten into GPU buffers. Materials are deduplicated into `colors`, so a
+    /// uniform brick yields a single color entry regardless of node count.
+    /// Deterministic: nodes are emitted in id order (children before parents),
+    /// and colors in first-encounter order.
+    pub fn to_gpu(&self) -> DagGpu {
+        let root_id = match self.root {
+            Some(r) => r,
+            None => return DagGpu { nodes: Vec::new(), colors: Vec::new(), root: DAG_GPU_EMPTY_ROOT },
+        };
+
+        // Pass 1: word offset of each node (children always have smaller ids
+        // than their parents, so id order is a valid layout order).
+        let mut offset = vec![0u32; self.nodes.len()];
+        let mut cur = 0u32;
+        for (id, node) in self.nodes.iter().enumerate() {
+            offset[id] = cur;
+            cur += match node {
+                DagNode::Leaf(_) => 1,
+                DagNode::Internal { children, .. } => 1 + children.len() as u32,
+            };
+        }
+
+        // Pass 2: emit words + dedup colors.
+        let mut nodes = Vec::with_capacity(cur as usize);
+        let mut colors: Vec<u16> = Vec::new();
+        let mut color_index: HashMap<u16, u32> = HashMap::new();
+        for node in &self.nodes {
+            match node {
+                DagNode::Leaf(material) => {
+                    let ci = *color_index.entry(*material).or_insert_with(|| {
+                        let i = colors.len() as u32;
+                        colors.push(*material);
+                        i
+                    });
+                    nodes.push(DAG_LEAF_FLAG | ci);
+                }
+                DagNode::Internal { mask, children } => {
+                    nodes.push(*mask as u32);
+                    for &cid in children {
+                        nodes.push(offset[cid as usize]);
+                    }
+                }
+            }
+        }
+
+        DagGpu { nodes, colors, root: offset[root_id as usize] }
+    }
+}
+
+/// Read the voxel at brick-local `(x, y, z)` by traversing the flat [`DagGpu`]
+/// buffers. This is the exact CPU mirror of the planned WGSL DDA traversal —
+/// keeping the two in lock-step is how the raymarcher's determinism gate is
+/// satisfied without hashing GPU float output.
+pub fn gpu_get(gpu: &DagGpu, x: u8, y: u8, z: u8) -> Voxel {
+    if gpu.root == DAG_GPU_EMPTY_ROOT {
+        return Voxel::EMPTY;
+    }
+    let mut word = gpu.root as usize;
+    let mut origin = [0u8; 3];
+    let mut depth = 0u8;
+    loop {
+        let w = gpu.nodes[word];
+        if (w & DAG_LEAF_FLAG) != 0 {
+            let ci = (w & !DAG_LEAF_FLAG) as usize;
+            return Voxel::new(gpu.colors[ci]);
+        }
+        let mask = (w & 0xFF) as u8;
+        let half = (BRICK_EDGE as u8 >> depth) >> 1;
+        let ox = ((x - origin[0]) >= half) as u8;
+        let oy = ((y - origin[1]) >= half) as u8;
+        let oz = ((z - origin[2]) >= half) as u8;
+        let octant = ox | (oy << 1) | (oz << 2);
+        let bit = 1u8 << octant;
+        if (mask & bit) == 0 {
+            return Voxel::EMPTY;
+        }
+        let slot = (mask & (bit - 1)).count_ones() as usize;
+        word = gpu.nodes[word + 1 + slot] as usize;
+        origin = [origin[0] + ox * half, origin[1] + oy * half, origin[2] + oz * half];
+        depth += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,5 +431,95 @@ mod tests {
             DagBrick::from_brick(&b1).digest(),
             DagBrick::from_brick(&b2).digest()
         );
+    }
+
+    // --- flat GPU buffer encoding ---
+
+    fn assert_gpu_matches_brick(b: &Brick) {
+        let gpu = DagBrick::from_brick(b).to_gpu();
+        for z in 0..EDGE {
+            for y in 0..EDGE {
+                for x in 0..EDGE {
+                    let expected = b.get(IVec3::new(x, y, z));
+                    let actual = gpu_get(&gpu, x as u8, y as u8, z as u8);
+                    assert_eq!(actual, expected, "gpu mismatch at ({x},{y},{z})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_brick_gpu_is_empty() {
+        let gpu = DagBrick::from_brick(&Brick::new()).to_gpu();
+        assert_eq!(gpu.root, DAG_GPU_EMPTY_ROOT);
+        assert!(gpu.nodes.is_empty());
+        assert!(gpu.colors.is_empty());
+        assert_eq!(gpu_get(&gpu, 0, 0, 0), Voxel::EMPTY);
+    }
+
+    #[test]
+    fn uniform_brick_gpu_layout() {
+        let mut b = Brick::new();
+        for z in 0..EDGE {
+            for y in 0..EDGE {
+                for x in 0..EDGE {
+                    b.set(IVec3::new(x, y, z), Voxel::new(1));
+                }
+            }
+        }
+        let gpu = DagBrick::from_brick(&b).to_gpu();
+        // 5 DAG nodes: 1 leaf (1 word) + 4 full internals (1 + popcount(0xFF)=9
+        // words each) = 1 + 4*9 = 37 words.
+        assert_eq!(gpu.nodes.len(), 37);
+        assert_eq!(gpu.root, 28); // offset of the 5th node (id 4).
+        // Color decoupling: one material ⇒ exactly one palette entry.
+        assert_eq!(gpu.colors, vec![1]);
+        assert_gpu_matches_brick(&b);
+    }
+
+    #[test]
+    fn sparse_and_half_brick_gpu_round_trip() {
+        let mut sparse = Brick::new();
+        sparse.set(IVec3::new(0, 0, 0), Voxel::new(1));
+        sparse.set(IVec3::new(15, 15, 15), Voxel::new(2));
+        sparse.set(IVec3::new(3, 5, 7), Voxel::new(42));
+        assert_gpu_matches_brick(&sparse);
+
+        let mut half = Brick::new();
+        for z in 0..EDGE {
+            for y in 0..8 {
+                for x in 0..EDGE {
+                    half.set(IVec3::new(x, y, z), Voxel::new(3));
+                }
+            }
+        }
+        assert_gpu_matches_brick(&half);
+    }
+
+    #[test]
+    fn colors_are_deduplicated() {
+        // Two distinct materials ⇒ two palette entries, regardless of how many
+        // leaves use them.
+        let mut b = Brick::new();
+        for x in 0..EDGE {
+            b.set(IVec3::new(x, 0, 0), Voxel::new(7));
+            b.set(IVec3::new(x, 1, 0), Voxel::new(9));
+        }
+        let gpu = DagBrick::from_brick(&b).to_gpu();
+        let mut sorted = gpu.colors.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![7, 9]);
+        assert_gpu_matches_brick(&b);
+    }
+
+    #[test]
+    fn gpu_encoding_is_deterministic() {
+        let mut b = Brick::new();
+        b.set(IVec3::new(1, 2, 3), Voxel::new(7));
+        b.set(IVec3::new(14, 1, 9), Voxel::new(7));
+        b.set(IVec3::new(2, 2, 2), Voxel::new(5));
+        let a = DagBrick::from_brick(&b).to_gpu();
+        let c = DagBrick::from_brick(&b).to_gpu();
+        assert_eq!(a, c);
     }
 }
