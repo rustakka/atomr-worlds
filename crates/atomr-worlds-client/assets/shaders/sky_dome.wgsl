@@ -7,10 +7,13 @@
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::view
 
-@group(2) @binding(0) var<uniform> horizon_color: vec4<f32>;
-@group(2) @binding(1) var<uniform> zenith_color: vec4<f32>;
-@group(2) @binding(2) var<uniform> sun_color: vec4<f32>;
-@group(2) @binding(3) var<uniform> sun_direction: vec4<f32>;
+// Bevy 0.18: the material bind group is @group(3) (view = 0, mesh = 2). This
+// was @group(2) before the 0.13 -> 0.18 upgrade; group 2 is now the per-object
+// mesh array, so the stale number caused a pipeline validation panic.
+@group(3) @binding(0) var<uniform> horizon_color: vec4<f32>;
+@group(3) @binding(1) var<uniform> zenith_color: vec4<f32>;
+@group(3) @binding(2) var<uniform> sun_color: vec4<f32>;
+@group(3) @binding(3) var<uniform> sun_direction: vec4<f32>;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {

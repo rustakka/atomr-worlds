@@ -12,6 +12,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 
 use super::defaults::*;
+use super::raymarch::RaymarchShadingTier;
 use super::strategy::*;
 
 #[derive(Resource, Clone)]
@@ -60,6 +61,10 @@ pub struct RenderConfig {
     pub time_advances_automatically: bool,
     /// Wall seconds per in-game hour when auto-advancing.
     pub seconds_per_hour: f32,
+    /// Shading tier for the DAG raymarcher (`RaymarchDag` shading mode). An
+    /// engine setting for style / performance tuning — orthogonal to which
+    /// `shading` strategy is active. Default [`RaymarchShadingTier::Lambert`].
+    pub raymarch_tier: RaymarchShadingTier,
 }
 
 impl Default for RenderConfig {
@@ -90,6 +95,7 @@ impl Default for RenderConfig {
             rebuild_threshold:  Arc::new(MotionScaledRebuildThreshold),
             time_advances_automatically: false,
             seconds_per_hour: 60.0,
+            raymarch_tier: RaymarchShadingTier::default(),
         }
     }
 }

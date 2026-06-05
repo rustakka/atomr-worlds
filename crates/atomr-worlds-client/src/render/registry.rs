@@ -63,6 +63,10 @@ pub fn apply_strategy_by_name(cfg: &mut RenderConfig, slot: &str, name: &str) ->
                 cfg.shading = Arc::new(PaletteVoxelMaterial);
                 true
             }
+            "RaymarchDagShading" | "raymarch" => {
+                cfg.shading = Arc::new(RaymarchDagShading);
+                true
+            }
             _ => false,
         },
         "sky" => match name {

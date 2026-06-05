@@ -5,6 +5,7 @@ use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 
 use super::materials::VoxelMaterial;
+use super::raymarch::RaymarchMaterial;
 use super::sky_dome::SkyDomePlugin;
 use super::skybox::SkyboxPlugin;
 use super::sun::{advance_world_time, sync_sky_and_fog, sync_sun};
@@ -25,6 +26,10 @@ impl Plugin for RenderPlugin {
         // restart); FP only allocates handles when the strategy mode
         // is `PaletteVoxelMaterial`.
         app.add_plugins(MaterialPlugin::<VoxelMaterial>::default());
+        // Always registered (like VoxelMaterial) so a runtime `set_strategy`
+        // to `RaymarchDagShading` doesn't need a restart; bricks only spawn
+        // raymarch proxies when that shading mode is active.
+        app.add_plugins(MaterialPlugin::<RaymarchMaterial>::default());
         app.add_plugins(SkyDomePlugin);
         // Cubemap skybox: seeds a placeholder 1×1×6 black handle into
         // `SkyboxRuntime` so the FP camera can spawn with a valid

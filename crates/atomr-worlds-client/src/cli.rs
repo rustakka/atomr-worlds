@@ -19,6 +19,25 @@ pub enum PerfPreset {
     Quality,
 }
 
+/// Shading path. `default` keeps the configured default (legacy split-per-
+/// material mesh); `palette` uses the merged palette voxel material; `raymarch`
+/// skips meshing and raymarches each brick's sparse-voxel DAG on the GPU.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum ShadingArg {
+    Default,
+    Palette,
+    Raymarch,
+}
+
+/// Raymarch shading tier — style / performance knob, only meaningful with
+/// `--shading raymarch`.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum RaymarchTier {
+    Unlit,
+    Lambert,
+    Pbr,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "atomr-worlds-client",
@@ -61,6 +80,15 @@ pub struct Cli {
     /// stand-still while moving.
     #[arg(long, value_enum, default_value_t = PerfPreset::Balanced)]
     pub perf: PerfPreset,
+
+    /// Shading path. `raymarch` renders bricks by GPU-raymarching their
+    /// sparse-voxel DAG instead of meshing them (Rec 1).
+    #[arg(long, value_enum, default_value_t = ShadingArg::Default)]
+    pub shading: ShadingArg,
+
+    /// Raymarch shading tier (only used with `--shading raymarch`).
+    #[arg(long, value_enum, default_value_t = RaymarchTier::Lambert)]
+    pub raymarch_tier: RaymarchTier,
 }
 
 fn parse_seed(s: &str) -> Result<u64, String> {

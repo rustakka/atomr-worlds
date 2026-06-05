@@ -133,6 +133,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cli::PerfPreset::Balanced => render::PerfPreset::Balanced,
                 cli::PerfPreset::Quality => render::PerfPreset::Quality,
             });
+            // Shading path (default keeps the configured strategy).
+            match cli.shading {
+                cli::ShadingArg::Default => {}
+                cli::ShadingArg::Palette => {
+                    render::apply_strategy_by_name(&mut cfg, "shading", "PaletteVoxelMaterial");
+                }
+                cli::ShadingArg::Raymarch => {
+                    render::apply_strategy_by_name(&mut cfg, "shading", "RaymarchDagShading");
+                }
+            }
+            cfg.raymarch_tier = match cli.raymarch_tier {
+                cli::RaymarchTier::Unlit => render::RaymarchShadingTier::Unlit,
+                cli::RaymarchTier::Lambert => render::RaymarchShadingTier::Lambert,
+                cli::RaymarchTier::Pbr => render::RaymarchShadingTier::Pbr,
+            };
             cfg
         })
         .add_plugins(render::RenderPlugin)
