@@ -312,7 +312,7 @@ pub fn sync_skybox(
     if !fp_state.ready {
         return;
     }
-    let dt_s = time.delta_seconds().min(0.1);
+    let dt_s = time.delta_secs().min(0.1);
     let walk_pos = fp_state.walk.observer.position;
     let containing_frame = fp_state.walk.observer.containing_frame;
     let prev_frame = runtime_state.last_frame;
@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(size.height, sky.face_resolution);
         // 6 faces × res² × 4 bytes (RGBA8).
         let res = sky.face_resolution as usize;
-        assert_eq!(img.data.len(), 6 * res * res * 4);
+        assert_eq!(img.data.as_ref().unwrap().len(), 6 * res * res * 4);
         let view = img.texture_view_descriptor.as_ref().expect("cube view desc");
         assert_eq!(view.dimension, Some(TextureViewDimension::Cube));
     }
@@ -589,7 +589,7 @@ mod tests {
         assert_eq!(size.height, 1);
         assert_eq!(size.depth_or_array_layers, 6);
         // 6 layers × 1 texel × 4 bytes, all zero.
-        assert_eq!(img.data.len(), 24);
-        assert!(img.data.iter().all(|b| *b == 0));
+        assert_eq!(img.data.as_ref().unwrap().len(), 24);
+        assert!(img.data.as_ref().unwrap().iter().all(|b| *b == 0));
     }
 }

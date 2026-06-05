@@ -60,14 +60,11 @@ fn ensure_sky_dome(
 
     let dome = commands
         .spawn((
-            MaterialMeshBundle {
-                mesh,
-                material,
-                // Initial visibility is hidden; `sync_sky_dome` flips it
-                // on if the strategy says so.
-                visibility: Visibility::Hidden,
-                ..default()
-            },
+            // Bevy 0.15+: MaterialMeshBundle → Mesh3d + MeshMaterial3d.
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            // Initial visibility is hidden; `sync_sky_dome` flips it on.
+            Visibility::Hidden,
             SkyDome,
             NotShadowCaster,
             NotShadowReceiver,
@@ -84,7 +81,7 @@ fn sync_sky_dome(
     cfg: Res<RenderConfig>,
     world_time: Res<WorldTime>,
     mut materials: ResMut<Assets<SkyDomeMaterial>>,
-    mut q: Query<(&mut Visibility, &Handle<SkyDomeMaterial>), With<SkyDome>>,
+    mut q: Query<(&mut Visibility, &MeshMaterial3d<SkyDomeMaterial>), With<SkyDome>>,
 ) {
     let active = cfg.sky.dome_active();
     let sun_state = cfg.sun_curve.sun_state(world_time.0);
@@ -97,7 +94,7 @@ fn sync_sky_dome(
         if !active {
             continue;
         }
-        if let Some(mat) = materials.get_mut(handle) {
+        if let Some(mat) = materials.get_mut(&handle.0) {
             mat.horizon_color = horizon;
             mat.zenith_color = zenith;
             mat.sun_color = sun_color;

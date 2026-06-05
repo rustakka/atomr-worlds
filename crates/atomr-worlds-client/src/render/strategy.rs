@@ -10,9 +10,9 @@ use atomr_worlds_core::coord::DVec3;
 use atomr_worlds_core::shape::WorldShape;
 use atomr_worlds_view::{Framebuffer, MaterialPalette, Mesh, SliceCamera, SliceConfig, SliceTable};
 use atomr_worlds_voxel::Brick;
-use bevy::core_pipeline::bloom::BloomSettings;
+use bevy::core_pipeline::bloom::Bloom;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::pbr::{CascadeShadowConfig, FogSettings};
+use bevy::pbr::{CascadeShadowConfig, DistanceFog};
 use bevy::prelude::*;
 use bevy::render::camera::Exposure;
 
@@ -102,7 +102,7 @@ impl Default for SunState {
     fn default() -> Self {
         Self {
             direction: Vec3::new(-0.4, -0.8, -0.3).normalize(),
-            color: Color::rgb(1.0, 0.97, 0.9),
+            color: Color::srgb(1.0, 0.97, 0.9),
             illuminance: 80_000.0,
             day_factor: 1.0,
         }
@@ -166,7 +166,7 @@ pub trait ShadowStrategy: Send + Sync + 'static {
 
 pub trait FogStrategy: Send + Sync + 'static {
     fn name(&self) -> &'static str;
-    /// Build the per-frame [`FogSettings`].
+    /// Build the per-frame [`DistanceFog`].
     ///
     /// `horizon_band_m = Some((start, end))` is supplied by the
     /// progressive chunk streamer when it has a finite load horizon —
@@ -193,7 +193,7 @@ pub trait FogStrategy: Send + Sync + 'static {
         sky_horizon: Color,
         horizon_band_m: Option<(f32, f32)>,
         motion: Option<&CameraMotionState>,
-    ) -> FogSettings;
+    ) -> DistanceFog;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,12 +203,12 @@ pub trait FogStrategy: Send + Sync + 'static {
 /// HDR tonemap + camera exposure + optional bloom post-process. Set
 /// once on the FP/TP camera at scene setup; rerun on
 /// `set_render_preset` / `set_strategy` swap. `AcesTonemap` (the
-/// default) returns `BloomSettings` so the HDR path has bloom enabled.
+/// default) returns `Bloom` so the HDR path has bloom enabled.
 pub trait TonemapStrategy: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn tonemapping(&self) -> Tonemapping;
     fn exposure(&self) -> Exposure;
-    fn bloom(&self) -> Option<BloomSettings> {
+    fn bloom(&self) -> Option<Bloom> {
         None
     }
 }

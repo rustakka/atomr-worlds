@@ -19,8 +19,8 @@ use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::{RenderAssetUsages, RenderAssets};
 use bevy::render::render_resource::{
-    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, ImageCopyBuffer,
-    ImageCopyTexture, ImageDataLayout, MapMode, Maintain, Origin3d, TextureAspect,
+    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, TexelCopyBufferInfo,
+    TexelCopyTextureInfo, TexelCopyBufferLayout, MapMode, Maintain, Origin3d, TextureAspect,
     TextureDimension, TextureFormat, TextureUsages,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
@@ -167,15 +167,15 @@ fn image_copy_system(
         label: Some("atomr_offscreen_capture_encoder"),
     });
     encoder.copy_texture_to_buffer(
-        ImageCopyTexture {
+        TexelCopyTextureInfo {
             texture: &gpu_image.texture,
             mip_level: 0,
             origin: Origin3d::ZERO,
             aspect: TextureAspect::All,
         },
-        ImageCopyBuffer {
+        TexelCopyBufferInfo {
             buffer: &buffer,
-            layout: ImageDataLayout {
+            layout: TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(padded),
                 rows_per_image: Some(height),

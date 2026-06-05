@@ -27,6 +27,7 @@ use bevy::render::render_resource::{
     AsBindGroup, Face, RenderPipelineDescriptor, ShaderRef, ShaderType,
     SpecializedMeshPipelineError,
 };
+use bevy::render::storage::ShaderStorageBuffer;
 
 /// Palette entry packed for the GPU. Stays 48 bytes (3× vec4 = vec4
 /// alignment) so the storage buffer layout matches the WGSL struct.
@@ -43,12 +44,16 @@ pub struct PaletteEntryGpu {
 /// fragment shader indexes by `material_id` (encoded in `uv.x`).
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct VoxelMaterialExt {
-    /// Sized so `palette[id]` is in-bounds for any id in `0..=10`.
-    /// `StandardMaterial` reserves slots 0–99; the convention for
-    /// extensions is to start at 100. See bevy_pbr's
-    /// `extended_material.rs` example.
+    /// Palette storage buffer. `StandardMaterial` reserves slots 0–99; the
+    /// convention for extensions is to start at 100.
+    ///
+    /// Bevy 0.16 moved `#[storage]` buffers off inline `Vec<T>` and onto a
+    /// `Handle<ShaderStorageBuffer>` asset — build it with
+    /// `ShaderStorageBuffer::from(Vec<PaletteEntryGpu>)` (the `Vec` is a
+    /// `ShaderType` runtime array, encoded via encase) and add it to
+    /// `Assets<ShaderStorageBuffer>`.
     #[storage(100, read_only)]
-    pub palette: Vec<PaletteEntryGpu>,
+    pub palette: Handle<ShaderStorageBuffer>,
 }
 
 impl MaterialExtension for VoxelMaterialExt {

@@ -99,7 +99,7 @@ fn slice_input(
     // WASD pans `center_xz` in screen-aligned directions, decoupled from
     // the FP camera yaw. Screen-up is world +Z, screen-right is world -X
     // (matches the FP view + `render_slice`'s pixel mapping).
-    let dt = time.delta_seconds().min(0.05);
+    let dt = time.delta_secs().min(0.05);
     let speed = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
         12.0
     } else {
