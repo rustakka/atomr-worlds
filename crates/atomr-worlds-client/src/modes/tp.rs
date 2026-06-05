@@ -49,7 +49,7 @@ fn tp_input(
         wheel.clear();
         return;
     }
-    let dt = time.delta_seconds().min(0.05);
+    let dt = time.delta_secs().min(0.05);
     let mut yaw_delta = 0.0f32;
     let mut pitch_delta = 0.0f32;
     // Only consume mouse motion when the cursor is grabbed; otherwise

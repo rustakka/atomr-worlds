@@ -55,7 +55,8 @@ fn setup_blit(
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
-    image.data = vec![0u8; (RASTER_W * RASTER_H * 4) as usize];
+    // Bevy 0.16: `Image.data` is `Option<Vec<u8>>`.
+    image.data = Some(vec![0u8; (RASTER_W * RASTER_H * 4) as usize]);
     let handle = images.add(image);
 
     // When the harness is active the FP camera renders to an offscreen
@@ -65,41 +66,38 @@ fn setup_blit(
     // `order: 1` keeps it compositing on top of the (cleared) 3D camera.
     let camera_target = offscreen
         .as_deref()
-        .map(|t| RenderTarget::Image(t.image.clone()))
+        .map(|t| RenderTarget::Image(t.image.clone().into()))
         .unwrap_or_default();
 
+    // Bevy 0.15+: bundles removed — spawn the required components directly.
     commands.spawn((
-        Camera2dBundle {
-            camera: Camera {
-                order: 1,
-                is_active: false,
-                target: camera_target,
-                // Solid black clear so the letterbox bars around the
-                // 1:1 raster sprite (256² scaled into a non-square
-                // target) are deterministic instead of showing whatever
-                // the WorldCamera last rendered. With WorldCamera also
-                // toggled inactive in raster modes, this clear owns the
-                // entire offscreen / window target before the sprite
-                // and the routed HUD UI composite on top (see
-                // `hud::route_hud_target` — UI follows the active camera,
-                // so it lands above the sprite in this mode).
-                clear_color: ClearColorConfig::Custom(Color::BLACK),
-                ..default()
-            },
+        Camera2d,
+        Camera {
+            order: 1,
+            is_active: false,
+            target: camera_target,
+            // Solid black clear so the letterbox bars around the
+            // 1:1 raster sprite (256² scaled into a non-square
+            // target) are deterministic instead of showing whatever
+            // the WorldCamera last rendered. With WorldCamera also
+            // toggled inactive in raster modes, this clear owns the
+            // entire offscreen / window target before the sprite
+            // and the routed HUD UI composite on top (see
+            // `hud::route_hud_target` — UI follows the active camera,
+            // so it lands above the sprite in this mode).
+            clear_color: ClearColorConfig::Custom(Color::BLACK),
             ..default()
         },
         BlitCamera,
     ));
+    // Bevy 0.15: the sprite's image moved into `Sprite.image`.
     commands.spawn((
-        SpriteBundle {
-            texture: handle.clone(),
-            sprite: Sprite {
-                custom_size: Some(Vec2::new(RASTER_W as f32, RASTER_H as f32)),
-                ..default()
-            },
-            visibility: Visibility::Hidden,
+        Sprite {
+            image: handle.clone(),
+            custom_size: Some(Vec2::new(RASTER_W as f32, RASTER_H as f32)),
             ..default()
         },
+        Visibility::Hidden,
         BlitSprite,
     ));
 
@@ -161,7 +159,10 @@ pub fn copy_framebuffer_to_image(images: &mut Assets<Image>, target: &RasterTarg
     debug_assert_eq!(fb.width, RASTER_W);
     debug_assert_eq!(fb.height, RASTER_H);
     if (fb.pixels.len() as u32) == RASTER_W * RASTER_H * 4 {
-        img.data.copy_from_slice(&fb.pixels);
+        // Bevy 0.16: `Image.data` is `Option<Vec<u8>>`.
+        if let Some(data) = img.data.as_mut() {
+            data.copy_from_slice(&fb.pixels);
+        }
     } else {
         tracing::warn!(
             len = fb.pixels.len(),
@@ -204,7 +205,8 @@ mod tests {
 
     fn camera_active<F: Component>(world: &mut World) -> bool {
         let mut q = world.query_filtered::<&Camera, With<F>>();
-        q.single(world).is_active
+        // Bevy 0.15+: `QueryState::single` returns a `Result`.
+        q.single(world).unwrap().is_active
     }
 
     #[test]

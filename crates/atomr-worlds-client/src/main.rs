@@ -125,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .insert_resource(world_runtime)
         .insert_resource(active)
         .insert_resource(initial_mode)
-        .insert_resource(ClearColor(Color::rgb(0.45, 0.65, 0.85)))
+        .insert_resource(ClearColor(Color::srgb(0.45, 0.65, 0.85)))
         .insert_resource({
             let mut cfg = render::RenderConfig::default();
             cfg.apply_perf_preset(match cli.perf {

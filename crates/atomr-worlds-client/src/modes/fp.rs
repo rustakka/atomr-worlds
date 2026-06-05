@@ -42,7 +42,7 @@ use atomr_worlds_core::vehicle::ContainingFrame;
 use atomr_worlds_view::{WalkCamera, WalkInput, WorldQuery};
 // (WorldQuery brings ground_height_m into scope.)
 use atomr_worlds_voxel::BRICK_EDGE;
-use bevy::core_pipeline::bloom::BloomSettings;
+use bevy::core_pipeline::bloom::Bloom;
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::render::camera::RenderTarget;
@@ -134,7 +134,7 @@ fn fp_update_ladder(
     if want == streamer.ladder {
         return;
     }
-    let now = time.elapsed_seconds();
+    let now = time.elapsed_secs();
     if now - hyst.last_swap_secs < LADDER_HYSTERESIS_S {
         return;
     }
@@ -335,6 +335,7 @@ fn setup_fp_scene(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
+    mut storage_buffers: ResMut<Assets<bevy::render::storage::ShaderStorageBuffer>>,
     mut material_pool: ResMut<MaterialPool>,
     mut voxel_pool: ResMut<VoxelMaterialPool>,
     mut fp_state: ResMut<FpState>,
@@ -374,8 +375,10 @@ fn setup_fp_scene(
     // earlier `1.2` value was tuned against a stale assumption. Step 4
     // replaces this with a time-of-day-driven curve.
     commands.insert_resource(AmbientLight {
-        color: Color::rgb(0.85, 0.88, 1.0),
+        color: Color::srgb(0.85, 0.88, 1.0),
         brightness: 80.0,
+        // Bevy 0.16 added this field; keep prior behavior (affects all meshes).
+        affects_lightmapped_meshes: false,
     });
 
     // Build one StandardMaterial per palette entry. The strategy supplies
@@ -442,7 +445,12 @@ fn setup_fp_scene(
             alpha_mode: AlphaMode::Blend,
             ..default()
         },
-        extension: VoxelMaterialExt { palette: entries },
+        extension: VoxelMaterialExt {
+            // Bevy 0.16: storage buffers are a `Handle<ShaderStorageBuffer>`.
+            // The `Vec<PaletteEntryGpu>` is a `ShaderType` runtime array,
+            // encoded into the buffer by encase via `From`.
+            palette: storage_buffers.add(bevy::render::storage::ShaderStorageBuffer::from(entries)),
+        },
     });
     voxel_pool.handle = Some(voxel_mat);
 
@@ -451,23 +459,23 @@ fn setup_fp_scene(
     // path so PNG readback always sees the rendered pixels.
     let camera_target = offscreen
         .as_deref()
-        .map(|t| RenderTarget::Image(t.image.clone()))
+        .map(|t| RenderTarget::Image(t.image.clone().into()))
         .unwrap_or_default();
 
     let tonemap = render_cfg.tonemap.tonemapping();
     let exposure = render_cfg.tonemap.exposure();
+    // Bevy 0.15+: Camera3dBundle removed — spawn Camera3d + its required
+    // components (Camera, Transform, Tonemapping, Exposure) directly.
     let mut camera_ent = commands.spawn((
-        Camera3dBundle {
-            camera: Camera {
-                target: camera_target,
-                hdr: true, // required for bloom + good tonemapping headroom
-                ..default()
-            },
-            tonemapping: tonemap,
-            exposure,
-            transform: Transform::from_xyz(8.0, 26.0, 8.0).looking_to(Vec3::Z, Vec3::Y),
+        Camera3d::default(),
+        Camera {
+            target: camera_target,
+            hdr: true, // required for bloom + good tonemapping headroom
             ..default()
         },
+        tonemap,
+        exposure,
+        Transform::from_xyz(8.0, 26.0, 8.0).looking_to(Vec3::Z, Vec3::Y),
         WorldCamera,
         // `IsDefaultUiCamera` keeps `bevy_ui`'s default-camera resolver
         // from panicking on frame 0, before `hud::route_hud_target` has
@@ -485,8 +493,8 @@ fn setup_fp_scene(
     if let Some(bloom) = render_cfg.tonemap.bloom() {
         camera_ent.insert(bloom);
     } else {
-        // ensure no stale BloomSettings on hot-reload — default fields are fine.
-        camera_ent.insert(BloomSettings { intensity: 0.0, ..default() });
+        // ensure no stale Bloom on hot-reload — default fields are fine.
+        camera_ent.insert(Bloom { intensity: 0.0, ..default() });
     }
     // Cubemap skybox: starts with the 1×1×6 black placeholder; the
     // first real bake from `sync_skybox` will replace the handle once
@@ -495,11 +503,13 @@ fn setup_fp_scene(
     camera_ent.insert(bevy::core_pipeline::Skybox {
         image: skybox_runtime.current_handle.clone(),
         brightness: 0.0,
+        // Bevy 0.15+: Skybox gained a world-space `rotation`.
+        rotation: Quat::IDENTITY,
     });
     // Initial fog — `sync_sky_and_fog` overrides each frame from the
     // sky strategy's current horizon color and the streamer's load
     // horizon. Insert anything non-default so the
-    // `Query<&mut FogSettings>` finds the component on frame 0.
+    // `Query<&mut DistanceFog>` finds the component on frame 0.
     let initial_sun = render_cfg.sun_curve.sun_state(12.0);
     let initial_horizon = render_cfg.sky.horizon_color(initial_sun);
     camera_ent.insert(render_cfg.fog.fog_settings(initial_sun, initial_horizon, None, None));
@@ -507,22 +517,21 @@ fn setup_fp_scene(
     let cascades = render_cfg.shadow.cascade_config();
     let (shadow_depth_bias, shadow_normal_bias) = render_cfg.shadow.biases();
     commands.spawn((
-        DirectionalLightBundle {
-            directional_light: DirectionalLight {
-                // Values are overwritten each frame by `sync_sun` based on
-                // the current `WorldTime` + sun-curve strategy. Initial
-                // values keep the first-frame render sensible.
-                illuminance: 50_000.0,
-                shadows_enabled: shadows_on,
-                shadow_depth_bias,
-                shadow_normal_bias,
-                ..default()
-            },
-            transform: Transform::from_xyz(50.0, 80.0, 30.0)
-                .looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
-            cascade_shadow_config: cascades,
+        // Bevy 0.15+: DirectionalLightBundle removed — DirectionalLight +
+        // Transform + CascadeShadowConfig as components.
+        DirectionalLight {
+            // Values are overwritten each frame by `sync_sun` based on
+            // the current `WorldTime` + sun-curve strategy. Initial
+            // values keep the first-frame render sensible.
+            illuminance: 50_000.0,
+            shadows_enabled: shadows_on,
+            shadow_depth_bias,
+            shadow_normal_bias,
             ..default()
         },
+        Transform::from_xyz(50.0, 80.0, 30.0)
+            .looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+        cascades,
         WorldSun,
         WorldSunMarker,
     ));
@@ -539,31 +548,31 @@ fn grab_cursor(
     if harness.is_some() {
         // Keep cursor unlocked & visible in harness mode so synthetic
         // MouseMotion events from the harness aren't ignored by fp_input.
-        if window.cursor.grab_mode != CursorGrabMode::None {
-            window.cursor.grab_mode = CursorGrabMode::None;
-            window.cursor.visible = true;
+        if window.cursor_options.grab_mode != CursorGrabMode::None {
+            window.cursor_options.grab_mode = CursorGrabMode::None;
+            window.cursor_options.visible = true;
         }
         return;
     }
     // Only grab the cursor in fp/tp modes; release for 2D overlay modes.
     let want_grab = matches!(*mode, ViewMode::Fp | ViewMode::Tp);
     if keys.just_pressed(KeyCode::Escape) {
-        window.cursor.grab_mode = CursorGrabMode::None;
-        window.cursor.visible = true;
+        window.cursor_options.grab_mode = CursorGrabMode::None;
+        window.cursor_options.visible = true;
         return;
     }
-    if want_grab && window.cursor.grab_mode == CursorGrabMode::None {
+    if want_grab && window.cursor_options.grab_mode == CursorGrabMode::None {
         // Grab on a left-click inside the window. We don't auto-grab on
         // keypress: previously holding WASD while in a menu re-locked
         // the cursor unexpectedly. Click-to-grab matches the convention
         // every other voxel game uses.
         if mouse_buttons.just_pressed(MouseButton::Left) {
-            window.cursor.grab_mode = CursorGrabMode::Locked;
-            window.cursor.visible = false;
+            window.cursor_options.grab_mode = CursorGrabMode::Locked;
+            window.cursor_options.visible = false;
         }
-    } else if !want_grab && window.cursor.grab_mode != CursorGrabMode::None {
-        window.cursor.grab_mode = CursorGrabMode::None;
-        window.cursor.visible = true;
+    } else if !want_grab && window.cursor_options.grab_mode != CursorGrabMode::None {
+        window.cursor_options.grab_mode = CursorGrabMode::None;
+        window.cursor_options.visible = true;
     }
 }
 
@@ -588,7 +597,7 @@ pub fn world_walk_input(
     if !matches!(*mode, ViewMode::Fp | ViewMode::Tp | ViewMode::Rts) {
         return;
     }
-    let dt = time.delta_seconds().min(0.05);
+    let dt = time.delta_secs().min(0.05);
     let speed = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
         12.0
     } else {
@@ -642,7 +651,7 @@ fn fp_input_look(
     if !state.ready {
         return;
     }
-    let dt = time.delta_seconds().min(0.05);
+    let dt = time.delta_secs().min(0.05);
 
     let mut yaw_delta = 0.0f32;
     let mut pitch_delta = 0.0f32;
@@ -650,7 +659,7 @@ fn fp_input_look(
     let cursor_locked = harness_active
         || windows
             .get_single()
-            .map(|w| w.cursor.grab_mode != CursorGrabMode::None)
+            .map(|w| w.cursor_options.grab_mode != CursorGrabMode::None)
             .unwrap_or(false);
     if cursor_locked {
         for ev in motion.read() {
@@ -698,7 +707,7 @@ pub fn fp_update_motion_state(
     if !state.ready {
         return;
     }
-    let dt = time.delta_seconds().clamp(1.0e-3, 0.1);
+    let dt = time.delta_secs().clamp(1.0e-3, 0.1);
     let alpha = ewma_alpha(dt, CAMERA_MOTION_TAU_S);
 
     let position = state.walk.observer.position;
@@ -1052,12 +1061,10 @@ fn spawn_brick_entity(
     let start_scale = lod_scale * FADE_IN_START_FRACTION;
     let parent = commands
         .spawn((
-            SpatialBundle {
-                transform: Transform::from_translation(origin)
-                    .with_scale(Vec3::splat(start_scale)),
-                visibility: Visibility::Hidden,
-                ..default()
-            },
+            // Bevy 0.15+: SpatialBundle removed — Transform + Visibility carry
+            // their required components (GlobalTransform / inherited visibility).
+            Transform::from_translation(origin).with_scale(Vec3::splat(start_scale)),
+            Visibility::Hidden,
             BrickFadeIn { age: 0.0, final_scale: lod_scale },
             BrickLod { coord: bc, depth: lod.depth },
         ))
@@ -1073,11 +1080,8 @@ fn spawn_brick_entity(
                 let mesh_handle = meshes.add(bevy_mesh);
                 commands.entity(parent).with_children(|p| {
                     p.spawn((
-                        PbrBundle {
-                            mesh: mesh_handle,
-                            material: material.clone(),
-                            ..default()
-                        },
+                        Mesh3d(mesh_handle),
+                        MeshMaterial3d(material.clone()),
                         BrickMesh,
                     ));
                 });
@@ -1102,11 +1106,8 @@ fn spawn_brick_entity(
                 let mesh_handle = meshes.add(merged);
                 commands.entity(parent).with_children(|p| {
                     p.spawn((
-                        MaterialMeshBundle::<VoxelMaterial> {
-                            mesh: mesh_handle,
-                            material: voxel_handle.clone(),
-                            ..default()
-                        },
+                        Mesh3d(mesh_handle),
+                        MeshMaterial3d(voxel_handle.clone()),
                         BrickMesh,
                     ));
                 });
@@ -1138,7 +1139,7 @@ fn fp_animate_fade_in(
     mut commands: Commands,
     mut q: Query<(Entity, &mut Transform, &mut BrickFadeIn, &Visibility)>,
 ) {
-    let dt = time.delta_seconds();
+    let dt = time.delta_secs();
     for (ent, mut tf, mut fade, vis) in q.iter_mut() {
         if *vis == Visibility::Hidden {
             // Brick is being suppressed by a finer LOD; freeze the
@@ -1169,7 +1170,7 @@ fn fp_animate_fade_out(
     mut loaded: ResMut<LoadedChunks>,
     mut q: Query<(Entity, &mut Transform, &mut BrickFadeOut)>,
 ) {
-    let dt = time.delta_seconds();
+    let dt = time.delta_secs();
     for (ent, mut tf, mut fade) in q.iter_mut() {
         fade.age += dt;
         let t = (fade.age / FADE_OUT_SECONDS).clamp(0.0, 1.0);

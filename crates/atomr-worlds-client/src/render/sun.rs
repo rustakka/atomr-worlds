@@ -1,6 +1,6 @@
 //! World clock + sun-sync system.
 
-use bevy::pbr::FogSettings;
+use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
 
 use super::config::RenderConfig;
@@ -41,7 +41,7 @@ pub fn advance_world_time(
     if !cfg.time_advances_automatically {
         return;
     }
-    let dt_hours = time.delta_seconds() / cfg.seconds_per_hour.max(1e-3);
+    let dt_hours = time.delta_secs() / cfg.seconds_per_hour.max(1e-3);
     world_time.0 = (world_time.0 + dt_hours).rem_euclid(24.0);
 }
 
@@ -78,7 +78,7 @@ pub fn sync_sun(
     }
 }
 
-/// Drive `ClearColor` and per-camera `FogSettings` from the sky + sun
+/// Drive `ClearColor` and per-camera `DistanceFog` from the sky + sun
 /// strategies. Runs after [`sync_sun`] so it sees the current
 /// [`super::SunState`]; both depend on the same `WorldTime`.
 ///
@@ -92,7 +92,7 @@ pub fn sync_sky_and_fog(
     streamer: Res<ChunkStreamer>,
     motion: Option<Res<crate::modes::fp::CameraMotionState>>,
     mut clear: ResMut<ClearColor>,
-    mut fog_q: Query<&mut FogSettings>,
+    mut fog_q: Query<&mut DistanceFog>,
 ) {
     let sun_state = cfg.sun_curve.sun_state(world_time.0);
     let horizon = cfg.sky.horizon_color(sun_state);

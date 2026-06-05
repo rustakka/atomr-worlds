@@ -10,10 +10,10 @@ use atomr_worlds_view::{
     MaterialEntry, MaterialPalette, Mesh, SliceShading,
 };
 use atomr_worlds_voxel::Brick;
-use bevy::core_pipeline::bloom::BloomSettings;
+use bevy::core_pipeline::bloom::Bloom;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::pbr::{
-    CascadeShadowConfig, CascadeShadowConfigBuilder, FogFalloff, FogSettings,
+    CascadeShadowConfig, CascadeShadowConfigBuilder, FogFalloff, DistanceFog,
 };
 use bevy::prelude::*;
 use bevy::render::camera::Exposure;
@@ -295,13 +295,13 @@ impl SunCurveStrategy for StaticSun {
         let d = Vec3::new(50.0, 80.0, 30.0).normalize();
         SunState {
             direction: -d,
-            color: Color::rgb(1.0, 0.97, 0.9),
+            color: Color::srgb(1.0, 0.97, 0.9),
             illuminance: 80_000.0,
             day_factor: 1.0,
         }
     }
     fn ambient(&self, _hours: f32) -> (Color, f32) {
-        (Color::rgb(0.85, 0.88, 1.0), 1.2)
+        (Color::srgb(0.85, 0.88, 1.0), 1.2)
     }
 }
 
@@ -360,7 +360,7 @@ impl SunCurveStrategy for KeyframeLutSun {
         let (rgb, illum) = lerp_keyframes(h, &key, Vec3::new(0.30, 0.40, 0.85), 150.0);
         SunState {
             direction: dir,
-            color: Color::rgb(rgb.x, rgb.y, rgb.z),
+            color: Color::srgb(rgb.x, rgb.y, rgb.z),
             illuminance: illum,
             day_factor: day,
         }
@@ -376,7 +376,7 @@ impl SunCurveStrategy for KeyframeLutSun {
         ];
         let h = hours.rem_euclid(24.0);
         let (rgb, b) = lerp_keyframes(h, &key, Vec3::new(0.15, 0.18, 0.30), 0.05);
-        (Color::rgb(rgb.x, rgb.y, rgb.z), b)
+        (Color::srgb(rgb.x, rgb.y, rgb.z), b)
     }
 }
 
@@ -393,10 +393,10 @@ impl SkyStrategy for ConstantSky {
         "ConstantSky"
     }
     fn horizon_color(&self, _sun: SunState) -> Color {
-        Color::rgb(0.45, 0.65, 0.85)
+        Color::srgb(0.45, 0.65, 0.85)
     }
     fn zenith_color(&self, _sun: SunState) -> Color {
-        Color::rgb(0.30, 0.55, 0.85)
+        Color::srgb(0.30, 0.55, 0.85)
     }
 }
 
@@ -549,8 +549,8 @@ impl FogStrategy for NoFog {
         _sky_horizon: Color,
         _horizon_band_m: Option<(f32, f32)>,
         _motion: Option<&crate::modes::fp::CameraMotionState>,
-    ) -> FogSettings {
-        FogSettings {
+    ) -> DistanceFog {
+        DistanceFog {
             color: Color::NONE,
             falloff: FogFalloff::Linear { start: 1.0e6, end: 1.0e6 + 1.0 },
             ..default()
@@ -596,7 +596,7 @@ impl FogStrategy for ExpSquaredSkyTintedFog {
         sky_horizon: Color,
         horizon_band_m: Option<(f32, f32)>,
         _motion: Option<&crate::modes::fp::CameraMotionState>,
-    ) -> FogSettings {
+    ) -> DistanceFog {
         // Auto-tune density from the streamer horizon so fog reaches
         // HORIZON_TRANSMITTANCE exactly at `band.end`. Solve
         //   exp(-(d * density)²) = T
@@ -608,7 +608,7 @@ impl FogStrategy for ExpSquaredSkyTintedFog {
             }
             _ => self.density,
         };
-        FogSettings {
+        DistanceFog {
             color: sky_horizon,
             falloff: FogFalloff::ExponentialSquared { density },
             ..default()
@@ -660,7 +660,7 @@ impl FogStrategy for BiomeBlendedFog {
         sky_horizon: Color,
         horizon_band_m: Option<(f32, f32)>,
         _motion: Option<&crate::modes::fp::CameraMotionState>,
-    ) -> FogSettings {
+    ) -> DistanceFog {
         let density = match horizon_band_m {
             Some((_start, end)) if end > 0.0 => {
                 let target = 0.05_f32.max(1e-3).min(0.5);
@@ -675,7 +675,7 @@ impl FogStrategy for BiomeBlendedFog {
             sky_lin[1] * (1.0 - m) + self.biome_tint[1] * m,
             sky_lin[2] * (1.0 - m) + self.biome_tint[2] * m,
         );
-        FogSettings {
+        DistanceFog {
             color: tinted,
             falloff: FogFalloff::ExponentialSquared { density },
             ..default()
@@ -721,8 +721,8 @@ impl TonemapStrategy for AcesTonemap {
         // a normal sunlit terrain through ACES.
         Exposure { ev100: 11.0 }
     }
-    fn bloom(&self) -> Option<BloomSettings> {
-        Some(BloomSettings { intensity: 0.10, ..default() })
+    fn bloom(&self) -> Option<Bloom> {
+        Some(Bloom { intensity: 0.10, ..default() })
     }
 }
 
@@ -1224,7 +1224,7 @@ mod tests {
     fn biome_blended_fog_returns_sensible_color_at_default() {
         let fog = BiomeBlendedFog::default();
         let sun = SunState::default();
-        let horizon = Color::rgb(0.4, 0.5, 0.8);
+        let horizon = Color::srgb(0.4, 0.5, 0.8);
         let s = fog.fog_settings(sun, horizon, Some((400.0, 1024.0)), None);
         // Without a biome bias (tint == 0.5,0.5,0.5, mix=0.3) the result
         // should stay close to the horizon color.

@@ -144,12 +144,10 @@ fn ensure_horizon_shell(
 
     let entity = commands
         .spawn((
-            PbrBundle {
-                mesh: mesh_handle.clone(),
-                material,
-                visibility: Visibility::Hidden,
-                ..default()
-            },
+            // Bevy 0.15+: PbrBundle → Mesh3d + MeshMaterial3d + Visibility.
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(material),
+            Visibility::Hidden,
             HorizonShell,
             // NotShadowCaster: a 16 km shell would otherwise inflate
             // the cascade frustum past every reasonable bound.
@@ -185,7 +183,7 @@ fn sync_horizon_shell(
     mut active_flag: ResMut<HorizonImposterActive>,
     mut macro_cache: ResMut<MacroStateProvider>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut q: Query<(&mut Visibility, &mut Transform, &Handle<Mesh>), With<HorizonShell>>,
+    mut q: Query<(&mut Visibility, &mut Transform, &Mesh3d), With<HorizonShell>>,
 ) {
     let Ok((mut visibility, mut transform, mesh_handle)) = q.get_single_mut() else {
         return;
@@ -225,7 +223,7 @@ fn sync_horizon_shell(
                 let pose = handle.pose;
                 runtime.rebuild = None;
                 let new_mesh = bevy_mesh_from_imposter(&baked);
-                if let Some(slot) = meshes.get_mut(mesh_handle) {
+                if let Some(slot) = meshes.get_mut(&mesh_handle.0) {
                     *slot = new_mesh;
                 } else {
                     // Slot disappeared (asset eviction); re-add.

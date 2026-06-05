@@ -29,7 +29,7 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(FrameTimeDiagnosticsPlugin)
+        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .add_systems(Startup, setup_hud)
             .add_systems(
                 Update,
@@ -97,7 +97,7 @@ impl Plugin for FrameDiagPlugin {
 }
 
 fn record_frame_diag(time: Res<Time>, mut buf: ResMut<FrameDiagBuffer>) {
-    let micros = (time.delta_seconds_f64() * 1.0e6).round().max(0.0) as u64;
+    let micros = (time.delta_secs_f64() * 1.0e6).round().max(0.0) as u64;
     buf.push(micros);
 }
 
@@ -144,46 +144,34 @@ struct CoordsText;
 struct ModeText;
 
 fn setup_hud(mut commands: Commands) {
-    let text_style = TextStyle {
-        font_size: 18.0,
-        color: Color::WHITE,
-        ..default()
-    };
-    // No TargetCamera here — `route_hud_target` attaches one from frame 1
+    // Bevy 0.15+ Text API: each text node is `Text` + `TextFont` + `TextColor`;
+    // the root is a `Node` + `BackgroundColor` (bundles were removed in favor of
+    // required components).
+    let font = TextFont { font_size: 18.0, ..default() };
+    let color = TextColor(Color::WHITE);
+    // No UiTargetCamera here — `route_hud_target` attaches one from frame 1
     // onward. For the very first frame, `bevy_ui` resolves the camera via
     // the `IsDefaultUiCamera` marker on `WorldCamera` (set in
     // `modes::fp::setup_fp_scene`), which is correct for the default FP
     // mode and avoids `ui_layout_system`'s "no default camera" panic.
     commands
         .spawn((
-            NodeBundle {
-                style: Style {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(8.0),
-                    left: Val::Px(8.0),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(2.0),
-                    padding: UiRect::all(Val::Px(6.0)),
-                    ..default()
-                },
-                background_color: Color::rgba(0.0, 0.0, 0.0, 0.45).into(),
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(8.0),
+                left: Val::Px(8.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(2.0),
+                padding: UiRect::all(Val::Px(6.0)),
                 ..default()
             },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
             HudUiRoot,
         ))
         .with_children(|parent| {
-            parent.spawn((
-                TextBundle::from_section("mode: fp", text_style.clone()),
-                ModeText,
-            ));
-            parent.spawn((
-                TextBundle::from_section("fps: --", text_style.clone()),
-                FpsText,
-            ));
-            parent.spawn((
-                TextBundle::from_section("xyz: (--, --, --)", text_style.clone()),
-                CoordsText,
-            ));
+            parent.spawn((Text::new("mode: fp"), font.clone(), color, ModeText));
+            parent.spawn((Text::new("fps: --"), font.clone(), color, FpsText));
+            parent.spawn((Text::new("xyz: (--, --, --)"), font.clone(), color, CoordsText));
         });
 }
 
@@ -196,7 +184,7 @@ fn route_hud_target(
     mode: Res<ViewMode>,
     world_cam: Query<Entity, (With<WorldCamera>, Without<BlitCamera>)>,
     blit_cam: Query<Entity, (With<BlitCamera>, Without<WorldCamera>)>,
-    mut roots: Query<(Entity, Option<&mut TargetCamera>), With<HudUiRoot>>,
+    mut roots: Query<(Entity, Option<&mut UiTargetCamera>), With<HudUiRoot>>,
     mut commands: Commands,
 ) {
     let raster = matches!(*mode, ViewMode::Slice | ViewMode::Rts | ViewMode::Overview);
@@ -211,7 +199,7 @@ fn route_hud_target(
             Some(mut tc) if tc.0 == target => {}
             Some(mut tc) => tc.0 = target,
             None => {
-                commands.entity(root).insert(TargetCamera(target));
+                commands.entity(root).insert(UiTargetCamera(target));
             }
         }
     }
@@ -225,7 +213,7 @@ fn update_fps(diag: Res<DiagnosticsStore>, mut q: Query<&mut Text, With<FpsText>
         return;
     };
     if let Ok(mut text) = q.get_single_mut() {
-        text.sections[0].value = format!("fps: {fps:>5.1}");
+        text.0 = format!("fps: {fps:>5.1}");
     }
 }
 
@@ -235,15 +223,15 @@ fn update_coords(fp_state: Res<FpState>, mut q: Query<&mut Text, With<CoordsText
     }
     let p = fp_state.walk.observer.position;
     if let Ok(mut text) = q.get_single_mut() {
-        text.sections[0].value = format!("xyz: ({:.1}, {:.1}, {:.1})", p.x, p.y, p.z);
+        text.0 = format!("xyz: ({:.1}, {:.1}, {:.1})", p.x, p.y, p.z);
     }
 }
 
 fn update_mode(mode: Res<ViewMode>, mut q: Query<&mut Text, With<ModeText>>) {
     if let Ok(mut text) = q.get_single_mut() {
         let want = format!("mode: {}", mode.label());
-        if text.sections[0].value != want {
-            text.sections[0].value = want;
+        if text.0 != want {
+            text.0 = want;
         }
     }
 }
