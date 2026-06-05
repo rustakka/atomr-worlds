@@ -27,7 +27,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
-use bevy::render::{Render, RenderApp, RenderSet};
+use bevy::render::{Render, RenderApp, RenderSystems};
 
 /// Pending capture request: a (frame_counter, png_path) pair. Pushed by
 /// the harness, drained by the `RenderApp`.
@@ -112,7 +112,7 @@ impl Plugin for OffscreenCapturePlugin {
         render_app
             .insert_resource(queue)
             .insert_resource(outcomes)
-            .add_systems(Render, image_copy_system.in_set(RenderSet::Cleanup));
+            .add_systems(Render, image_copy_system.in_set(RenderSystems::Cleanup));
     }
 }
 
@@ -193,7 +193,7 @@ fn image_copy_system(
         let _ = tx.send(result);
     });
     // Block until the map completes. wgpu drains queued callbacks here.
-    let _ = device.poll(PollType::Wait);
+    let _ = device.poll(PollType::wait_indefinitely());
     let map_result = rx.recv();
     if let Err(e) = map_result {
         push_outcome(false, Some(format!("map channel closed: {e}")));

@@ -421,7 +421,7 @@ fn drive_input_events(
     cfg: Res<HarnessConfig>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut mouse_buttons: ResMut<ButtonInput<MouseButton>>,
-    mut mouse_writer: EventWriter<MouseMotion>,
+    mut mouse_writer: MessageWriter<MouseMotion>,
     mut world_time: Option<ResMut<WorldTime>>,
     mut render_config: Option<ResMut<RenderConfig>>,
 ) {
@@ -741,7 +741,7 @@ fn drive_exit(
     clock: Res<HarnessClock>,
     cfg: Res<HarnessConfig>,
     mut state: ResMut<HarnessState>,
-    mut exit_writer: EventWriter<AppExit>,
+    mut exit_writer: MessageWriter<AppExit>,
 ) {
     let now = clock.frame;
     for ev in cfg.scenario.events.iter().filter(|e| e.frame == now) {

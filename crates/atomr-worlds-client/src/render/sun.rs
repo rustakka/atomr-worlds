@@ -53,7 +53,8 @@ pub fn sync_sun(
     cfg: Res<RenderConfig>,
     world_time: Res<WorldTime>,
     mut sun_q: Query<(&mut Transform, &mut DirectionalLight), With<WorldSunMarker>>,
-    mut ambient: Option<ResMut<AmbientLight>>,
+    // Bevy 0.18: AmbientLight is a per-camera component, not a Resource.
+    mut ambient_q: Query<&mut AmbientLight>,
 ) {
     let state = cfg.sun_curve.sun_state(world_time.0);
     for (mut tx, mut light) in sun_q.iter_mut() {
@@ -68,12 +69,12 @@ pub fn sync_sun(
         light.color = state.color;
         light.illuminance = state.illuminance;
     }
-    if let Some(amb) = ambient.as_deref_mut() {
-        let (color, brightness) = cfg.sun_curve.ambient(world_time.0);
+    let (color, brightness) = cfg.sun_curve.ambient(world_time.0);
+    for mut amb in ambient_q.iter_mut() {
         amb.color = color;
-        // The Bevy 0.13 AmbientLight.brightness scale needs ~10–100 to be
-        // perceptible. The strategy returns a normalised [0, ~0.5] curve;
-        // multiply by 200 to land in the right ballpark (noon ≈ 90).
+        // AmbientLight.brightness needs ~10–100 to be perceptible. The strategy
+        // returns a normalised [0, ~0.5] curve; multiply by 200 to land in the
+        // right ballpark (noon ≈ 90).
         amb.brightness = brightness * 200.0;
     }
 }
