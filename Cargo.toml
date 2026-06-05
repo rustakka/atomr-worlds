@@ -77,14 +77,14 @@ atomr-worlds-remote   = { path = "crates/atomr-worlds-remote",   version = "0.1.
 atomr-worlds-server   = { path = "crates/atomr-worlds-server",   version = "0.1.0" }
 
 # External — atomr (sibling repo, path deps)
-atomr                  = { path = "../atomr/crates/atomr",                  version = "0.9.2" }
-atomr-core             = { path = "../atomr/crates/atomr-core",             version = "0.9.2" }
-atomr-config           = { path = "../atomr/crates/atomr-config",           version = "0.9.2" }
-atomr-cluster          = { path = "../atomr/crates/atomr-cluster",          version = "0.9.2" }
-atomr-cluster-sharding = { path = "../atomr/crates/atomr-cluster-sharding", version = "0.9.2" }
-atomr-persistence      = { path = "../atomr/crates/atomr-persistence",      version = "0.9.2" }
-atomr-persistence-sql  = { path = "../atomr/crates/atomr-persistence-sql",  version = "0.9.2" }
-atomr-remote           = { path = "../atomr/crates/atomr-remote",           version = "0.9.2" }
+atomr                  = { path = "../atomr/crates/atomr",                  version = "0.10.1" }
+atomr-core             = { path = "../atomr/crates/atomr-core",             version = "0.10.1" }
+atomr-config           = { path = "../atomr/crates/atomr-config",           version = "0.10.1" }
+atomr-cluster          = { path = "../atomr/crates/atomr-cluster",          version = "0.10.1" }
+atomr-cluster-sharding = { path = "../atomr/crates/atomr-cluster-sharding", version = "0.10.1" }
+atomr-persistence      = { path = "../atomr/crates/atomr-persistence",      version = "0.10.1" }
+atomr-persistence-sql  = { path = "../atomr/crates/atomr-persistence-sql",  version = "0.10.1" }
+atomr-remote           = { path = "../atomr/crates/atomr-remote",           version = "0.10.1" }
 
 # External — atomr-accel (sibling repo, path deps; phase 5 full)
 atomr-accel            = { path = "../atomr-accel/crates/atomr-accel",      version = "0.10.0" }
