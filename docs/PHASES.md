@@ -1994,8 +1994,46 @@ the later rapier integration builds on these pieces.
 
 ### Out of scope (deferred to later phases)
 
-Bevy 0.13→0.18 upgrade (Phase 0); SVDAG `DagBrick` + GPU raymarcher (Rec 1);
-rapier collider/solver integration + flood-fill-driven debris spawning (Rec 2);
-CRDT destruction sync over `atomr-distributed-data` (Rec 4); physics-island
-scheduler (Rec 3); and the consolidated upstream feature requests to `atomr`.
+Bevy 0.13→0.18 upgrade (Phase 0); the GPU raymarcher + flat-buffer/color-decoupled
+SVDAG encoding (Rec 1, after `DagBrick` below); rapier collider/solver integration +
+flood-fill-driven debris spawning (Rec 2); CRDT destruction sync over
+`atomr-distributed-data` (Rec 4); physics-island scheduler (Rec 3); and the
+consolidated upstream feature requests to `atomr`.
+
+## Phase 20.1 *(in progress)* — Rec 1: `DagBrick` SVDAG builder
+
+The first piece of Rec 1 (SVDAG + GPU raymarching), landed CPU-side and
+GPU-free. [`DagBrick`](../crates/atomr-worlds-voxel/src/dag.rs)
+(`atomr-worlds-voxel::dag`) builds a deduplicated Sparse Voxel **DAG** from a
+`Brick` by bottom-up **hash-consing**: each distinct `(child-mask, children)` /
+leaf is interned once, so structurally-identical subtrees share a node. On the
+homogeneous regions procedural terrain produces this is a large compression —
+a fully-uniform 16³ brick (4096 voxels) collapses to **5 nodes**; a half-solid
+brick (2048 solid voxels) to fewer than 32 — which is what lets far terrain stay
+resident in VRAM for the raymarcher.
+
+- **Derived, non-canonical.** Built purely from a `Brick`'s bytes; never flows
+  into `VoxelWriteEvent` / the journal and has no in-place edit path (SVDAGs are
+  static — destruction rebuilds the affected brick's DAG). The canonical `Brick`
+  is untouched, so the byte-determinism contract is unaffected.
+- **Deterministic.** Subtrees are built in fixed octant order (matching
+  `SvoBrick`) and interned in first-encounter order, so node ids — and
+  [`DagBrick::digest`] (FNV-1a over the node pool) — are identical on every
+  machine regardless of the intern map's hasher.
+- **API.** `from_brick`, `get(x,y,z)`, `to_brick` (exact round-trip),
+  `node_count`, `digest`.
+
+### Out of scope (next Rec 1 steps)
+
+- The flat GPU buffer encoding (`node_pool: Vec<u32>` + decoupled `color_array`)
+  co-designed with the WGSL DDA traversal shader (geometry/color decoupling).
+- The CPU raymarch reference + the GPU compute/proxy-cube raymarcher (gated on
+  the Bevy upgrade for the compute-pass route).
+
+### Verification
+
+`cargo test -p atomr-worlds-voxel` (6 new `dag::tests::*`): empty-brick → 0
+nodes, uniform-solid → 5 nodes, sparse + half-filled round-trips, deterministic
+digest, and content-sensitive digest. Clippy clean; existing voxel tests
+unchanged.
 
