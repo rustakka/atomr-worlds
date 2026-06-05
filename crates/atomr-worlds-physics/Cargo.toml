@@ -1,0 +1,17 @@
+[package]
+name = "atomr-worlds-physics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Engine-agnostic voxel-physics primitives for atomr-worlds: structural flood-fill, mass/inertia from per-voxel density, and debris-body extraction. No Bevy, no rapier — pure deterministic logic."
+
+[dependencies]
+atomr-worlds-core = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

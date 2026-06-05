@@ -8,6 +8,7 @@ members = [
     "crates/atomr-worlds-noise",
     "crates/atomr-worlds-generate",
     "crates/atomr-worlds-accel",
+    "crates/atomr-worlds-physics",
     "crates/atomr-worlds-persist",
     "crates/atomr-worlds-view",
     "crates/atomr-worlds-testkit",
@@ -68,6 +69,7 @@ atomr-worlds-host     = { path = "crates/atomr-worlds-host",     version = "0.1.
 atomr-worlds-noise    = { path = "crates/atomr-worlds-noise",    version = "0.1.0" }
 atomr-worlds-generate = { path = "crates/atomr-worlds-generate", version = "0.1.0" }
 atomr-worlds-accel    = { path = "crates/atomr-worlds-accel",    version = "0.1.0" }
+atomr-worlds-physics  = { path = "crates/atomr-worlds-physics",  version = "0.1.0" }
 atomr-worlds-persist  = { path = "crates/atomr-worlds-persist",  version = "0.1.0" }
 atomr-worlds-view     = { path = "crates/atomr-worlds-view",     version = "0.1.0" }
 atomr-worlds-testkit  = { path = "crates/atomr-worlds-testkit",  version = "0.1.0" }

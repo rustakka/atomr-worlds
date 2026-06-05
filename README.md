@@ -322,6 +322,7 @@ atomr-worlds/
 │   ├── atomr-worlds-noise     ─ value/gradient/Worley noise + FBM, seeded
 │   ├── atomr-worlds-generate  ─ per-tier Generators; CPU TerrainGenerator
 │   ├── atomr-worlds-accel     ─ Accelerator trait, CPU backend, CUDA backend (feature = "cuda")
+│   ├── atomr-worlds-physics   ─ engine-agnostic voxel physics: flood-fill connectivity, mass/inertia, debris bodies
 │   ├── atomr-worlds-persist   ─ WorldPersistence on top of atomr-persistence Journal/SnapshotStore
 │   │                            (in-memory by default; SqlJournal/SqlSnapshotStore via `sql`)
 │   ├── atomr-worlds-proto     ─ WorldRequest/WorldEvent/Envelope, bincode 2 wire format
