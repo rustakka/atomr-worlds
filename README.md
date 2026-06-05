@@ -41,7 +41,8 @@ rather than the substrate itself.
 
 ## Status
 
-**Phases 0–18 landed.** Phase 0
+**Phases 0–19 landed, plus the *Advanced Voxel Architectures* foundation
+(Bevy 0.18 engine upgrade + physics / SVDAG groundwork).** Phase 0
 (primitives), Phase 1 (procedural generators + real `LocalHost` on
 atomr's actor system), Phase 2 (CPU renderer: greedy meshing + software
 rasterizer to PNG), Phase 3 (persistence: `atomr-persistence` Journal/
@@ -72,14 +73,58 @@ geologic macro pre-sim, with priority-flood basins, drainage-tree river
 networks, and local-seed river-channel carving) are all implemented and
 tested end-to-end.
 
-See [docs/PHASES.md](docs/PHASES.md) for the per-phase history,
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the model,
-[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for module-by-module
-specifics, [docs/HYDROLOGY.md](docs/HYDROLOGY.md) for the water-body
-overlay, [docs/RENDERING.md](docs/RENDERING.md) for the strategy-based
-renderer, [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) for the
-client/server topology, and [docs/LOD.md](docs/LOD.md) for the
-per-tier streaming and generation contract.
+**Phase 19** reworked the Dwarf-Fortress slice view (FP-aligned orientation +
+hillshade relief) and, separately, landed every algorithm from the *Advanced
+Algorithmic Topologies* paper as additive strategy slots on a new
+`WorldGenConfig` (3D simplex / domain-warp noise, pluggable brick storage +
+codecs, marching-cubes / dual-contouring meshers, a 13-slot layered brick
+pipeline, sky-light overlay). **Phase 19.1 / 19.2** moved chunk-plan rebuilds
+off-thread and added a horizon-imposter shell + speed-aware visual budgeting.
+
+On top of that, the ***Advanced Voxel Architectures*** roadmap (see
+[docs/ADVANCED_VOXEL_ARCHITECTURES.md](docs/ADVANCED_VOXEL_ARCHITECTURES.md))
+has landed its **Phase 0** (the Bevy **0.13 → 0.18** engine upgrade) and
+**Phase 1 foundations** — a `MaterialPhysicsProps` palette, a new engine-agnostic
+`atomr-worlds-physics` crate (flood-fill structural connectivity, mass/inertia,
+debris bodies), a deterministic fracture-event protocol, an `HlcTimestamp`, and a
+`DagBrick` SVDAG builder with GPU-buffer encoding. These unblock the four
+strategic recommendations (GPU raymarching, rigid-body physics, multiplayer
+destruction sync, low-latency scheduling) now in progress.
+
+### Documentation
+
+| Doc | What it covers |
+| --- | --- |
+| [docs/PHASES.md](docs/PHASES.md) | Per-phase history (0–19, plus the Advanced Voxel Architectures Phase 0 / 20.x) |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The system model: hierarchy, seed derivation, sparse storage, metric LOD, hosting |
+| [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | Module-by-module file/line specifics |
+| [docs/LOD.md](docs/LOD.md) | Per-tier streaming + the per-LOD generation contract |
+| [docs/PIPELINE.md](docs/PIPELINE.md) | The layered brick-generation pipeline contract (Phase 19) |
+| [docs/PHASE_19.md](docs/PHASE_19.md) | Advanced algorithmic topologies reference (Phase 19) |
+| [docs/RENDERING.md](docs/RENDERING.md) | The render strategy spine, custom WGSL, offscreen capture |
+| [docs/HYDROLOGY.md](docs/HYDROLOGY.md) | Ocean / lake / river water-body overlay (Phase 18) |
+| [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md) | Client / server / cluster topology |
+| [docs/PHYSICS.md](docs/PHYSICS.md) | Voxel-physics foundations + the physics determinism boundary |
+| [docs/ADVANCED_VOXEL_ARCHITECTURES.md](docs/ADVANCED_VOXEL_ARCHITECTURES.md) | The 4-recommendation roadmap (SVDAG raymarching, physics, CRDT sync, scheduler) + status |
+
+### Phase progress (summary)
+
+| Phase(s) | Theme | Status |
+| -------- | ----- | ------ |
+| 0–6 | Substrate: primitives, generators + `LocalHost`, CPU renderer, persistence, streaming, CUDA accel, Python | ✅ |
+| 7–12 | Vehicles + policy + strategy registry, atmosphere + metric LOD, isosurface meshing, `ClusterHost`, Python release | ✅ |
+| 13 | World shape + horizon streaming + geologic macro pre-sim + authored regions + skybox/composite | ✅ |
+| 14 | Five view modes (fp / tp / slice / rts / overview) | ✅ |
+| 15 | Client / server / cluster (`RemoteHost`, headless server, Bevy client) | ✅ |
+| 16 | PBR lighting + materials; 10-slot render strategy spine | ✅ |
+| 17 / 17.1 | Progressive 4-tier LOD streamer + skybox; per-LOD brick generation | ✅ |
+| 18 | Hydrology overlay (relief + ocean / lake / river) | ✅ |
+| 19 | Slice rework + algorithm-topologies layered pipeline; async plan rebuild + horizon imposter (19.1/19.2) | ✅ |
+| AVA Phase 0 | Bevy 0.13 → 0.18 engine upgrade | ✅ |
+| AVA Phase 1 | Physics palette + `atomr-worlds-physics` + fracture proto + HLC + `DagBrick` SVDAG | ✅ |
+| AVA Rec 1–4 | GPU raymarching · rigid-body physics · CRDT destruction sync · scheduler | 🟡 in progress |
+
+(AVA = *Advanced Voxel Architectures* — see the roadmap doc above.)
 
 ## Rendering
 
