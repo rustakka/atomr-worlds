@@ -41,7 +41,7 @@ use atomr_worlds_core::coord::{DVec3, IVec3};
 use atomr_worlds_core::vehicle::ContainingFrame;
 use atomr_worlds_view::{WalkCamera, WalkInput, WorldQuery};
 // (WorldQuery brings ground_height_m into scope.)
-use atomr_worlds_voxel::BRICK_EDGE;
+use atomr_worlds_voxel::{DagBrick, BRICK_EDGE};
 use bevy::post_process::bloom::Bloom;
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
@@ -52,8 +52,9 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use crate::brick_gen::{BrickGenWorkers, BrickReady, DEFAULT_SPAWN_BUDGET};
 use crate::render::{
-    OffscreenTarget, PaletteEntryGpu, RenderConfig, ShadingMode, SkyboxRuntime, VoxelMaterial,
-    VoxelMaterialExt, WorldSunMarker,
+    brick_proxy_box, build_raymarch_material, OffscreenTarget, PaletteEntryGpu, RaymarchMaterial,
+    RaymarchResources, RaymarchShadingTier, RenderConfig, ShadingMode, SkyboxRuntime,
+    VoxelMaterial, VoxelMaterialExt, WorldSunMarker,
 };
 use crate::view_mode::ViewMode;
 use crate::world_runtime::{ActiveWorld, WorldRuntime};
@@ -66,6 +67,7 @@ impl Plugin for FpPlugin {
         app.init_resource::<FpState>()
             .init_resource::<MaterialPool>()
             .init_resource::<VoxelMaterialPool>()
+            .init_resource::<RaymarchResources>()
             .init_resource::<CameraMotionState>()
             .init_resource::<LadderHysteresis>()
             .add_systems(Startup, setup_fp_scene)
@@ -338,6 +340,8 @@ fn setup_fp_scene(
     mut storage_buffers: ResMut<Assets<bevy::render::storage::ShaderStorageBuffer>>,
     mut material_pool: ResMut<MaterialPool>,
     mut voxel_pool: ResMut<VoxelMaterialPool>,
+    mut raymarch_res: ResMut<RaymarchResources>,
+    mut meshes: ResMut<Assets<BevyMesh>>,
     mut fp_state: ResMut<FpState>,
     active: Option<Res<ActiveWorld>>,
     runtime: Res<WorldRuntime>,
@@ -433,6 +437,15 @@ fn setup_fp_scene(
             emissive: Vec4::new(e.emissive[0] * 2.0, e.emissive[1] * 2.0, e.emissive[2] * 2.0, 0.0),
         };
     }
+    // Build the palette storage buffer once and share it: the mesh path's
+    // `VoxelMaterialExt` and every per-brick `RaymarchMaterial` index the same
+    // PBR palette by material id.
+    //
+    // Bevy 0.16: storage buffers are a `Handle<ShaderStorageBuffer>`. The
+    // `Vec<PaletteEntryGpu>` is a `ShaderType` runtime array, encoded into the
+    // buffer by encase via `From`.
+    let palette_ssbo =
+        storage_buffers.add(bevy::render::storage::ShaderStorageBuffer::from(entries));
     let voxel_mat = voxel_materials.add(VoxelMaterial {
         base: StandardMaterial {
             // Base color is white so palette[id].rgb passes through
@@ -442,13 +455,15 @@ fn setup_fp_scene(
             ..default()
         },
         extension: VoxelMaterialExt {
-            // Bevy 0.16: storage buffers are a `Handle<ShaderStorageBuffer>`.
-            // The `Vec<PaletteEntryGpu>` is a `ShaderType` runtime array,
-            // encoded into the buffer by encase via `From`.
-            palette: storage_buffers.add(bevy::render::storage::ShaderStorageBuffer::from(entries)),
+            palette: palette_ssbo.clone(),
         },
     });
     voxel_pool.handle = Some(voxel_mat);
+
+    // Shared raymarch assets: the same palette buffer + one reusable proxy box
+    // mesh spanning local [0, 16]³ (placed per brick by the parent transform).
+    raymarch_res.palette = Some(palette_ssbo);
+    raymarch_res.proxy_box = Some(meshes.add(brick_proxy_box()));
 
     // When the harness is active, render to the offscreen `Image` target
     // instead of the window — sidesteps the X11/hybrid-GPU presentation
@@ -786,11 +801,13 @@ fn fp_sync_camera(
 /// 6. Drain a per-frame budget of finished payloads into Bevy
 ///    entities via [`spawn_brick_entity`].
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn fp_stream_bricks(
     state: Res<FpState>,
     active: Res<crate::world_runtime::ActiveWorld>,
     pool: Res<MaterialPool>,
     voxel_pool: Res<VoxelMaterialPool>,
+    raymarch_res: Res<RaymarchResources>,
     render_cfg: Res<RenderConfig>,
     motion: Res<CameraMotionState>,
     mut streamer: ResMut<ChunkStreamer>,
@@ -798,6 +815,8 @@ fn fp_stream_bricks(
     mut plan_cache: ResMut<DesiredChunksCache>,
     mut workers: ResMut<BrickGenWorkers>,
     mut meshes: ResMut<Assets<BevyMesh>>,
+    mut raymarch_materials: ResMut<Assets<RaymarchMaterial>>,
+    mut storage_buffers: ResMut<Assets<bevy::render::storage::ShaderStorageBuffer>>,
     mut commands: Commands,
 ) {
     if !state.ready || pool.handles.is_empty() {
@@ -949,6 +968,7 @@ fn fp_stream_bricks(
     // historical `DEFAULT_SPAWN_BUDGET`, so behavior is preserved until
     // Step 10 activates the sprint-time ramp.
     let budget = render_cfg.spawn_budget.budget_this_frame(&motion);
+    let raymarch_tier = render_cfg.raymarch_tier;
     let ready_batch = workers.drain(budget);
     for ready in ready_batch {
         spawn_brick_entity(
@@ -957,7 +977,11 @@ fn fp_stream_bricks(
             shading_mode,
             &pool,
             &voxel_pool,
+            &raymarch_res,
+            raymarch_tier,
             &mut meshes,
+            &mut raymarch_materials,
+            &mut storage_buffers,
             &mut commands,
             &mut loaded,
         );
@@ -1026,11 +1050,15 @@ fn spawn_brick_entity(
     shading_mode: ShadingMode,
     pool: &MaterialPool,
     voxel_pool: &VoxelMaterialPool,
+    raymarch_res: &RaymarchResources,
+    raymarch_tier: RaymarchShadingTier,
     meshes: &mut Assets<BevyMesh>,
+    raymarch_materials: &mut Assets<RaymarchMaterial>,
+    storage_buffers: &mut Assets<bevy::render::storage::ShaderStorageBuffer>,
     commands: &mut Commands,
     loaded: &mut LoadedChunks,
 ) {
-    let BrickReady { coord: bc, lod, brick: _, meshes: mut by_material } = ready;
+    let BrickReady { coord: bc, lod, brick, meshes: mut by_material } = ready;
     let key = LoadedChunk::key(bc, lod);
     let lod_scale = (1u64 << lod.depth as u32) as f32;
     let edge_m = BRICK_EDGE as f32 * lod_scale;
@@ -1117,6 +1145,33 @@ fn spawn_brick_entity(
                         BrickMesh,
                     ));
                 });
+            }
+        }
+        ShadingMode::RaymarchDag => {
+            // Raymarch the brick's DAG instead of meshing it. Needs the shared
+            // palette + proxy box (built in `setup_fp_scene`) and the raw brick
+            // (already carried on `BrickReady`). `build_raymarch_material`
+            // returns `None` for an empty DAG, so nothing is spawned then —
+            // the shared `loaded.insert` below still records the parent so the
+            // streamer doesn't re-dispatch the key.
+            if let (Some(palette), Some(proxy), Some(b)) = (
+                raymarch_res.palette.as_ref(),
+                raymarch_res.proxy_box.as_ref(),
+                brick.as_ref(),
+            ) {
+                let dag = DagBrick::from_brick(b).to_gpu();
+                if let Some(material) =
+                    build_raymarch_material(&dag, palette.clone(), raymarch_tier, storage_buffers)
+                {
+                    let mat_handle = raymarch_materials.add(material);
+                    commands.entity(parent).with_children(|p| {
+                        p.spawn((
+                            Mesh3d(proxy.clone()),
+                            MeshMaterial3d(mat_handle),
+                            BrickMesh,
+                        ));
+                    });
+                }
             }
         }
     }

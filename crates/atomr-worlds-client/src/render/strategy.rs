@@ -72,6 +72,11 @@ pub enum ShadingMode {
     /// material id + AO carry the palette through a single draw call.
     /// Step 8.
     PaletteVoxelMaterial,
+    /// No mesh: a proxy cube per brick whose fragment shader raymarches the
+    /// brick's sparse-voxel DAG ([`atomr_worlds_voxel::DagBrick::to_gpu`]) and
+    /// writes its own color + depth (Rec 1). The path toward replacing meshing
+    /// where practical; see [`crate::render::RaymarchMaterial`].
+    RaymarchDag,
 }
 
 /// Picks how a brick mesh becomes Bevy renderables.

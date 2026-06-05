@@ -16,7 +16,10 @@ struct PaletteEntry {
     emissive: vec4<f32>,
 };
 
-@group(2) @binding(100) var<storage, read> palette: array<PaletteEntry>;
+// Bevy 0.18: the material bind group is @group(3) (view = 0, mesh = 2). This
+// was @group(2) before the 0.13 -> 0.18 upgrade. StandardMaterial reserves
+// bindings 0–99 of the material group; the extension's palette is at 100.
+@group(3) @binding(100) var<storage, read> palette: array<PaletteEntry>;
 
 @fragment
 fn fragment(

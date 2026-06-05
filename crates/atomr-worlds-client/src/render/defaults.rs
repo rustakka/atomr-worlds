@@ -276,6 +276,22 @@ impl ShadingStrategy for PaletteVoxelMaterial {
     }
 }
 
+/// Rec 1 path: skip meshing entirely — spawn a proxy cube per brick and
+/// raymarch its sparse-voxel DAG in the fragment shader
+/// (`shaders/voxel_raymarch.wgsl`). The shading tier (Unlit / Lambert / Pbr)
+/// is an orthogonal engine setting on [`RenderConfig`](super::RenderConfig).
+#[derive(Default)]
+pub struct RaymarchDagShading;
+
+impl ShadingStrategy for RaymarchDagShading {
+    fn name(&self) -> &'static str {
+        "RaymarchDagShading"
+    }
+    fn mode(&self) -> ShadingMode {
+        ShadingMode::RaymarchDag
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sun curve — 5-keyframe LUT (used in step 4)
 // ---------------------------------------------------------------------------

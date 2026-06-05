@@ -1,0 +1,62 @@
+# GPU DAG raymarcher (Rec 1) visual gate / A/B.
+#
+# Run TWICE from the same camera for a side-by-side comparison:
+#   mesh baseline:  --harness harness/scenes/voxel_raymarch.toml --harness-out <dir>
+#   raymarch:       (same) --shading raymarch [--raymarch-tier lambert|unlit|pbr]
+#
+# `--shading raymarch` must be a CLI flag (not a scene `set_strategy`) so the
+# raymarch path is active during `warmup_frames` while the bricks stream — a
+# mid-scene strategy swap only affects newly streamed bricks. The two runs
+# share seed + camera, so the output PNGs line up for an A/B of silhouette and
+# depth-compositing (the raymarched bricks must occlude / be occluded exactly
+# like the meshed ones, and read against the sky dome + fog the same way).
+
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 180
+output_prefix = "voxel_raymarch"
+
+# Noon so the directional light is overhead and faces read clearly.
+[[events]]
+frame = 0
+kind  = "set_time_of_day"
+hours = 12.0
+
+# Pitch down ~35° so terrain (the raymarched bricks) fills the frame rather
+# than sky.
+[[events]]
+frame = 0
+kind  = "key_press"
+key   = "ArrowDown"
+[[events]]
+frame = 12
+kind  = "key_release"
+key   = "ArrowDown"
+
+# Settled shot of the streamed-in bricks.
+[[events]]
+frame = 20
+kind  = "screenshot"
+note  = "raymarch (or mesh baseline) — settled view of streamed bricks"
+
+# Walk forward a little, then shoot again: the freshly streamed bricks ahead
+# exercise the spawn path under whatever shading is active, and the shot shows
+# the depth composite at the moving streaming front.
+[[events]]
+frame = 30
+kind  = "key_press"
+key   = "KeyW"
+[[events]]
+frame = 90
+kind  = "key_release"
+key   = "KeyW"
+[[events]]
+frame = 120
+kind  = "screenshot"
+note  = "after walking forward — newly streamed bricks + depth composite"
+
+[[events]]
+frame = 130
+kind  = "exit"

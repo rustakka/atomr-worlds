@@ -13,6 +13,7 @@ pub mod horizon_shell;
 pub mod materials;
 pub mod offscreen;
 pub mod plugin;
+pub mod raymarch;
 pub mod registry;
 pub mod sky_dome;
 pub mod skybox;
@@ -30,6 +31,10 @@ pub use offscreen::{
     OffscreenTarget,
 };
 pub use plugin::RenderPlugin;
+pub use raymarch::{
+    brick_proxy_box, build_raymarch_material, RaymarchMaterial, RaymarchResources,
+    RaymarchShadingTier,
+};
 pub use registry::apply_strategy_by_name;
 pub use sky_dome::{SkyDome, SkyDomePlugin};
 pub use skybox::{
