@@ -46,8 +46,8 @@ use serde::Deserialize;
 use crate::hud::FrameDiagBuffer;
 use crate::modes::fp::CameraMotionState;
 use crate::render::{
-    CaptureOutcomes, CaptureQueueHandle, OffscreenTarget, RenderConfig, RenderPreset,
-    WorldTime,
+    BrickGpuStats, CaptureOutcomes, CaptureQueueHandle, DagBufferCache, OffscreenTarget,
+    RenderConfig, RenderPreset, WorldTime,
 };
 use crate::view_mode::ViewMode;
 
@@ -210,7 +210,8 @@ impl Scenario {
                     }
                     expanded.push(ev.clone());
                 }
-                "screenshot" | "exit" | "dump_frame_diag" | "dump_motion" => {
+                "screenshot" | "exit" | "dump_frame_diag" | "dump_motion"
+                | "dump_brick_mem" => {
                     expanded.push(ev.clone());
                 }
                 "set_time_of_day" => {
@@ -400,6 +401,7 @@ impl Plugin for HarnessPlugin {
                     drain_capture_outcomes,
                     drive_frame_diag_dump,
                     drive_motion_dump,
+                    drive_brick_mem_dump,
                     drive_exit,
                 )
                     .chain(),
@@ -685,7 +687,7 @@ fn drive_frame_diag_dump(
         return;
     };
     if buf.is_empty() {
-        eprintln!("FRAME_DIAG_SUMMARY count=0 mean_us=0 p99_us=0 max_us=0");
+        eprintln!("FRAME_DIAG_SUMMARY count=0 mean_us=0 p50_us=0 p99_us=0 max_us=0");
         return;
     }
     let mut samples: Vec<u64> = Vec::with_capacity(buf.len());
@@ -697,11 +699,12 @@ fn drive_frame_diag_dump(
     let count = samples.len();
     let max = *samples.last().unwrap();
     let mean: f64 = samples.iter().sum::<u64>() as f64 / count as f64;
-    let p99_idx = ((count as f64 * 0.99).ceil() as usize).saturating_sub(1).min(count - 1);
-    let p99 = samples[p99_idx];
+    let pct = |q: f64| samples[((count as f64 * q).ceil() as usize).saturating_sub(1).min(count - 1)];
+    let p50 = pct(0.50);
+    let p99 = pct(0.99);
     eprintln!(
-        "FRAME_DIAG_SUMMARY count={} mean_us={:.0} p99_us={} max_us={}",
-        count, mean, p99, max
+        "FRAME_DIAG_SUMMARY count={} mean_us={:.0} p50_us={} p99_us={} max_us={}",
+        count, mean, p50, p99, max
     );
 }
 
@@ -734,6 +737,63 @@ fn drive_motion_dump(
         motion.velocity_m_s, motion.smoothed_velocity_m_s,
         motion.smoothed_yaw_rate_rad_s,
         motion.sprint_held,
+    );
+}
+
+/// Print the mesh-vs-raymarch GPU stats to stderr when `dump_brick_mem` fires.
+/// Combines the cumulative [`BrickGpuStats`] counters with the live
+/// [`DagBufferCache`] residency so a measurement run can compare the two render
+/// paths (dedup hit-rate, resident VRAM, main-thread acquire cost). Mesh bytes
+/// are estimated at 40 B/vertex (pos+normal+color upload) + 4 B/index.
+fn drive_brick_mem_dump(
+    clock: Res<HarnessClock>,
+    cfg: Res<HarnessConfig>,
+    stats: Option<Res<BrickGpuStats>>,
+    cache: Option<Res<DagBufferCache>>,
+) {
+    let now = clock.frame;
+    let dump_now = cfg
+        .scenario
+        .events
+        .iter()
+        .any(|e| e.frame == now && e.kind == "dump_brick_mem");
+    if !dump_now {
+        return;
+    }
+    let Some(stats) = stats else {
+        eprintln!("HARNESS_WARNING dump_brick_mem: BrickGpuStats missing");
+        return;
+    };
+    let acquires = stats.cache_hits + stats.cache_misses;
+    let acquire_us_mean = if acquires > 0 {
+        stats.acquire_ns_total as f64 / acquires as f64 / 1000.0
+    } else {
+        0.0
+    };
+    let hit_pct = if acquires > 0 {
+        100.0 * stats.cache_hits as f64 / acquires as f64
+    } else {
+        0.0
+    };
+    let (dag_shapes, dag_bytes) = match &cache {
+        Some(c) => (c.buffer_count(), c.resident_bytes()),
+        None => (0, 0),
+    };
+    let mesh_bytes = stats.mesh_vertices * 40 + stats.mesh_indices * 4;
+    eprintln!(
+        "BRICK_MEM frame={} ray_spawns={} mesh_spawns={} cache_hits={} cache_misses={} hit_pct={:.1} acquire_us_mean={:.3} dag_shapes={} dag_bytes={} mesh_vertices={} mesh_indices={} mesh_bytes_est={}",
+        now,
+        stats.raymarch_spawns,
+        stats.mesh_spawns,
+        stats.cache_hits,
+        stats.cache_misses,
+        hit_pct,
+        acquire_us_mean,
+        dag_shapes,
+        dag_bytes,
+        stats.mesh_vertices,
+        stats.mesh_indices,
+        mesh_bytes,
     );
 }
 

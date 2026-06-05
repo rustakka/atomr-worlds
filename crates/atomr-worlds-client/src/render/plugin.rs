@@ -4,6 +4,7 @@
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 
+use super::dag_cache::{BrickGpuStats, DagBufferCache};
 use super::materials::VoxelMaterial;
 use super::raymarch::RaymarchMaterial;
 use super::sky_dome::SkyDomePlugin;
@@ -30,6 +31,10 @@ impl Plugin for RenderPlugin {
         // to `RaymarchDagShading` doesn't need a restart; bricks only spawn
         // raymarch proxies when that shading mode is active.
         app.add_plugins(MaterialPlugin::<RaymarchMaterial>::default());
+        // Cross-brick dedup cache for the raymarch path's GPU buffers/materials,
+        // plus the mesh-vs-raymarch perf counters the harness dumps.
+        app.init_resource::<DagBufferCache>();
+        app.init_resource::<BrickGpuStats>();
         app.add_plugins(SkyDomePlugin);
         // Cubemap skybox: seeds a placeholder 1×1×6 black handle into
         // `SkyboxRuntime` so the FP camera can spawn with a valid

@@ -13,7 +13,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
-use atomr_worlds_voxel::Brick;
+use atomr_worlds_voxel::{ray_dda_first_hit, Brick, DagGpu};
 
 use crate::camera::{transform_point, Camera};
 use crate::mesh::{greedy_mesh, Mesh, Vertex};
@@ -614,4 +614,122 @@ fn rasterize_triangle_mode(
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GPU DAG raymarcher CPU twin (determinism gate).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Shading tier for [`render_raymarch`].
+///
+/// CPU twin of the client's `render::raymarch::RaymarchShadingTier`; Pbr folds
+/// into Lambert as the shader does. Kept separate to avoid inverting the crate
+/// dep graph.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RaymarchTier {
+    /// Flat material color, no lighting term. The golden pins this tier.
+    Unlit,
+    /// Single directional `n·l` term over a fixed ambient floor.
+    Lambert,
+}
+
+/// CPU reference render of a single brick's [`DagGpu`] via per-pixel ray-DDA —
+/// the deterministic mirror of the client's GPU DAG fragment raymarcher and the
+/// determinism gate for that path.
+///
+/// **Placement:** the brick is at the ORIGIN with identity placement, so it
+/// occupies world `[0, 16)³` and brick-local voxel space == world space. There
+/// is no model matrix to invert; the camera eye and per-pixel ray direction are
+/// already in voxel space and are handed straight to [`ray_dda_first_hit`].
+///
+/// **Ray construction** reuses the exact forward/right/up + fov/aspect/NDC math
+/// from [`paint_skybox_background`] so the two stay consistent. Misses leave the
+/// `cfg.background` clear color in place (same as `render_mesh`). The depth
+/// buffer is left at the cleared `0.0` (far): the GPU path's reversed-Z depth is
+/// driver-divergent and hash-exempt, so the golden compares color only.
+pub fn render_raymarch(dag: &DagGpu, camera: &Camera, cfg: &RenderConfig, tier: RaymarchTier) -> Framebuffer {
+    let mut fb = Framebuffer {
+        width: cfg.width,
+        height: cfg.height,
+        pixels: Vec::with_capacity((cfg.width * cfg.height * 4) as usize),
+        depth: vec![0.0f32; (cfg.width * cfg.height) as usize],
+    };
+    let bg = cfg.background;
+    for _ in 0..(cfg.width * cfg.height) {
+        fb.pixels.extend_from_slice(&bg);
+    }
+
+    // Camera ray basis — identical construction to `paint_skybox_background`.
+    let forward = norm3([
+        camera.target[0] - camera.eye[0],
+        camera.target[1] - camera.eye[1],
+        camera.target[2] - camera.eye[2],
+    ]);
+    let right = norm3([
+        forward[1] * camera.up[2] - forward[2] * camera.up[1],
+        forward[2] * camera.up[0] - forward[0] * camera.up[2],
+        forward[0] * camera.up[1] - forward[1] * camera.up[0],
+    ]);
+    let up = [
+        right[1] * forward[2] - right[2] * forward[1],
+        right[2] * forward[0] - right[0] * forward[2],
+        right[0] * forward[1] - right[1] * forward[0],
+    ];
+    let aspect = camera.aspect.max(1e-6);
+    let half_h = (camera.fov_y_rad * 0.5).tan();
+    let half_w = half_h * aspect;
+
+    // Identity placement: eye is already in voxel space.
+    let eye = camera.eye;
+    let light = norm3(cfg.light_dir);
+
+    let w = cfg.width as i32;
+    let h = cfg.height as i32;
+    let inv_w = 1.0 / w as f32;
+    let inv_h = 1.0 / h as f32;
+    // Fixed `for x in 0..` iteration order over a single pixel buffer ⇒ output
+    // bytes are a pure function of the inputs (the determinism contract).
+    for y in 0..h {
+        for x in 0..w {
+            // NDC in [-1, 1] with +y up (matches the skybox path).
+            let nx = ((x as f32 + 0.5) * inv_w) * 2.0 - 1.0;
+            let ny = 1.0 - ((y as f32 + 0.5) * inv_h) * 2.0;
+            let dir = [
+                right[0] * (nx * half_w) + up[0] * (ny * half_h) + forward[0],
+                right[1] * (nx * half_w) + up[1] * (ny * half_h) + forward[1],
+                right[2] * (nx * half_w) + up[2] * (ny * half_h) + forward[2],
+            ];
+            // Identity placement ⇒ eye and dir are already in voxel space.
+            let Some(hit) = ray_dda_first_hit(dag, eye, dir) else {
+                continue; // miss: leave the background clear color
+            };
+            let base = material_color(hit.material);
+            let rgb = match tier {
+                // Golden pins UNLIT: returns material_color only (no
+                // light/ambient) so it's robust to float drift. NOTE: GPU
+                // `shade()` reads LINEAR palette base_color; this uses sRGB
+                // material_color — intentionally NOT byte-comparable to the GPU;
+                // the GPU path is hash-exempt. Do not 'fix' this.
+                RaymarchTier::Unlit => base,
+                // base*(0.30 + 0.70*ndl) — mirrors the WGSL Lambert formula.
+                RaymarchTier::Lambert => {
+                    let ndl = dot3(hit.normal, light).max(0.0);
+                    let shade = 0.30 + 0.70 * ndl;
+                    [
+                        (base[0] as f32 * shade).clamp(0.0, 255.0) as u8,
+                        (base[1] as f32 * shade).clamp(0.0, 255.0) as u8,
+                        (base[2] as f32 * shade).clamp(0.0, 255.0) as u8,
+                    ]
+                }
+            };
+            let idx = (y as u32 * fb.width + x as u32) as usize;
+            let pi = idx * 4;
+            fb.pixels[pi] = rgb[0];
+            fb.pixels[pi + 1] = rgb[1];
+            fb.pixels[pi + 2] = rgb[2];
+            fb.pixels[pi + 3] = 255;
+        }
+    }
+
+    fb
 }

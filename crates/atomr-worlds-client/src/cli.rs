@@ -19,12 +19,14 @@ pub enum PerfPreset {
     Quality,
 }
 
-/// Shading path. `default` keeps the configured default (legacy split-per-
-/// material mesh); `palette` uses the merged palette voxel material; `raymarch`
-/// skips meshing and raymarches each brick's sparse-voxel DAG on the GPU.
+/// Shading path. `default` keeps the configured default; `mesh` forces the
+/// legacy split-per-material mesh path (the fallback once raymarch becomes the
+/// default); `palette` uses the merged palette voxel material; `raymarch` skips
+/// meshing and raymarches each brick's sparse-voxel DAG on the GPU.
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum ShadingArg {
     Default,
+    Mesh,
     Palette,
     Raymarch,
 }

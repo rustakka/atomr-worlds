@@ -136,6 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Shading path (default keeps the configured strategy).
             match cli.shading {
                 cli::ShadingArg::Default => {}
+                cli::ShadingArg::Mesh => {
+                    render::apply_strategy_by_name(&mut cfg, "shading", "LegacyVertexColor");
+                }
                 cli::ShadingArg::Palette => {
                     render::apply_strategy_by_name(&mut cfg, "shading", "PaletteVoxelMaterial");
                 }

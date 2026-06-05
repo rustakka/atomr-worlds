@@ -8,6 +8,7 @@
 //! experimentation surface wide.
 
 pub mod config;
+pub mod dag_cache;
 pub mod defaults;
 pub mod horizon_shell;
 pub mod materials;
@@ -21,6 +22,7 @@ pub mod strategy;
 pub mod sun;
 
 pub use config::{PerfPreset, RenderConfig, RenderPreset};
+pub use dag_cache::{BrickGpuStats, DagBufferCache};
 pub use horizon_shell::{
     HorizonImposterActive, HorizonShell, HorizonShellPlugin, HorizonShellRuntime,
     MacroStateProvider,
@@ -32,8 +34,7 @@ pub use offscreen::{
 };
 pub use plugin::RenderPlugin;
 pub use raymarch::{
-    brick_proxy_box, build_raymarch_material, RaymarchMaterial, RaymarchResources,
-    RaymarchShadingTier,
+    brick_proxy_box, RaymarchMaterial, RaymarchResources, RaymarchShadingTier,
 };
 pub use registry::apply_strategy_by_name;
 pub use sky_dome::{SkyDome, SkyDomePlugin};

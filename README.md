@@ -91,6 +91,21 @@ debris bodies), a deterministic fracture-event protocol, an `HlcTimestamp`, and 
 strategic recommendations (GPU raymarching, rigid-body physics, multiplayer
 destruction sync, low-latency scheduling) now in progress.
 
+**Rec 1 (GPU DAG raymarching) is now a working, selectable render path.** Each
+non-empty brick can be drawn by GPU-raymarching its sparse-voxel DAG in a
+fragment shader instead of uploading a triangle mesh (`--shading raymarch`,
+with `--raymarch-tier unlit|lambert|pbr`). The DAG is built off the main thread
+alongside meshing; a content-digest **buffer cache dedups GPU buffers + materials
+across structurally-identical bricks** (so a mostly-uniform world collapses to a
+handful of buffer sets), and the proxy is tightened to each brick's occupancy
+AABB to cut overdraw. The WGSL traversal is a line-for-line mirror of the CPU
+`gpu_get` / `ray_dda_first_hit` reference, pinned by a deterministic view-crate
+render golden. In a debug A/B the raymarcher used **~19× less GPU memory** than
+the mesh path; meshing remains the default and the selectable fallback
+(`--shading mesh`) pending a release-build frame-time measurement (see the
+`harness/scenes/perf_raymarch_ab.toml` gate). The eventual displacement of
+meshing as the default is data-gated on that measurement.
+
 ### Documentation
 
 | Doc | What it covers |
@@ -122,7 +137,8 @@ destruction sync, low-latency scheduling) now in progress.
 | 19 | Slice rework + algorithm-topologies layered pipeline; async plan rebuild + horizon imposter (19.1/19.2) | ✅ |
 | AVA Phase 0 | Bevy 0.13 → 0.18 engine upgrade | ✅ |
 | AVA Phase 1 | Physics palette + `atomr-worlds-physics` + fracture proto + HLC + `DagBrick` SVDAG | ✅ |
-| AVA Rec 1–4 | GPU raymarching · rigid-body physics · CRDT destruction sync · scheduler | 🟡 in progress |
+| AVA Rec 1 | GPU DAG raymarcher: selectable render path + off-thread build + cross-brick buffer dedup + occupancy-AABB proxy + CPU determinism golden (default-flip data-gated) | 🟡 selectable; default-flip pending release perf |
+| AVA Rec 2–4 | rigid-body physics · CRDT destruction sync · scheduler | 🟡 foundations landed |
 
 (AVA = *Advanced Voxel Architectures* — see the roadmap doc above.)
 
@@ -158,7 +174,7 @@ each with a default and at least one alternative:
 | `mesher`     | `MeshStrategy`       | `GreedyFlat`             | —                                            |
 | `palette`    | `PaletteStrategy`    | `HardcodedPalette`       | —                                            |
 | `ao`         | `AoStrategy`         | `MinecraftCornerAo`      | `NoAo`                                       |
-| `shading`    | `ShadingStrategy`    | `LegacyVertexColor`      | `PaletteVoxelMaterial` (custom WGSL)         |
+| `shading`    | `ShadingStrategy`    | `LegacyVertexColor`      | `PaletteVoxelMaterial` (custom WGSL), `RaymarchDagShading` (GPU DAG raymarch) |
 | `sky`        | `SkyStrategy`        | `ProceduralDomeSky` (WGSL) | `ConstantSky`, `SkyTinted`                 |
 | `sun_curve`  | `SunCurveStrategy`   | `KeyframeLutSun`         | `StaticSun`                                  |
 | `shadow`     | `ShadowStrategy`     | `BasicCascades`          | `NoShadows`                                  |
@@ -170,6 +186,35 @@ each with a default and at least one alternative:
 The harness DSL exposes `set_time_of_day`, `set_render_preset`, and
 `set_strategy` events (the latter takes a `slot` + `strategy` name from
 the registry) so scenarios can capture A/B comparisons deterministically.
+
+### GPU DAG raymarcher (AVA Rec 1)
+
+The `RaymarchDagShading` shading mode (`--shading raymarch`) draws each brick
+by GPU-raymarching its sparse-voxel DAG (`atomr_worlds_voxel::DagBrick::to_gpu`)
+in a fragment shader (`assets/shaders/voxel_raymarch.wgsl`) instead of uploading
+a triangle mesh — the route to *displacing meshing where it's performant*. The
+strategic intent is for raymarching to become a first-class, can-be-default path
+across LOD tiers, with meshing as the fallback. What's in place:
+
+- **Off-thread build** — the DAG (`DagGpuWithDigest`: flat buffers + content
+  digest + occupancy AABB) is built on the blocking pool alongside greedy mesh,
+  so `spawn_brick_entity` never builds a DAG inline.
+- **Cross-brick dedup** — a refcounted `DagBufferCache` keys GPU buffers by the
+  DAG content digest and materials by `(digest, tier)`, so structurally-identical
+  bricks share one buffer set + material; freed in lockstep with brick eviction.
+- **Tight proxy** — the proxy cube and the in-shader DDA are clipped to the
+  brick's occupancy AABB so the empty rim is never rasterized or marched (the
+  one overdraw mitigation that helps while the shader writes `frag_depth`).
+- **Pluggable shading tiers** — `--raymarch-tier unlit|lambert|pbr`, an engine
+  setting orthogonal to the strategy slot.
+- **Determinism gate** — the WGSL traversal mirrors the CPU
+  `atomr_worlds_voxel::{gpu_get, ray_dda_first_hit}` reference line-for-line,
+  pinned by a deterministic CPU render golden in `atomr-worlds-view`
+  (`tests/raymarch_golden.rs`); the GPU float output stays hash-exempt.
+- **Perf gate** — `harness/scenes/perf_raymarch_ab.toml` run twice
+  (`--shading mesh` vs `--shading raymarch`) emits `FRAME_DIAG_SUMMARY`
+  (p50/p99/max) + `BRICK_MEM` (dedup hit-rate, resident VRAM, acquire cost) for
+  the mesh-vs-DAG comparison that gates flipping the default.
 
 ### Lighting and atmosphere (Phase 16)
 
