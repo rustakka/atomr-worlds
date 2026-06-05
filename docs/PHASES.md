@@ -2047,3 +2047,39 @@ nodes, uniform-solid → 5 nodes, sparse + half-filled round-trips, deterministi
 word/color layout (37 words / root 28 / one color), color dedup, and
 deterministic encoding. Clippy clean; existing voxel tests unchanged.
 
+## Phase 20.2 *(in progress)* — Rec 4: Hybrid Logical Clock timestamp
+
+The first piece of Rec 4 (multiplayer destruction sync) that needs neither the
+host/actor wiring nor the upstream `atomr` reconciliation.
+[`HlcTimestamp`](../crates/atomr-worlds-core/src/hlc.rs)
+(`atomr-worlds-core::hlc`) is a Hybrid Logical Clock (Kulkarni 2014): a
+`{ wall_ns, counter }` pair giving every event a strict, causality-preserving
+total order **without** synchronized clocks. Rec 4 Track C stamps each
+last-writer-wins voxel-overlay edit with one so concurrent carves by different
+players converge (higher timestamp wins; tie-broken by node id at the map
+layer) without central arbitration.
+
+This fills the gap the plan flagged as an upstream need — `atomr-distributed-data`
+ships `LWWMap` but with a raw `u128` and no HLC. Implementing it locally
+de-risks that dependency (and is a candidate to upstream later).
+
+- **Pure / testable.** `tick(local_last, now_ns)` (local event) and
+  `recv(local_last, remote, now_ns)` (merge on receive) take the wall-clock
+  reading as a parameter rather than reading the clock inside, so they are
+  deterministic and the overlay-merge logic stays reproducible. Both return a
+  stamp strictly greater than their inputs, and survive a backwards clock jump.
+
+### Verification
+
+`cargo test -p atomr-worlds-core` (8 new `hlc::tests::*`): strict monotonicity,
+counter-bump-then-reset, backwards-clock handling, `recv` dominating both
+inputs + adopting the furthest wall time, total lexicographic order, purity, and
+serde round-trip. Clippy clean.
+
+### Out of scope (next Rec 4 steps, gated on env reconciliation)
+
+Wiring `FractureRequest`/`FractureApplied` into `WorldRequest`/`WorldEvent` and
+the `WorldActor`; the HLC-timestamped LWW overlay + `MergeRemoteOverlay`; the
+`WorldSnapshot` versioned migration; and debris-state interpolation — all need
+the host crate (and thus the `atomr` 0.9.2↔0.10.1 reconciliation) and, for the
+unreliable debris channel, the upstream `atomr-remote` work.

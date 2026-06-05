@@ -11,6 +11,7 @@ pub mod coord;
 pub mod dim;
 pub mod error;
 pub mod hierarchy;
+pub mod hlc;
 pub mod interaction;
 pub mod lod;
 pub mod material_physics;
@@ -27,6 +28,7 @@ pub use coord::{
 pub use dim::DimensionId;
 pub use error::{Result, WorldsCoreError};
 pub use hierarchy::{Galaxy, Generator, Sector, System, Universe, World};
+pub use hlc::HlcTimestamp;
 pub use interaction::{AffectedSet, InteractionUnit, ToolKind};
 pub use lod::{Lod, MetricScale, MetricScaleRegistry};
 pub use material_physics::{
