@@ -17,10 +17,12 @@ use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::render_asset::{RenderAssetUsages, RenderAssets};
+// Bevy 0.17: RenderAssetUsages moved to bevy_asset; RenderAssets stays in bevy_render.
+use bevy::asset::RenderAssetUsages;
+use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
     BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, TexelCopyBufferInfo,
-    TexelCopyTextureInfo, TexelCopyBufferLayout, MapMode, Maintain, Origin3d, TextureAspect,
+    TexelCopyTextureInfo, TexelCopyBufferLayout, MapMode, PollType, Origin3d, TextureAspect,
     TextureDimension, TextureFormat, TextureUsages,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
@@ -191,7 +193,7 @@ fn image_copy_system(
         let _ = tx.send(result);
     });
     // Block until the map completes. wgpu drains queued callbacks here.
-    device.poll(Maintain::Wait);
+    let _ = device.poll(PollType::Wait);
     let map_result = rx.recv();
     if let Err(e) = map_result {
         push_outcome(false, Some(format!("map channel closed: {e}")));

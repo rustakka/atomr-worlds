@@ -188,7 +188,7 @@ fn route_hud_target(
     mut commands: Commands,
 ) {
     let raster = matches!(*mode, ViewMode::Slice | ViewMode::Rts | ViewMode::Overview);
-    let camera = if raster { blit_cam.get_single() } else { world_cam.get_single() };
+    let camera = if raster { blit_cam.single() } else { world_cam.single() };
     let Ok(target) = camera else {
         // Cameras not spawned yet (startup-frame gap). `IsDefaultUiCamera`
         // covers this frame; the explicit assignment lands next frame.
@@ -212,7 +212,7 @@ fn update_fps(diag: Res<DiagnosticsStore>, mut q: Query<&mut Text, With<FpsText>
     else {
         return;
     };
-    if let Ok(mut text) = q.get_single_mut() {
+    if let Ok(mut text) = q.single_mut() {
         text.0 = format!("fps: {fps:>5.1}");
     }
 }
@@ -222,13 +222,13 @@ fn update_coords(fp_state: Res<FpState>, mut q: Query<&mut Text, With<CoordsText
         return;
     }
     let p = fp_state.walk.observer.position;
-    if let Ok(mut text) = q.get_single_mut() {
+    if let Ok(mut text) = q.single_mut() {
         text.0 = format!("xyz: ({:.1}, {:.1}, {:.1})", p.x, p.y, p.z);
     }
 }
 
 fn update_mode(mode: Res<ViewMode>, mut q: Query<&mut Text, With<ModeText>>) {
-    if let Ok(mut text) = q.get_single_mut() {
+    if let Ok(mut text) = q.single_mut() {
         let want = format!("mode: {}", mode.label());
         if text.0 != want {
             text.0 = want;

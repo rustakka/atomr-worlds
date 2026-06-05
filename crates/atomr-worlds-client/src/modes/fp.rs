@@ -42,12 +42,12 @@ use atomr_worlds_core::vehicle::ContainingFrame;
 use atomr_worlds_view::{WalkCamera, WalkInput, WorldQuery};
 // (WorldQuery brings ground_height_m into scope.)
 use atomr_worlds_voxel::BRICK_EDGE;
-use bevy::core_pipeline::bloom::Bloom;
+use bevy::post_process::bloom::Bloom;
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
-use bevy::render::camera::RenderTarget;
-use bevy::render::mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology};
-use bevy::render::render_asset::RenderAssetUsages;
+use bevy::camera::RenderTarget;
+use bevy::mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology};
+use bevy::asset::RenderAssetUsages;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
 use crate::brick_gen::{BrickGenWorkers, BrickReady, DEFAULT_SPAWN_BUDGET};
@@ -470,9 +470,11 @@ fn setup_fp_scene(
         Camera3d::default(),
         Camera {
             target: camera_target,
-            hdr: true, // required for bloom + good tonemapping headroom
             ..default()
         },
+        // Bevy 0.17: `Camera.hdr` field → the `Hdr` marker component (required
+        // for bloom + tonemapping headroom).
+        bevy::render::view::Hdr,
         tonemap,
         exposure,
         Transform::from_xyz(8.0, 26.0, 8.0).looking_to(Vec3::Z, Vec3::Y),
@@ -538,41 +540,43 @@ fn setup_fp_scene(
 }
 
 fn grab_cursor(
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    // Bevy 0.17: cursor settings are a separate `CursorOptions` component on
+    // the primary window entity, not a field on `Window`.
+    mut cursors: Query<&mut bevy::window::CursorOptions, With<PrimaryWindow>>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mode: Res<ViewMode>,
     harness: Option<Res<crate::harness::HarnessActive>>,
 ) {
-    let Ok(mut window) = windows.get_single_mut() else { return };
+    let Ok(mut cursor) = cursors.single_mut() else { return };
     if harness.is_some() {
         // Keep cursor unlocked & visible in harness mode so synthetic
         // MouseMotion events from the harness aren't ignored by fp_input.
-        if window.cursor_options.grab_mode != CursorGrabMode::None {
-            window.cursor_options.grab_mode = CursorGrabMode::None;
-            window.cursor_options.visible = true;
+        if cursor.grab_mode != CursorGrabMode::None {
+            cursor.grab_mode = CursorGrabMode::None;
+            cursor.visible = true;
         }
         return;
     }
     // Only grab the cursor in fp/tp modes; release for 2D overlay modes.
     let want_grab = matches!(*mode, ViewMode::Fp | ViewMode::Tp);
     if keys.just_pressed(KeyCode::Escape) {
-        window.cursor_options.grab_mode = CursorGrabMode::None;
-        window.cursor_options.visible = true;
+        cursor.grab_mode = CursorGrabMode::None;
+        cursor.visible = true;
         return;
     }
-    if want_grab && window.cursor_options.grab_mode == CursorGrabMode::None {
+    if want_grab && cursor.grab_mode == CursorGrabMode::None {
         // Grab on a left-click inside the window. We don't auto-grab on
         // keypress: previously holding WASD while in a menu re-locked
         // the cursor unexpectedly. Click-to-grab matches the convention
         // every other voxel game uses.
         if mouse_buttons.just_pressed(MouseButton::Left) {
-            window.cursor_options.grab_mode = CursorGrabMode::Locked;
-            window.cursor_options.visible = false;
+            cursor.grab_mode = CursorGrabMode::Locked;
+            cursor.visible = false;
         }
-    } else if !want_grab && window.cursor_options.grab_mode != CursorGrabMode::None {
-        window.cursor_options.grab_mode = CursorGrabMode::None;
-        window.cursor_options.visible = true;
+    } else if !want_grab && cursor.grab_mode != CursorGrabMode::None {
+        cursor.grab_mode = CursorGrabMode::None;
+        cursor.visible = true;
     }
 }
 
@@ -641,7 +645,7 @@ fn fp_input_look(
     mut motion: EventReader<MouseMotion>,
     time: Res<Time>,
     mut state: ResMut<FpState>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    cursors: Query<&bevy::window::CursorOptions, With<PrimaryWindow>>,
     harness: Option<Res<crate::harness::HarnessActive>>,
 ) {
     if *mode != ViewMode::Fp {
@@ -657,9 +661,9 @@ fn fp_input_look(
     let mut pitch_delta = 0.0f32;
     let harness_active = harness.is_some();
     let cursor_locked = harness_active
-        || windows
-            .get_single()
-            .map(|w| w.cursor_options.grab_mode != CursorGrabMode::None)
+        || cursors
+            .single()
+            .map(|c| c.grab_mode != CursorGrabMode::None)
             .unwrap_or(false);
     if cursor_locked {
         for ev in motion.read() {
@@ -754,7 +758,7 @@ fn fp_sync_camera(
     let cam = state.walk.camera();
     let eye = Vec3::new(cam.eye[0], cam.eye[1], cam.eye[2]);
     let target = Vec3::new(cam.target[0], cam.target[1], cam.target[2]);
-    if let Ok(mut t) = q.get_single_mut() {
+    if let Ok(mut t) = q.single_mut() {
         t.translation = eye;
         t.look_at(target, Vec3::Y);
     }
@@ -1186,7 +1190,7 @@ fn fp_animate_fade_out(
             // the count — `LoadedChunks::remove` skips the decrement
             // when the entry was already flagged fading.
             loaded.remove(&fade.key);
-            commands.entity(ent).despawn_recursive();
+            commands.entity(ent).despawn();
         }
     }
 }

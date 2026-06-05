@@ -392,7 +392,7 @@ impl Plugin for HarnessPlugin {
             // synthetic `keys.press()` that lands before it would have its
             // `just_pressed` flag wiped — breaking `key_tap`-driven actions
             // that read `just_pressed` (view-mode switches, z-band cycling).
-            .add_systems(PreUpdate, drive_input_events.after(bevy::input::InputSystem))
+            .add_systems(PreUpdate, drive_input_events.after(bevy::input::InputSystems))
             .add_systems(PostUpdate, drive_screenshots)
             .add_systems(
                 Last,
@@ -441,7 +441,7 @@ fn drive_input_events(
             "mouse_move" => {
                 let dx = ev.dx.unwrap_or(0.0);
                 let dy = ev.dy.unwrap_or(0.0);
-                mouse_writer.send(MouseMotion {
+                mouse_writer.write(MouseMotion {
                     delta: Vec2::new(dx, dy),
                 });
             }
@@ -752,7 +752,7 @@ fn drive_exit(
 
     let grace_until = cfg.scenario.last_event_frame() + 5;
     if state.exit_requested && now >= grace_until {
-        exit_writer.send(AppExit::Success);
+        exit_writer.write(AppExit::Success);
         return;
     }
 
@@ -761,6 +761,6 @@ fn drive_exit(
             "HARNESS_WARNING deadline frame {} exceeded; forcing exit",
             state.deadline
         );
-        exit_writer.send(AppExit::Success);
+        exit_writer.write(AppExit::Success);
     }
 }

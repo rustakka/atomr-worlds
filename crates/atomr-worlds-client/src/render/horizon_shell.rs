@@ -29,11 +29,11 @@ use atomr_worlds_core::coord::DVec3;
 use atomr_worlds_core::shape::WorldShape;
 use atomr_worlds_generate::macro_state::{DefaultMacroGenerator, MacroConfig, MacroGenerator};
 use atomr_worlds_generate::WorldMacroState;
-use bevy::pbr::{NotShadowCaster, NotShadowReceiver};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
-use bevy::render::mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology};
-use bevy::render::render_asset::RenderAssetUsages;
-use bevy::render::view::NoFrustumCulling;
+use bevy::mesh::{Indices, Mesh as BevyMesh, PrimitiveTopology};
+use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::NoFrustumCulling;
 
 use super::config::RenderConfig;
 use super::strategy::{HorizonImposterInputs, HorizonImposterMesh};
@@ -128,7 +128,7 @@ fn ensure_horizon_shell(
     if runtime.current_entity.is_some() {
         return;
     }
-    if cam_q.get_single().is_err() {
+    if cam_q.single().is_err() {
         return;
     }
 
@@ -185,7 +185,7 @@ fn sync_horizon_shell(
     mut meshes: ResMut<Assets<Mesh>>,
     mut q: Query<(&mut Visibility, &mut Transform, &Mesh3d), With<HorizonShell>>,
 ) {
-    let Ok((mut visibility, mut transform, mesh_handle)) = q.get_single_mut() else {
+    let Ok((mut visibility, mut transform, mesh_handle)) = q.single_mut() else {
         return;
     };
     let strategy = &*cfg.horizon_imposter;

@@ -22,11 +22,12 @@
 
 use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
-use bevy::render::mesh::MeshVertexBufferLayoutRef;
+use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::render::render_resource::{
-    AsBindGroup, Face, RenderPipelineDescriptor, ShaderRef, ShaderType,
-    SpecializedMeshPipelineError,
+    AsBindGroup, Face, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
+// Bevy 0.17: ShaderRef moved to bevy_shader.
+use bevy::shader::ShaderRef;
 use bevy::render::storage::ShaderStorageBuffer;
 
 /// Palette entry packed for the GPU. Stays 48 bytes (3× vec4 = vec4
@@ -97,7 +98,8 @@ impl Material for SkyDomeMaterial {
         "shaders/sky_dome.wgsl".into()
     }
     fn specialize(
-        _pipeline: &MaterialPipeline<Self>,
+        // Bevy 0.17: `MaterialPipeline` is no longer generic.
+        _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,

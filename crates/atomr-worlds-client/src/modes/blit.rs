@@ -7,8 +7,8 @@
 
 use atomr_worlds_view::Framebuffer;
 use bevy::prelude::*;
-use bevy::render::camera::{ClearColorConfig, RenderTarget};
-use bevy::render::render_asset::RenderAssetUsages;
+use bevy::camera::{ClearColorConfig, RenderTarget};
+use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::modes::fp::WorldCamera;
@@ -111,7 +111,7 @@ fn toggle_blit_visibility(
     mut sprites: Query<&mut Visibility, With<BlitSprite>>,
 ) {
     let active = raster_mode_active(*mode);
-    if let Ok(mut cam) = blit_cameras.get_single_mut() {
+    if let Ok(mut cam) = blit_cameras.single_mut() {
         cam.is_active = active;
     }
     // Disable the FP/TP world camera in raster modes. `Visibility::Hidden`
@@ -122,10 +122,10 @@ fn toggle_blit_visibility(
     // the target the BlitCamera's letterboxed sprite doesn't cover would
     // show that sky color in harness PNGs (the original "overview shows
     // empty sky" symptom).
-    if let Ok(mut cam) = world_cameras.get_single_mut() {
+    if let Ok(mut cam) = world_cameras.single_mut() {
         cam.is_active = !active;
     }
-    if let Ok(mut vis) = sprites.get_single_mut() {
+    if let Ok(mut vis) = sprites.single_mut() {
         *vis = if active { Visibility::Visible } else { Visibility::Hidden };
     }
 }
@@ -138,8 +138,8 @@ fn fit_sprite_to_window(
     if !raster_mode_active(*mode) {
         return;
     }
-    let Ok(win) = windows.get_single() else { return };
-    let Ok(mut sprite) = q.get_single_mut() else { return };
+    let Ok(win) = windows.single() else { return };
+    let Ok(mut sprite) = q.single_mut() else { return };
     let w = win.width();
     let h = win.height();
     let scale = (w / RASTER_W as f32).min(h / RASTER_H as f32);

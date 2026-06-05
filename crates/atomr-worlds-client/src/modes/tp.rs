@@ -93,7 +93,7 @@ fn tp_sync_camera(
     let cam = state.chase.camera();
     let eye = Vec3::new(cam.eye[0], cam.eye[1], cam.eye[2]);
     let target = Vec3::new(cam.target[0], cam.target[1], cam.target[2]);
-    if let Ok(mut t) = q.get_single_mut() {
+    if let Ok(mut t) = q.single_mut() {
         t.translation = eye;
         t.look_at(target, Vec3::Y);
     }

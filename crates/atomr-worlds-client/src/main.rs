@@ -85,7 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // scale_factor_override(1.0) so logical pixels == physical
             // pixels. Without this, a HiDPI display (scale 2) would
             // create a 2x larger swapchain than the capture path expects.
-            WindowResolution::new(scenario.width as f32, scenario.height as f32)
+            // Bevy 0.17: WindowResolution::new takes physical pixels as u32.
+            WindowResolution::new(scenario.width as u32, scenario.height as u32)
                 .with_scale_factor_override(1.0),
         ),
         None => (ViewMode::Fp, WindowResolution::default()),

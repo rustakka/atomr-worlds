@@ -10,13 +10,13 @@ use atomr_worlds_view::{
     MaterialEntry, MaterialPalette, Mesh, SliceShading,
 };
 use atomr_worlds_voxel::Brick;
-use bevy::core_pipeline::bloom::Bloom;
+use bevy::post_process::bloom::Bloom;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::pbr::{
-    CascadeShadowConfig, CascadeShadowConfigBuilder, FogFalloff, DistanceFog,
-};
+// Bevy 0.17: shadow/cascade types moved to bevy_light; fog stays in bevy_pbr.
+use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder};
+use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
-use bevy::render::camera::Exposure;
+use bevy::camera::Exposure;
 
 use super::strategy::*;
 use crate::modes::fp::CameraMotionState;
