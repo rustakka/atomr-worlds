@@ -393,7 +393,7 @@ fn setup_fp_scene(
         };
         let emissive_intense = entry.emissive[0].max(entry.emissive[1]).max(entry.emissive[2]) > 0.0;
         let mat = materials.add(StandardMaterial {
-            base_color: Color::rgba_linear(
+            base_color: Color::linear_rgba(
                 entry.base_color[0],
                 entry.base_color[1],
                 entry.base_color[2],
@@ -404,14 +404,15 @@ fn setup_fp_scene(
             // Emissive is in nits-ish HDR space; Bevy multiplies by a constant
             // exposure later. A factor of 2.0 on linear RGB gives a soft
             // self-lit look without blowing out at noon exposure.
+            // (Bevy 0.14: `StandardMaterial.emissive` is `LinearRgba`.)
             emissive: if emissive_intense {
-                Color::rgb_linear(
+                LinearRgba::rgb(
                     entry.emissive[0] * 2.0,
                     entry.emissive[1] * 2.0,
                     entry.emissive[2] * 2.0,
                 )
             } else {
-                Color::BLACK
+                LinearRgba::BLACK
             },
             alpha_mode,
             ..default()

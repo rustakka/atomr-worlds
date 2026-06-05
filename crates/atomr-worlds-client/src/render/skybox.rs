@@ -340,7 +340,7 @@ pub fn sync_skybox(
         // far-ring cubemap reads as "horizon at this hour".
         let sun = render_cfg.sun_curve.sun_state(world_time.0);
         let horizon = render_cfg.sky.horizon_color(sun);
-        let h_lin = horizon.as_rgba_linear().rgba_to_vec4();
+        let h_lin = Vec4::from_array(horizon.to_linear().to_f32_array());
         let bg = [
             (h_lin.x.clamp(0.0, 1.0) * 255.0) as u8,
             (h_lin.y.clamp(0.0, 1.0) * 255.0) as u8,
@@ -426,7 +426,7 @@ impl Plugin for SkyboxPlugin {
         // can read it back when it spawns the FP camera.
         let placeholder_handle = {
             let mut images = app
-                .world
+                .world_mut()
                 .get_resource_mut::<Assets<Image>>()
                 .expect("Assets<Image> must exist before SkyboxPlugin (DefaultPlugins not added?)");
             images.add(placeholder_cubemap_image())
