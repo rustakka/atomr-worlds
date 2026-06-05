@@ -55,7 +55,7 @@ fn overview_input(
     mode: Res<ViewMode>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mut motion: EventReader<MouseMotion>,
+    mut motion: MessageReader<MouseMotion>,
     mut state: ResMut<OverviewState>,
 ) {
     if *mode != ViewMode::Overview {

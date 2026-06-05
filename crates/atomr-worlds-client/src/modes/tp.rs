@@ -38,8 +38,8 @@ impl Default for TpState {
 fn tp_input(
     mode: Res<ViewMode>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut motion: EventReader<MouseMotion>,
-    mut wheel: EventReader<MouseWheel>,
+    mut motion: MessageReader<MouseMotion>,
+    mut wheel: MessageReader<MouseWheel>,
     fp_state: Res<FpState>,
     time: Res<Time>,
     mut state: ResMut<TpState>,

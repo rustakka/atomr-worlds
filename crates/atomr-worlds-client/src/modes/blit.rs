@@ -75,7 +75,6 @@ fn setup_blit(
         Camera {
             order: 1,
             is_active: false,
-            target: camera_target,
             // Solid black clear so the letterbox bars around the
             // 1:1 raster sprite (256² scaled into a non-square
             // target) are deterministic instead of showing whatever
@@ -88,6 +87,8 @@ fn setup_blit(
             clear_color: ClearColorConfig::Custom(Color::BLACK),
             ..default()
         },
+        // Bevy 0.18: render target is the separate `RenderTarget` component.
+        camera_target,
         BlitCamera,
     ));
     // Bevy 0.15: the sprite's image moved into `Sprite.image`.

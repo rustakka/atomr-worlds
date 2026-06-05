@@ -374,12 +374,8 @@ fn setup_fp_scene(
     // default is 80.0) — values < 5 produce near-black back faces. The
     // earlier `1.2` value was tuned against a stale assumption. Step 4
     // replaces this with a time-of-day-driven curve.
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.85, 0.88, 1.0),
-        brightness: 80.0,
-        // Bevy 0.16 added this field; keep prior behavior (affects all meshes).
-        affects_lightmapped_meshes: false,
-    });
+    // Bevy 0.18: AmbientLight is a per-camera Component (not a Resource) — it is
+    // added to the world camera below and driven each frame by `sync_sun`.
 
     // Build one StandardMaterial per palette entry. The strategy supplies
     // base_color / roughness / metallic / emissive / alpha; we map them
@@ -468,13 +464,19 @@ fn setup_fp_scene(
     // components (Camera, Transform, Tonemapping, Exposure) directly.
     let mut camera_ent = commands.spawn((
         Camera3d::default(),
-        Camera {
-            target: camera_target,
-            ..default()
-        },
+        Camera::default(),
+        // Bevy 0.18: the render target is the separate `RenderTarget` component
+        // (a required component of `Camera`), not a `Camera.target` field.
+        camera_target,
         // Bevy 0.17: `Camera.hdr` field → the `Hdr` marker component (required
         // for bloom + tonemapping headroom).
         bevy::render::view::Hdr,
+        // Bevy 0.18: AmbientLight is a per-camera component; `sync_sun` updates it.
+        AmbientLight {
+            color: Color::srgb(0.85, 0.88, 1.0),
+            brightness: 80.0,
+            affects_lightmapped_meshes: false,
+        },
         tonemap,
         exposure,
         Transform::from_xyz(8.0, 26.0, 8.0).looking_to(Vec3::Z, Vec3::Y),
@@ -642,7 +644,7 @@ pub fn world_walk_input(
 fn fp_input_look(
     mode: Res<ViewMode>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut motion: EventReader<MouseMotion>,
+    mut motion: MessageReader<MouseMotion>,
     time: Res<Time>,
     mut state: ResMut<FpState>,
     cursors: Query<&bevy::window::CursorOptions, With<PrimaryWindow>>,
