@@ -2083,3 +2083,33 @@ the `WorldActor`; the HLC-timestamped LWW overlay + `MergeRemoteOverlay`; the
 `WorldSnapshot` versioned migration; and debris-state interpolation — all need
 the host crate (and thus the `atomr` 0.9.2↔0.10.1 reconciliation) and, for the
 unreliable debris channel, the upstream `atomr-remote` work.
+
+## Phase 0 (Advanced Voxel Architectures) *(landed)* — Bevy 0.13 → 0.18 upgrade
+
+The foundational prerequisite for the *Advanced Voxel Architectures* roadmap (plan
+at `~/.claude/plans/take-a-look-at-groovy-sedgewick.md`). The client's GPU
+raymarcher (Rec 1) and rapier voxel colliders (Rec 2) both need a modern Bevy, so
+the engine was upgraded across four major versions, **one major per PR, each
+verified with the full `cargo test --workspace` (614 passing)**:
+
+| step | PR | merge | headline breaking changes handled |
+| ---- | -- | ----- | --------------------------------- |
+| 0.13 → 0.14 | #6 | — | `App::world()` method; `AppExit` enum; Color enum (`linear_rgba`); `StandardMaterial.emissive: LinearRgba`; `MeshVertexBufferLayoutRef`; `RenderAssets<GpuImage>` |
+| 0.14 → 0.16 | #7 | — | bundles → required components (`Mesh3d`/`MeshMaterial3d`/`Camera3d`/…); `Handle<T>` not a Component; Text rework; `Color::srgb`; `Time::delta_secs`; `Window.cursor_options`; `Image.data: Option`; storage buffers → `Handle<ShaderStorageBuffer>` (skips 0.15 — un-buildable wgpu-23/D3D12 dep bug on Windows) |
+| 0.16 → 0.17 | #8 | — | first-party crate split (`bevy::mesh`/`camera`/`light`/`shader`/`post_process`); `single()` returns `Result`; `Camera.hdr` → `Hdr` component; `CursorOptions` component; `PollType`; feature `zstd_rust` |
+| 0.17 → 0.18 | #9 | `4290dc0` | Event→Message rename; `Camera.target` → `RenderTarget` component; `AmbientLight` is a per-camera component; `RenderSet` → `RenderSystems`; `PollType::wait_indefinitely()` |
+
+MSRV moved 1.78 → 1.89 along the way. The headless CPU rasterizer
+(`atomr-worlds-view`) is Bevy-free, so its golden-hash screenshot gates were
+unaffected at every step — nothing to re-pin for the upgrade itself.
+
+**Prerequisite (PR #5):** the workspace `atomr` path-dep pins were bumped
+0.9.2 → 0.10.1 to match the on-disk sibling (a pure pin bump — no code changes;
+the workspace previously failed to even resolve). This unblocked compiling the
+atomr-dependent crates (host/remote/server/client) and therefore the Bevy client.
+
+### Out of scope (next, now unblocked)
+
+The Rec 1 GPU raymarcher (consuming the `DagBrick::to_gpu()` buffers from Phase
+20.1) and the Rec 2 rapier physics integration (native voxel colliders) — both
+previously gated on this upgrade.
