@@ -107,6 +107,6 @@ fn sync_sky_dome(
 }
 
 fn color_to_vec4(c: Color) -> Vec4 {
-    let lin = c.as_linear_rgba_f32();
+    let lin = c.to_linear().to_f32_array();
     Vec4::new(lin[0], lin[1], lin[2], lin[3])
 }

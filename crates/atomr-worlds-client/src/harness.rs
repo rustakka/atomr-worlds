@@ -374,7 +374,7 @@ pub struct HarnessPlugin;
 impl Plugin for HarnessPlugin {
     fn build(&self, app: &mut App) {
         let cfg = app
-            .world
+            .world()
             .get_resource::<HarnessConfig>()
             .expect("HarnessConfig must be inserted before HarnessPlugin is added");
         let deadline = cfg.scenario.last_event_frame() + 600;
@@ -752,7 +752,7 @@ fn drive_exit(
 
     let grace_until = cfg.scenario.last_event_frame() + 5;
     if state.exit_requested && now >= grace_until {
-        exit_writer.send(AppExit);
+        exit_writer.send(AppExit::Success);
         return;
     }
 
@@ -761,6 +761,6 @@ fn drive_exit(
             "HARNESS_WARNING deadline frame {} exceeded; forcing exit",
             state.deadline
         );
-        exit_writer.send(AppExit);
+        exit_writer.send(AppExit::Success);
     }
 }

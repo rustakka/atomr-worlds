@@ -14,10 +14,10 @@ pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
-        if !app.world.contains_resource::<RenderConfig>() {
+        if !app.world().contains_resource::<RenderConfig>() {
             app.insert_resource(RenderConfig::default());
         }
-        if !app.world.contains_resource::<WorldTime>() {
+        if !app.world().contains_resource::<WorldTime>() {
             app.insert_resource(WorldTime::default());
         }
         // The voxel material is always registered (so a runtime

@@ -668,9 +668,9 @@ impl FogStrategy for BiomeBlendedFog {
             }
             _ => self.density,
         };
-        let sky_lin = sky_horizon.as_linear_rgba_f32();
+        let sky_lin = sky_horizon.to_linear().to_f32_array();
         let m = self.mix.clamp(0.0, 1.0);
-        let tinted = Color::rgb_linear(
+        let tinted = Color::linear_rgb(
             sky_lin[0] * (1.0 - m) + self.biome_tint[0] * m,
             sky_lin[1] * (1.0 - m) + self.biome_tint[1] * m,
             sky_lin[2] * (1.0 - m) + self.biome_tint[2] * m,
@@ -1167,12 +1167,12 @@ fn lerp_keyframes(
 }
 
 fn color_to_vec3(c: Color) -> Vec3 {
-    let lin = c.as_linear_rgba_f32();
+    let lin = c.to_linear().to_f32_array();
     Vec3::new(lin[0], lin[1], lin[2])
 }
 
 fn vec3_to_color(v: Vec3) -> Color {
-    Color::rgb_linear(v.x, v.y, v.z)
+    Color::linear_rgb(v.x, v.y, v.z)
 }
 
 #[cfg(test)]
@@ -1228,7 +1228,7 @@ mod tests {
         let s = fog.fog_settings(sun, horizon, Some((400.0, 1024.0)), None);
         // Without a biome bias (tint == 0.5,0.5,0.5, mix=0.3) the result
         // should stay close to the horizon color.
-        let rgba = s.color.as_linear_rgba_f32();
+        let rgba = s.color.to_linear().to_f32_array();
         assert!(rgba[0] >= 0.0 && rgba[0] <= 1.0);
         assert!(rgba[1] >= 0.0 && rgba[1] <= 1.0);
         assert!(rgba[2] >= 0.0 && rgba[2] <= 1.0);
@@ -1238,9 +1238,9 @@ mod tests {
     fn biome_blended_fog_biases_color_when_biome_tint_set() {
         let fog = BiomeBlendedFog { density: 0.002, biome_tint: [0.1, 0.6, 0.2], mix: 0.8 };
         let sun = SunState::default();
-        let horizon = Color::rgb_linear(0.9, 0.9, 0.9);
+        let horizon = Color::linear_rgb(0.9, 0.9, 0.9);
         let s = fog.fog_settings(sun, horizon, None, None);
-        let rgba = s.color.as_linear_rgba_f32();
+        let rgba = s.color.to_linear().to_f32_array();
         // mix=0.8 toward biome (0.1, 0.6, 0.2): red should drop well below 0.9.
         assert!(rgba[0] < 0.5, "red should bend toward biome low: {}", rgba[0]);
         assert!(rgba[1] < 0.8 && rgba[1] > 0.4, "green should bend toward biome: {}", rgba[1]);

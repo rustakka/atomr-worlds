@@ -24,6 +24,7 @@ use bevy::render::render_resource::{
     TextureDimension, TextureFormat, TextureUsages,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
+use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderApp, RenderSet};
 
 /// Pending capture request: a (frame_counter, png_path) pair. Pushed by
@@ -93,7 +94,7 @@ impl Plugin for OffscreenCapturePlugin {
             | TextureUsages::TEXTURE_BINDING
             | TextureUsages::RENDER_ATTACHMENT;
         let mut images = app
-            .world
+            .world_mut()
             .get_resource_mut::<Assets<Image>>()
             .expect("Assets<Image> not initialised — RenderPlugin must run first");
         let handle = images.add(image);
@@ -118,7 +119,7 @@ fn image_copy_system(
     target: Option<Res<OffscreenTarget>>,
     queue_handle: Res<CaptureQueueHandle>,
     outcomes: Res<CaptureOutcomes>,
-    gpu_images: Res<RenderAssets<Image>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
 ) {
@@ -142,7 +143,7 @@ fn image_copy_system(
         });
     };
 
-    let Some(gpu_image) = gpu_images.get(&target.image) else {
+    let Some(gpu_image) = gpu_images.get(target.image.id()) else {
         push_outcome(false, Some("GPU image not yet prepared".into()));
         return;
     };
