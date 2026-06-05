@@ -8,6 +8,7 @@
 
 pub mod brick;
 pub mod codec;
+pub mod dag;
 pub mod error;
 pub mod light;
 pub mod octree;
@@ -17,6 +18,7 @@ pub mod voxel;
 
 pub use brick::{Brick, BrickDecodeError, BRICK_EDGE, BRICK_LEN};
 pub use codec::{BrickCodec, CodecError, PaletteRle, RawU16, Rle, Zlib};
+pub use dag::DagBrick;
 pub use error::VoxelError;
 pub use light::{LightOverlay, LIGHT_OVERLAY_BYTES};
 pub use octree::{InternalNode, NodeId, NodeKind, Octree, OCTREE_NULL};
