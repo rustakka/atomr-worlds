@@ -10,11 +10,12 @@ use atomr_worlds_core::coord::DVec3;
 use atomr_worlds_core::shape::WorldShape;
 use atomr_worlds_view::{Framebuffer, MaterialPalette, Mesh, SliceCamera, SliceConfig, SliceTable};
 use atomr_worlds_voxel::Brick;
-use bevy::core_pipeline::bloom::Bloom;
+use bevy::post_process::bloom::Bloom;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::pbr::{CascadeShadowConfig, DistanceFog};
+use bevy::light::CascadeShadowConfig;
+use bevy::pbr::DistanceFog;
 use bevy::prelude::*;
-use bevy::render::camera::Exposure;
+use bevy::camera::Exposure;
 
 use crate::modes::fp::CameraMotionState;
 use crate::world_stream::LodLadder;

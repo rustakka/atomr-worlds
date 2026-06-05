@@ -31,7 +31,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/cognect/atomr-worlds"
 homepage = "https://github.com/cognect/atomr-worlds"
@@ -107,7 +107,7 @@ pyo3-async-runtimes = { version = "0.22", features = ["tokio-runtime", "attribut
 
 # Client/server CLI + Bevy (Phase 15)
 clap = { version = "4", features = ["derive"] }
-bevy = { version = "0.16", default-features = false, features = [
+bevy = { version = "0.17", default-features = false, features = [
     "bevy_winit",
     "bevy_render",
     "bevy_core_pipeline",
@@ -120,5 +120,7 @@ bevy = { version = "0.16", default-features = false, features = [
     "default_font",
     "tonemapping_luts",
     "ktx2",
-    "zstd",
+    "zstd_rust",
+    # Bevy 0.17: Bloom moved from core_pipeline into bevy_post_process.
+    "bevy_post_process",
 ] }

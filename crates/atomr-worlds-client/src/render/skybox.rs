@@ -29,7 +29,7 @@ use atomr_worlds_view::{greedy_mesh_by_material, Mesh as ViewMesh, WorldQuery};
 use atomr_worlds_voxel::{Brick, BRICK_EDGE};
 use bevy::core_pipeline::Skybox as BevySkybox;
 use bevy::prelude::*;
-use bevy::render::render_asset::RenderAssetUsages;
+use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };

@@ -13,9 +13,9 @@
 //! - Visibility is toggled in `sync_sky_dome` instead of spawn/despawn
 //!   so strategy swaps don't re-build the asset every frame.
 
-use bevy::pbr::{NotShadowCaster, NotShadowReceiver};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
-use bevy::render::view::NoFrustumCulling;
+use bevy::camera::visibility::NoFrustumCulling;
 
 use super::config::RenderConfig;
 use super::materials::SkyDomeMaterial;
@@ -52,7 +52,7 @@ fn ensure_sky_dome(
     if !dome_q.is_empty() {
         return;
     }
-    let Ok(camera) = cam_q.get_single() else { return };
+    let Ok(camera) = cam_q.single() else { return };
 
     let sphere = Mesh::from(Sphere::new(800.0).mesh().uv(32, 16));
     let mesh = meshes.add(sphere);
