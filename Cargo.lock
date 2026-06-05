@@ -220,15 +220,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arc-swap"
-version = "1.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -347,59 +338,26 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "atomr"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "atomr-config",
  "atomr-core",
  "atomr-macros",
-]
-
-[[package]]
-name = "atomr-accel"
-version = "0.10.0"
-dependencies = [
- "async-trait",
- "atomr-config",
- "atomr-core",
- "thiserror 1.0.69",
- "tokio",
 ]
 
 [[package]]
 name = "atomr-accel-cuda"
 version = "0.10.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "atomr-accel",
- "atomr-config",
- "atomr-core",
- "atomr-macros",
- "bincode 1.3.3",
- "bitflags 2.11.1",
- "cudarc",
- "dirs",
- "futures",
- "futures-util",
- "libloading 0.9.0",
- "lru",
- "parking_lot",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tracing",
-]
 
 [[package]]
 name = "atomr-cluster"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "atomr-config",
  "atomr-core",
  "atomr-remote",
- "bincode 2.0.1",
+ "bincode",
  "dashmap",
  "parking_lot",
  "serde",
@@ -411,14 +369,14 @@ dependencies = [
 
 [[package]]
 name = "atomr-cluster-sharding"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "atomr-cluster",
  "atomr-core",
  "atomr-distributed-data",
  "atomr-persistence",
- "bincode 2.0.1",
+ "bincode",
  "parking_lot",
  "serde",
  "thiserror 1.0.69",
@@ -428,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "atomr-config"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -438,11 +396,11 @@ dependencies = [
 
 [[package]]
 name = "atomr-core"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "atomr-config",
- "bincode 2.0.1",
+ "bincode",
  "bytes",
  "dashmap",
  "flume",
@@ -462,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "atomr-distributed-data"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "atomr-cluster",
@@ -475,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "atomr-macros"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -484,11 +442,12 @@ dependencies = [
 
 [[package]]
 name = "atomr-persistence"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "atomr-core",
  "parking_lot",
+ "rand_chacha 0.3.1",
  "serde",
  "thiserror 1.0.69",
  "tokio",
@@ -496,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "atomr-persistence-query"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "atomr-core",
@@ -506,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "atomr-persistence-sql"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "atomr-persistence",
@@ -514,6 +473,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
@@ -522,12 +482,12 @@ dependencies = [
 
 [[package]]
 name = "atomr-remote"
-version = "0.9.2"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "atomr-config",
  "atomr-core",
- "bincode 2.0.1",
+ "bincode",
  "bytes",
  "dashmap",
  "futures",
@@ -584,7 +544,7 @@ dependencies = [
 name = "atomr-worlds-core"
 version = "0.1.0"
 dependencies = [
- "bincode 2.0.1",
+ "bincode",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -637,10 +597,19 @@ dependencies = [
  "atomr-persistence-sql",
  "atomr-worlds-core",
  "atomr-worlds-voxel",
- "bincode 2.0.1",
+ "bincode",
  "serde",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "atomr-worlds-physics"
+version = "0.1.0"
+dependencies = [
+ "atomr-worlds-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -649,7 +618,7 @@ version = "0.1.0"
 dependencies = [
  "atomr-worlds-core",
  "atomr-worlds-voxel",
- "bincode 2.0.1",
+ "bincode",
  "bytes",
  "serde",
  "thiserror 1.0.69",
@@ -685,7 +654,7 @@ dependencies = [
  "atomr-worlds-host",
  "atomr-worlds-proto",
  "atomr-worlds-voxel",
- "bincode 2.0.1",
+ "bincode",
  "serde",
  "thiserror 1.0.69",
  "tokio",
@@ -721,7 +690,7 @@ dependencies = [
  "atomr-worlds-host",
  "atomr-worlds-proto",
  "atomr-worlds-voxel",
- "bincode 2.0.1",
+ "bincode",
  "bytes",
  "proptest",
  "serde_json",
@@ -1439,15 +1408,6 @@ dependencies = [
 
 [[package]]
 name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "bincode"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
@@ -2140,27 +2100,6 @@ dependencies = [
  "const-oid",
  "crypto-common",
  "subtle",
-]
-
-[[package]]
-name = "dirs"
-version = "5.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c45a9d03d6676652bcb5e724c7e988de1acad23a711b5217ab9cbecbec2225"
-dependencies = [
- "dirs-sys",
-]
-
-[[package]]
-name = "dirs-sys"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "520f05a5cbd335fae5a99ff7a6ab8627577660ee5cfd6a94a6a929b52ff0321c"
-dependencies = [
- "libc",
- "option-ext",
- "redox_users",
- "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -3244,15 +3183,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
-name = "lru"
-version = "0.12.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
-dependencies = [
- "hashbrown 0.15.5",
-]
-
-[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3587,12 +3517,6 @@ name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
-
-[[package]]
-name = "option-ext"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "orbclient"
@@ -4142,17 +4066,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4666a1a60d8412eab19d94f6d13dcc9cea0a5ef4fdf6a5db306537413c661b1b"
 dependencies = [
  "bitflags 2.11.1",
-]
-
-[[package]]
-name = "redox_users"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
-dependencies = [
- "getrandom 0.2.17",
- "libredox",
- "thiserror 1.0.69",
 ]
 
 [[package]]
