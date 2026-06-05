@@ -1945,8 +1945,8 @@ the per-frame *new-work* spike that motivated Phase 19.2.
 
 ## Phase 20 *(in progress)* — Advanced Voxel Architectures: Phase-1 foundations
 
-The first slice of the *Advanced Voxel Architectures* roadmap (full plan at
-`~/.claude/plans/take-a-look-at-groovy-sedgewick.md`, derived from
+The first slice of the *Advanced Voxel Architectures* roadmap (full roadmap at
+[ADVANCED_VOXEL_ARCHITECTURES.md](ADVANCED_VOXEL_ARCHITECTURES.md), derived from
 `docs/Voxel Engine Improvement Analysis.pdf`). That roadmap lands four strategic
 recommendations — SVDAG + GPU raymarching, rapier-based voxel physics, a
 multiplayer Actor-CRDT destruction sync, and a low-latency scheduler — behind a
@@ -2086,9 +2086,9 @@ unreliable debris channel, the upstream `atomr-remote` work.
 
 ## Phase 0 (Advanced Voxel Architectures) *(landed)* — Bevy 0.13 → 0.18 upgrade
 
-The foundational prerequisite for the *Advanced Voxel Architectures* roadmap (plan
-at `~/.claude/plans/take-a-look-at-groovy-sedgewick.md`). The client's GPU
-raymarcher (Rec 1) and rapier voxel colliders (Rec 2) both need a modern Bevy, so
+The foundational prerequisite for the *Advanced Voxel Architectures* roadmap (see
+[ADVANCED_VOXEL_ARCHITECTURES.md](ADVANCED_VOXEL_ARCHITECTURES.md)). The client's
+GPU raymarcher (Rec 1) and rapier voxel colliders (Rec 2) both need a modern Bevy, so
 the engine was upgraded across four major versions, **one major per PR, each
 verified with the full `cargo test --workspace` (614 passing)**:
 
