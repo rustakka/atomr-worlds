@@ -49,15 +49,16 @@ const CAPSULE_HEAD_Y: f32 = 1.5;
 
 const WALK_SPEED: f32 = 4.0;
 const SPRINT_SPEED: f32 = 12.0;
-/// Jump take-off speed (m/s). On the 1 m grid with g = -9.81 this clears a
-/// ~1.27 m apex — enough to hop a 1 m ledge.
-const JUMP_SPEED: f32 = 5.0;
-/// Descent gravity multiplier, applied while falling (`vel <= 0`). A symmetric
-/// jump tall enough to clear a 1 m ledge hangs ~1 s, which reads as floaty /
-/// low-gravity and lets you glide far over declining terrain while moving.
-/// Falling faster than you rise keeps the jump *height* (still clears the
-/// ledge) but cuts the apex hang and the long descent for an earthier feel.
-const FALL_GRAVITY_MULT: f32 = 2.5;
+/// Jump take-off speed (m/s). With [`CHARACTER_GRAVITY_SCALE`] this clears a
+/// ~1.25 m apex (enough to hop a 1 m ledge) in ~0.7 s of airtime.
+const JUMP_SPEED: f32 = 7.0;
+/// The character integrates vertical motion at this multiple of world gravity.
+/// >1 keeps the jump a brisk, *symmetric* parabola instead of floaty —
+/// WITHOUT changing world/debris gravity (`cfg.gravity` stays Earth 9.81 for
+/// falling bodies). A single uniform scale (rather than a fall-only multiplier)
+/// avoids the disjoint "float up, then slam down" feel of asymmetric gravity:
+/// the rise and fall are equally quick. ~2× ≈ 19.6 m/s².
+const CHARACTER_GRAVITY_SCALE: f32 = 2.0;
 /// Small downward bias kept while grounded so snap-to-ground stays engaged on
 /// flats and ramps (the controller clamps it to the surface).
 const GROUND_STICK: f32 = -1.0;
@@ -169,10 +170,10 @@ pub fn step_vertical(vel: f32, grounded: bool, jump: bool, dt: f32, gravity_y: f
     if grounded && vel <= 0.0 {
         return GROUND_STICK;
     }
-    // Fall faster than we rise (see FALL_GRAVITY_MULT): base gravity on the way
-    // up, multiplied on the way down (and when walking off a ledge).
-    let g = if vel <= 0.0 { gravity_y * FALL_GRAVITY_MULT } else { gravity_y };
-    vel + g * dt
+    // Brisk, symmetric arc: integrate at CHARACTER_GRAVITY_SCALE× world gravity
+    // both rising and falling (and when walking off a ledge). World/debris
+    // gravity is unchanged.
+    vel + gravity_y * CHARACTER_GRAVITY_SCALE * dt
 }
 
 /// Build the per-frame desired translation: horizontal = normalized heading ×
@@ -275,8 +276,10 @@ mod tests {
         // Grounded + jump → take-off speed.
         assert_eq!(step_vertical(GROUND_STICK, true, true, 0.016, -9.81), JUMP_SPEED);
         // Airborne + jump → ignored (no double-jump), gravity keeps applying.
+        // v = 2.0 + (-10 * SCALE) * 0.1 = 2.0 - 2.0 = 0.0 at SCALE = 2.
         let v = step_vertical(2.0, false, true, 0.1, -10.0);
-        assert!((v - 1.0).abs() < 1e-6, "airborne jump ignored: {v}");
+        let expect = 2.0 + (-10.0 * CHARACTER_GRAVITY_SCALE) * 0.1;
+        assert!((v - expect).abs() < 1e-6, "airborne jump ignored: {v}");
     }
 
     #[test]
@@ -293,35 +296,24 @@ mod tests {
         // should keep decaying under gravity, or the jump dies after one frame.
         let v = step_vertical(JUMP_SPEED, /*grounded=*/ true, /*jump=*/ false, 0.05, -9.81);
         assert!(v > 0.0 && v < JUMP_SPEED, "ascending velocity decays under gravity: {v}");
-        assert!((v - (JUMP_SPEED - 9.81 * 0.05)).abs() < 1e-5);
+        assert!((v - (JUMP_SPEED - 9.81 * CHARACTER_GRAVITY_SCALE * 0.05)).abs() < 1e-5);
     }
 
     #[test]
-    fn airborne_accumulates_gravity_on_ascent() {
-        // Ascending (vel > 0) integrates base gravity, unaffected by the fall
-        // multiplier.
-        let v1 = step_vertical(5.0, false, false, 0.1, -10.0);
-        assert!((v1 - 4.0).abs() < 1e-6);
-        let v2 = step_vertical(v1, false, false, 0.1, -10.0);
-        assert!((v2 - 3.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn falls_faster_than_it_rises() {
+    fn gravity_is_symmetric_and_scaled() {
+        // Rising and falling integrate the SAME (scaled) gravity — no asymmetry,
+        // so the arc is a clean parabola with no "float up / slam down" split.
         let g = -10.0;
         let dt = 0.1;
-        // Decelerating on the way up: base gravity (Δv = g·dt = -1.0).
-        let up = step_vertical(2.0, false, false, dt, g);
-        let ascent_delta = 2.0 - up;
-        assert!((ascent_delta - 1.0).abs() < 1e-6, "ascent Δv = {ascent_delta}");
-        // Accelerating on the way down: multiplied gravity (Δv = g·mult·dt).
-        let down = step_vertical(-2.0, false, false, dt, g);
-        let descent_delta = -2.0 - down;
-        assert!(
-            (descent_delta - 1.0 * FALL_GRAVITY_MULT).abs() < 1e-6,
-            "descent Δv = {descent_delta}"
-        );
-        assert!(descent_delta > ascent_delta, "fall must be faster than rise");
+        let step = (g * CHARACTER_GRAVITY_SCALE) * dt; // = -2.0 at SCALE = 2
+        let up = step_vertical(3.0, false, false, dt, g); // ascending
+        assert!((up - (3.0 + step)).abs() < 1e-6, "ascent: {up}");
+        let down = step_vertical(-3.0, false, false, dt, g); // descending
+        assert!((down - (-3.0 + step)).abs() < 1e-6, "descent: {down}");
+        // Same Δv magnitude up and down.
+        assert!(((3.0 - up) - (-3.0 - down)).abs() < 1e-6, "symmetric Δv");
+        // And it's heavier than world gravity (snappier than 1×).
+        assert!(step < g * dt, "scaled gravity exceeds world gravity");
     }
 
     #[test]
@@ -336,7 +328,9 @@ mod tests {
             h += v * dt;
             v = step_vertical(v, false, false, dt, g);
         }
-        let analytic = JUMP_SPEED * JUMP_SPEED / (2.0 * -g);
+        // Apex = v² / (2·g_eff), where g_eff = world gravity × the character scale.
+        let g_eff = -g * CHARACTER_GRAVITY_SCALE;
+        let analytic = JUMP_SPEED * JUMP_SPEED / (2.0 * g_eff);
         assert!((h - analytic).abs() < 0.05, "apex {h} vs analytic {analytic}");
     }
 
