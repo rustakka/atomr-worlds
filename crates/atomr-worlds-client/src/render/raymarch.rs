@@ -56,9 +56,13 @@ pub enum RaymarchShadingTier {
     /// fraction of the shader cost.
     #[default]
     Lambert,
-    /// Richer local PBR-ish shading (Lambert + palette roughness/metallic/
-    /// emissive). Structured for future expansion (AO, soft shadows); today
-    /// it falls back to an enhanced Lambert inside the shader.
+    /// Physically-based shading: Cook-Torrance GGX specular driven by the
+    /// palette's `perceptual_roughness`/`metallic`, ambient occlusion from local
+    /// DAG occupancy, and a brick-local sun self-shadow — over the same ambient
+    /// floor and normalized-sun-hue regime as [`Lambert`](Self::Lambert), plus
+    /// palette emissive. AO and shadows are brick-local (cross-brick occlusion
+    /// needs a top-level acceleration structure, deferred). The CPU twin is
+    /// `atomr_worlds_view::RaymarchTier::Pbr`.
     Pbr,
 }
 

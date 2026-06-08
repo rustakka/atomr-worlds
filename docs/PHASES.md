@@ -2182,3 +2182,51 @@ region cap means only locally-bounded fractures are detected; and the Rec 4
 multiplayer wiring (`proto::fracture` into `WorldRequest`/`WorldEvent` + the
 HLC-LWW overlay) — debris here is purely client-side off the already-journaled
 carve, so it needs none of the fracture protocol yet.
+
+## Phase 20.4 *(landed)* — Rec 1: raymarcher PBR shading tier
+
+Finishes the GPU DAG raymarcher's third shading tier. `--raymarch-tier pbr` was a
+stub (Lambert + emissive); it is now a real physically-based model, completing the
+"pluggable shading tiers (unlit / Lambert / full-PBR)" intent. Rendering-only —
+the determinism contract and all buffer plumbing are untouched (the palette
+storage buffer already carried `(perceptual_roughness, metallic)` + `emissive`).
+
+**Shading (`voxel_raymarch.wgsl` `shade()` TIER_PBR branch):**
+- **Cook-Torrance GGX specular** from the palette's roughness/metallic —
+  GGX NDF + Smith–Schlick geometry + Schlick Fresnel, `F0 = mix(0.04, base,
+  metallic)`, diffuse metal-suppressed by `(1 - metallic)`.
+- **Ambient occlusion** from local DAG occupancy — the 8-neighbour ring (in the
+  lit face's tangent plane) around the air cell in front of the hit, sampled via
+  the existing `dag_lookup`; modulates the ambient term (the raymarch analogue of
+  the mesh path's baked per-vertex AO).
+- **Brick-local sun self-shadow** — a bounded point-march toward the sun via
+  `dag_lookup`; attenuates the direct (diffuse + specular) term under overhangs.
+- Stays in the Lambert tier's exposure regime (normalized sun **hue** + fixed
+  ambient floor, no raw illuminance) so switching tiers is not a brightness jump
+  and nothing blows out before tonemapping. AO/shadows are **brick-local** only
+  (cross-brick occlusion needs a top-level acceleration structure — deferred).
+
+**CPU twin / tests.** The mirror `atomr_worlds_view::render_raymarch` gains a
+`RaymarchTier::Pbr` arm + a `material_pbr` table (the PBR analogue of
+`material_color`, mirroring the client `HardcodedPalette`), reusing the already-
+mirrored `gpu_get` (AO) and the same point-march (shadow). Shading is hash-exempt
+(the golden still pins `Unlit`); the twin exists so the new math is testable
+deterministically.
+
+### Verification
+
+`cargo test -p atomr-worlds-view` — 4 new behavioural property tests (AO darkens
+an enclosed corner to 0.30; an overhang self-shadows to 0; a smoother material
+out-shines a rough one at the mirror angle; `Pbr` pixels differ from `Lambert`),
+plus the unchanged determinism golden. `cargo test -p atomr-worlds-client` green
+(raymarch directed checks). **Harness visual gate**
+(`harness/scenes/voxel_raymarch.toml`, run per tier): the WGSL compiles + runs on
+the GPU, PBR composites identically to Lambert/mesh (same silhouettes + depth) and
+stays in-regime (no blowout); a pixel diff confirms the tier is live in the real
+pipeline (~98–99% of pixels differ from Lambert, max channel delta ~100).
+
+### Out of scope (deferred follow-ups)
+
+Cross-brick AO and cross-brick shadows (the top-level acceleration structure / the
+named single-pass-compute lever); image-based / specular ambient (IBL); per-light
+clustered lighting (the tier uses only the first directional light, by design).
