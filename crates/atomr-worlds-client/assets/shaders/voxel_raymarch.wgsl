@@ -202,9 +202,14 @@ fn fragment(in: Varyings) -> RaymarchOutput {
     // Slab-intersect the ray against the occupancy AABB [amin, amax+1] (tighter
     // than the full [0, edge]^3 cube — skips the brick's empty rim). The DDA
     // still indexes cells in [0, edge); the tight slab only moves the entry t.
-    let pad = vec3<f32>(PROXY_PAD);
-    let amin = unpack_aabb(dag_meta.aabb_min) - pad;
-    let amax = unpack_aabb(dag_meta.aabb_max) + vec3<f32>(1.0) + pad;
+    // NB: the DDA slab uses the TIGHT occupancy AABB (no PROXY_PAD). The pad
+    // lives only in the vertex stage, where it grows the rasterized proxy so
+    // neighbours overlap and close seam cracks. Padding the slab here too made
+    // a ray entering the half-voxel rim above a brick-top-boundary voxel
+    // (cell == edge-1) clamp onto that voxel and register the hit at the padded
+    // entry t — rendering a half-voxel "lip" on top of the surface.
+    let amin = unpack_aabb(dag_meta.aabb_min);
+    let amax = unpack_aabb(dag_meta.aabb_max) + vec3<f32>(1.0);
     let inv_dir = 1.0 / dir;                       // inf for axis-parallel rays (handled by min/max)
     let ta = (amin - cam_local) * inv_dir;
     let tb = (amax - cam_local) * inv_dir;
