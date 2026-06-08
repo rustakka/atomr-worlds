@@ -156,7 +156,11 @@ pub fn step_vertical(vel: f32, grounded: bool, jump: bool, dt: f32, gravity_y: f
     if jump && grounded {
         return JUMP_SPEED;
     }
-    if grounded {
+    // Only re-stick to the ground when at rest or descending. During the early
+    // ascent of a jump the capsule has barely left the surface, so rapier still
+    // reports `grounded` — clamping there would cancel the jump after one frame.
+    // While `vel > 0` we keep integrating gravity so the arc plays out.
+    if grounded && vel <= 0.0 {
         return GROUND_STICK;
     }
     vel + gravity_y * dt
@@ -267,8 +271,20 @@ mod tests {
     }
 
     #[test]
-    fn grounded_holds_ground_stick() {
-        assert_eq!(step_vertical(123.0, true, false, 0.016, -9.81), GROUND_STICK);
+    fn grounded_at_rest_holds_ground_stick() {
+        // At rest / descending on the ground → re-stick.
+        assert_eq!(step_vertical(GROUND_STICK, true, false, 0.016, -9.81), GROUND_STICK);
+        assert_eq!(step_vertical(-3.0, true, false, 0.016, -9.81), GROUND_STICK);
+    }
+
+    #[test]
+    fn grounded_but_ascending_keeps_jump_alive() {
+        // Right after takeoff the capsule barely cleared the surface, so rapier
+        // still reports grounded. The rising velocity must NOT be clamped — it
+        // should keep decaying under gravity, or the jump dies after one frame.
+        let v = step_vertical(JUMP_SPEED, /*grounded=*/ true, /*jump=*/ false, 0.05, -9.81);
+        assert!(v > 0.0 && v < JUMP_SPEED, "ascending velocity decays under gravity: {v}");
+        assert!((v - (JUMP_SPEED - 9.81 * 0.05)).abs() < 1e-5);
     }
 
     #[test]
