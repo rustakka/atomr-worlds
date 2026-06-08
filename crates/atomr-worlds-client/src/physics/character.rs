@@ -52,6 +52,12 @@ const SPRINT_SPEED: f32 = 12.0;
 /// Jump take-off speed (m/s). On the 1 m grid with g = -9.81 this clears a
 /// ~1.27 m apex — enough to hop a 1 m ledge.
 const JUMP_SPEED: f32 = 5.0;
+/// Descent gravity multiplier, applied while falling (`vel <= 0`). A symmetric
+/// jump tall enough to clear a 1 m ledge hangs ~1 s, which reads as floaty /
+/// low-gravity and lets you glide far over declining terrain while moving.
+/// Falling faster than you rise keeps the jump *height* (still clears the
+/// ledge) but cuts the apex hang and the long descent for an earthier feel.
+const FALL_GRAVITY_MULT: f32 = 2.5;
 /// Small downward bias kept while grounded so snap-to-ground stays engaged on
 /// flats and ramps (the controller clamps it to the surface).
 const GROUND_STICK: f32 = -1.0;
@@ -163,7 +169,10 @@ pub fn step_vertical(vel: f32, grounded: bool, jump: bool, dt: f32, gravity_y: f
     if grounded && vel <= 0.0 {
         return GROUND_STICK;
     }
-    vel + gravity_y * dt
+    // Fall faster than we rise (see FALL_GRAVITY_MULT): base gravity on the way
+    // up, multiplied on the way down (and when walking off a ledge).
+    let g = if vel <= 0.0 { gravity_y * FALL_GRAVITY_MULT } else { gravity_y };
+    vel + g * dt
 }
 
 /// Build the per-frame desired translation: horizontal = normalized heading ×
@@ -288,12 +297,31 @@ mod tests {
     }
 
     #[test]
-    fn airborne_accumulates_gravity() {
-        let v0 = 0.0;
-        let v1 = step_vertical(v0, false, false, 0.1, -10.0);
-        assert!((v1 - (-1.0)).abs() < 1e-6);
+    fn airborne_accumulates_gravity_on_ascent() {
+        // Ascending (vel > 0) integrates base gravity, unaffected by the fall
+        // multiplier.
+        let v1 = step_vertical(5.0, false, false, 0.1, -10.0);
+        assert!((v1 - 4.0).abs() < 1e-6);
         let v2 = step_vertical(v1, false, false, 0.1, -10.0);
-        assert!((v2 - (-2.0)).abs() < 1e-6);
+        assert!((v2 - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn falls_faster_than_it_rises() {
+        let g = -10.0;
+        let dt = 0.1;
+        // Decelerating on the way up: base gravity (Δv = g·dt = -1.0).
+        let up = step_vertical(2.0, false, false, dt, g);
+        let ascent_delta = 2.0 - up;
+        assert!((ascent_delta - 1.0).abs() < 1e-6, "ascent Δv = {ascent_delta}");
+        // Accelerating on the way down: multiplied gravity (Δv = g·mult·dt).
+        let down = step_vertical(-2.0, false, false, dt, g);
+        let descent_delta = -2.0 - down;
+        assert!(
+            (descent_delta - 1.0 * FALL_GRAVITY_MULT).abs() < 1e-6,
+            "descent Δv = {descent_delta}"
+        );
+        assert!(descent_delta > ascent_delta, "fall must be faster than rise");
     }
 
     #[test]
