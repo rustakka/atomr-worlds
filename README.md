@@ -157,7 +157,7 @@ interactive renderer, not a stub. It implements:
 
 | mode       | hotkey | pipeline                                                                                                |
 | ---------- | ------ | ------------------------------------------------------------------------------------------------------- |
-| `fp`       | `1`    | First-person walk. WASD + mouse-look, sprint, crouch, click-to-grab.                                    |
+| `fp`       | `1`    | First-person walk. WASD + mouse-look, sprint, crouch, jump, click-to-grab; double-tap `Space` for collidable creative flight. |
 | `tp`       | `2`    | Third-person chase. Orbiting camera anchored to the FP walk position.                                   |
 | `slice`    | `3`    | Dwarf-Fortress horizontal slice. Per-column raster from a derived 2D index.                             |
 | `rts`      | `4`    | RTS oblique-orthographic. Sub-screen raster with strategic readability.                                 |
@@ -509,9 +509,12 @@ cargo run -p atomr-worlds-client --release -- \
 ```
 
 Controls: `WASD` to move, mouse-look once the cursor is grabbed (`Esc` releases),
-`1..=5` to pick a view mode (`fp` / `tp` / `slice` / `rts` / `overview`), `Tab`
-cycles. Slice/RTS/overview have per-mode hotkeys — see
-[docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md).
+`Space` to jump, `Shift` to sprint, `C` to crouch. **Double-tap `Space` toggles
+creative flight** (collision still enforced — you won't clip through terrain):
+while flying, `Space` ascends, `Left Ctrl` descends, `Shift` flies faster;
+double-tap `Space` again to drop out. `1..=5` picks a view mode (`fp` / `tp` /
+`slice` / `rts` / `overview`), `Tab` cycles. Slice/RTS/overview have per-mode
+hotkeys — see [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md).
 
 ### Screenshot test harness
 

@@ -69,6 +69,16 @@ const SNAP_TO_GROUND_M: f32 = 0.3;
 /// (mirrors the debris kill-plane).
 const FALL_KILL_M: f32 = 64.0;
 
+// --- Creative flight (double-tap Space) -------------------------------------
+/// Two Space presses within this window toggle fly mode (Minecraft-style).
+const DOUBLE_TAP_WINDOW_S: f32 = 0.30;
+/// Horizontal fly speed (m/s) and its sprint (Shift) multiple.
+const FLY_SPEED: f32 = 8.0;
+const FLY_SPRINT_SPEED: f32 = 20.0;
+/// Vertical fly speed (m/s, Space = up / Left Ctrl = down) and its sprint multiple.
+const FLY_VERTICAL_SPEED: f32 = 6.0;
+const FLY_SPRINT_VERTICAL_SPEED: f32 = 16.0;
+
 /// Marker on the single capsule entity representing the player.
 #[derive(Component)]
 pub struct Player;
@@ -84,6 +94,13 @@ pub struct CharacterState {
     pub grounded: bool,
     /// Y the player spawned at — the kill-plane respawn target.
     pub spawn_y: f32,
+    /// Creative-flight toggle (double-tap Space). When set, gravity is replaced
+    /// by direct up/down control, but rapier still resolves collisions — you
+    /// can't fly through terrain.
+    pub flying: bool,
+    /// Time (`Time::elapsed_secs`) of the last Space press, for double-tap
+    /// detection. `None` until the first press / after a pair is consumed.
+    pub last_space_tap: Option<f32>,
 }
 
 /// The input seam. [`crate::modes::fp::world_walk_input`] writes the WASD
@@ -155,6 +172,8 @@ pub fn spawn_player(
     state.spawn_y = translation.y;
     state.vertical_velocity = 0.0;
     state.grounded = false;
+    state.flying = false;
+    state.last_space_tap = None;
 }
 
 /// Advance the vertical-velocity integrator one tick. Pure so it can be unit
@@ -183,8 +202,34 @@ pub fn desired_translation(move_world: Vec3, vertical_velocity: f32, speed: f32,
     Vec3::new(horizontal.x, vertical_velocity * dt, horizontal.z)
 }
 
-/// Set `controller.translation` from gravity + the input intent.
-/// Ordered `.before(PhysicsSet::SyncBackend)` so rapier consumes it this frame.
+/// Register a Space press for double-tap detection. Returns the new
+/// `last_space_tap` bookkeeping value and whether this press completed a
+/// double-tap (two presses within `window`). A completed pair is *consumed*
+/// (returns `None`) so a third quick press starts a fresh pair rather than
+/// toggling again. Pure / testable.
+pub fn register_space_tap(last: Option<f32>, now: f32, window: f32) -> (Option<f32>, bool) {
+    match last {
+        Some(t) if now - t <= window => (None, true),
+        _ => (Some(now), false),
+    }
+}
+
+/// Fly-mode vertical velocity (m/s) from the up/down keys: `+` up, `-` down,
+/// `0` if neither or both. Sprint flies faster. Pure / testable.
+pub fn fly_vertical_velocity(up: bool, down: bool, sprint: bool) -> f32 {
+    let dir = (up as i32 - down as i32) as f32;
+    let speed = if sprint { FLY_SPRINT_VERTICAL_SPEED } else { FLY_VERTICAL_SPEED };
+    dir * speed
+}
+
+/// Set `controller.translation` from gravity (or creative flight) + the input
+/// intent. Ordered `.before(PhysicsSet::SyncBackend)` so rapier consumes it this
+/// frame. Either way the move goes through the controller, so terrain collision
+/// is always enforced — fly mode just removes gravity and adds up/down control.
+///
+/// **Fly mode (double-tap Space):** while `state.flying`, Space = ascend,
+/// Left Ctrl = descend, Shift = faster. A single Space tap still jumps when
+/// walking; a quick second tap toggles flight.
 pub fn drive_character(
     cfg: Res<PhysicsConfig>,
     mode: Res<ViewMode>,
@@ -198,20 +243,47 @@ pub fn drive_character(
         return;
     }
     let dt = time.delta_secs().min(0.05);
-    let jump = keys.just_pressed(KeyCode::Space);
-    state.vertical_velocity =
-        step_vertical(state.vertical_velocity, state.grounded, jump, dt, cfg.gravity.y);
 
-    let speed = if intent.sprint { SPRINT_SPEED } else { WALK_SPEED };
-    let translation = desired_translation(intent.move_world, state.vertical_velocity, speed, dt);
+    // Double-tap Space toggles creative flight (before the jump/gravity read so
+    // the toggling frame doesn't also jump — the fly branch overrides vertical).
+    if keys.just_pressed(KeyCode::Space) {
+        let (next, toggled) = register_space_tap(state.last_space_tap, time.elapsed_secs(), DOUBLE_TAP_WINDOW_S);
+        state.last_space_tap = next;
+        if toggled {
+            state.flying = !state.flying;
+            state.vertical_velocity = 0.0;
+            tracing::info!(target = "character", flying = state.flying, "fly mode toggled");
+        }
+    }
 
-    if let Ok(mut controller) = q.single_mut() {
+    let speed;
+    let snap: Option<CharacterLength>;
+    if state.flying {
+        // No gravity: vertical comes straight from the up/down keys. Collisions
+        // are still resolved by the controller, and snap-to-ground is off so the
+        // capsule isn't yanked back down while hovering.
+        let up = keys.pressed(KeyCode::Space);
+        let down = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+        state.vertical_velocity = fly_vertical_velocity(up, down, intent.sprint);
+        speed = if intent.sprint { FLY_SPRINT_SPEED } else { FLY_SPEED };
+        snap = None;
+    } else {
+        let jump = keys.just_pressed(KeyCode::Space);
+        state.vertical_velocity =
+            step_vertical(state.vertical_velocity, state.grounded, jump, dt, cfg.gravity.y);
+        speed = if intent.sprint { SPRINT_SPEED } else { WALK_SPEED };
         // Disable snap while ascending so the jump isn't immediately cancelled.
-        controller.snap_to_ground = if state.vertical_velocity > 0.0 {
+        snap = if state.vertical_velocity > 0.0 {
             None
         } else {
             Some(CharacterLength::Absolute(SNAP_TO_GROUND_M))
         };
+    }
+
+    let translation = desired_translation(intent.move_world, state.vertical_velocity, speed, dt);
+
+    if let Ok(mut controller) = q.single_mut() {
+        controller.snap_to_ground = snap;
         controller.translation = Some(translation);
     }
 }
@@ -332,6 +404,44 @@ mod tests {
         let g_eff = -g * CHARACTER_GRAVITY_SCALE;
         let analytic = JUMP_SPEED * JUMP_SPEED / (2.0 * g_eff);
         assert!((h - analytic).abs() < 0.05, "apex {h} vs analytic {analytic}");
+    }
+
+    #[test]
+    fn double_tap_toggles_within_window() {
+        let w = DOUBLE_TAP_WINDOW_S;
+        // First press: records the time, no toggle.
+        let (last, toggled) = register_space_tap(None, 1.00, w);
+        assert_eq!((last, toggled), (Some(1.00), false));
+        // Second press inside the window: toggle + consume (so a third quick
+        // press starts fresh instead of toggling again).
+        let (last, toggled) = register_space_tap(last, 1.00 + w * 0.5, w);
+        assert_eq!((last, toggled), (None, true));
+        // Third quick press after a consumed pair: fresh tap, no toggle.
+        let (last, toggled) = register_space_tap(last, 1.00 + w * 0.6, w);
+        assert_eq!((last, toggled), (Some(1.00 + w * 0.6), false));
+    }
+
+    #[test]
+    fn slow_double_press_does_not_toggle() {
+        let w = DOUBLE_TAP_WINDOW_S;
+        let (last, _) = register_space_tap(None, 5.0, w);
+        // Second press *outside* the window: not a double-tap; it just becomes
+        // the new "first" press.
+        let (last, toggled) = register_space_tap(last, 5.0 + w + 0.01, w);
+        assert!(!toggled, "presses too far apart must not toggle");
+        assert_eq!(last, Some(5.0 + w + 0.01));
+    }
+
+    #[test]
+    fn fly_vertical_velocity_maps_keys() {
+        // Up only → +; down only → -; neither / both → 0.
+        assert_eq!(fly_vertical_velocity(true, false, false), FLY_VERTICAL_SPEED);
+        assert_eq!(fly_vertical_velocity(false, true, false), -FLY_VERTICAL_SPEED);
+        assert_eq!(fly_vertical_velocity(false, false, false), 0.0);
+        assert_eq!(fly_vertical_velocity(true, true, false), 0.0);
+        // Sprint flies faster (and never under gravity — purely key-driven).
+        assert_eq!(fly_vertical_velocity(true, false, true), FLY_SPRINT_VERTICAL_SPEED);
+        assert!(FLY_SPRINT_VERTICAL_SPEED > FLY_VERTICAL_SPEED);
     }
 
     #[test]
