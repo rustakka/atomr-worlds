@@ -20,6 +20,8 @@ impl Plugin for PhysicsPlugin {
             return;
         }
         app.add_plugins(RapierPhysicsPlugin::<NoUserData>::default());
+        app.init_resource::<super::character::CharacterState>();
+        app.init_resource::<super::character::CharacterIntent>();
         app.add_systems(
             Update,
             (
@@ -28,6 +30,24 @@ impl Plugin for PhysicsPlugin {
                 detach_brick_colliders,
                 super::fracture::process_fracture_checks,
                 super::debris::settle_and_despawn_debris,
+                super::character::spawn_player,
+            ),
+        );
+        // Character controller: set desired movement before rapier steps, read
+        // the resolved pose back after its writeback. `drive_character` runs
+        // after the FP input system (so it reads this frame's intent) and
+        // `writeback_character` before `fp_update_motion_state` (which the FP
+        // chain runs before `fp_sync_camera`), so the camera + motion EWMAs see
+        // the resolved position the same frame.
+        app.add_systems(
+            Update,
+            (
+                super::character::drive_character
+                    .after(crate::modes::fp::world_walk_input)
+                    .before(PhysicsSet::SyncBackend),
+                super::character::writeback_character
+                    .after(PhysicsSet::Writeback)
+                    .before(crate::modes::fp::fp_update_motion_state),
             ),
         );
     }

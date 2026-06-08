@@ -81,20 +81,33 @@ impl WalkCamera {
         // forward as +Z world at yaw=0 so callers' input feels natural: a
         // forward push moves the observer in the direction the camera
         // currently faces.
-        let (sin_y, cos_y) = self.yaw.sin_cos();
-        let mx = input.move_local[0];
-        let my = input.move_local[1];
-        let mz = input.move_local[2];
-        // Right is rotated x; forward is rotated z. Up stays world-up.
-        let world_dx = (cos_y * mx + sin_y * mz) as f64;
-        let world_dy = my as f64;
-        let world_dz = (-sin_y * mx + cos_y * mz) as f64;
+        let world = self.rotate_local_to_world(input.move_local);
         let new_pos = DVec3::new(
-            self.observer.position.x + world_dx,
-            self.observer.position.y + world_dy,
-            self.observer.position.z + world_dz,
+            self.observer.position.x + world[0] as f64,
+            self.observer.position.y + world[1] as f64,
+            self.observer.position.z + world[2] as f64,
         );
         self.observer.tick(new_pos, None, dt_s);
+    }
+
+    /// Rotate a local-frame displacement (`+x = right`, `+y = up`,
+    /// `+z = forward`) into world space by the current yaw. Pulled out of
+    /// [`Self::tick`] so the free-fly path and an external character
+    /// controller share one definition of the heading convention (forward is
+    /// `+Z` world at yaw=0). Up stays world-up; pitch never tilts movement.
+    pub fn rotate_local_to_world(&self, local: [f32; 3]) -> [f32; 3] {
+        let (sin_y, cos_y) = self.yaw.sin_cos();
+        let [mx, my, mz] = local;
+        // Right is rotated x; forward is rotated z.
+        [cos_y * mx + sin_y * mz, my, -sin_y * mx + cos_y * mz]
+    }
+
+    /// Set the crouch flag directly. Used when an external driver (e.g. a
+    /// physics character controller) owns position but still wants
+    /// [`Self::camera`] to lower the eye height for the frame, without routing
+    /// a full [`WalkInput`] through [`Self::tick`].
+    pub fn set_crouch(&mut self, crouch: bool) {
+        self.crouched = crouch;
     }
 
     /// Build the [`Camera`] for the current pose. Eye sits at observer +

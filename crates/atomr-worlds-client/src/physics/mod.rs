@@ -23,6 +23,7 @@
 //!   ([`plugin::attach_brick_colliders`]).
 //! - Carve → flood-fill → falling debris ([`debris`], [`fracture`]).
 
+mod character;
 mod collider_gen;
 mod config;
 mod debris;
@@ -32,6 +33,7 @@ mod plugin;
 mod registry;
 mod strategy;
 
+pub use character::{CharacterIntent, CharacterState};
 pub use config::PhysicsConfig;
 pub use plugin::PhysicsPlugin;
 pub use registry::apply_strategy_by_name;
