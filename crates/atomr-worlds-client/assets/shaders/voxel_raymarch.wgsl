@@ -155,7 +155,109 @@ fn dag_lookup(x: u32, y: u32, z: u32) -> i32 {
     return -1;
 }
 
-fn shade(mat_id: u32, world_normal: vec3<f32>) -> vec3<f32> {
+const PI: f32 = 3.14159265359;
+
+// Fixed ambient floor (shared by Lambert + Pbr): keeps faces turned away from
+// the sun visible, and the (1 - AMBIENT) complement is the direct-light weight.
+// Both tiers stay in this regime so switching tiers is not a brightness jump.
+const AMBIENT: f32 = 0.30;
+
+// Pbr AO: how strongly local DAG occupancy darkens the ambient term. 0 = off.
+const AO_STRENGTH: f32 = 0.7;
+// Pbr self-shadow: voxel step + max steps for the brick-local sun-occlusion
+// march (32 * 0.5 = 16 = one brick edge). Half-voxel steps so axis-aligned
+// overhangs are not stepped over.
+const SHADOW_STEP: f32 = 0.5;
+const SHADOW_MAX_STEPS: i32 = 32;
+
+// --- PBR helpers (Cook-Torrance, single directional light) -------------------
+// `a` is the GGX roughness (perceptual_roughness squared); `roughness` below is
+// the perceptual value Bevy's StandardMaterial exposes.
+
+fn distribution_ggx(ndh: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    let d = ndh * ndh * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * d * d, 1e-7);
+}
+
+fn geometry_schlick_ggx(nd: f32, k: f32) -> f32 {
+    return nd / max(nd * (1.0 - k) + k, 1e-7);
+}
+
+fn geometry_smith(ndv: f32, ndl: f32, roughness: f32) -> f32 {
+    // Direct-lighting remap k = (r + 1)^2 / 8.
+    let r1 = roughness + 1.0;
+    let k = (r1 * r1) / 8.0;
+    return geometry_schlick_ggx(ndv, k) * geometry_schlick_ggx(ndl, k);
+}
+
+fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+// Is the brick-local cell `c` solid? Out-of-brick cells read as air: AO and
+// shadows are brick-local only (cross-brick occlusion needs a top-level
+// acceleration structure that does not exist yet — see the module docs).
+fn solid_at(c: vec3<i32>) -> bool {
+    let edge = i32(dag_meta.brick_edge);
+    if (any(c < vec3<i32>(0)) || any(c >= vec3<i32>(edge))) {
+        return false;
+    }
+    return dag_lookup(u32(c.x), u32(c.y), u32(c.z)) >= 0;
+}
+
+// Ambient occlusion from local DAG occupancy. `ni` is the integer outward face
+// normal; we look at the 8-neighbour ring, in the face's tangent plane, around
+// the air cell in front of the lit face. A surface sitting in an inside corner
+// (more solid neighbours) is darkened — the raymarch analogue of the mesh
+// path's baked per-vertex AO (`base_color * vertex.color.r`).
+fn ao_from_occupancy(cell: vec3<i32>, ni: vec3<i32>) -> f32 {
+    let air = cell + ni;
+    var t1 = vec3<i32>(1, 0, 0);
+    var t2 = vec3<i32>(0, 1, 0);
+    if (abs(ni.x) > 0) {
+        t1 = vec3<i32>(0, 1, 0);
+        t2 = vec3<i32>(0, 0, 1);
+    } else if (abs(ni.y) > 0) {
+        t1 = vec3<i32>(1, 0, 0);
+        t2 = vec3<i32>(0, 0, 1);
+    }
+    var occ = 0.0;
+    for (var di = -1; di <= 1; di = di + 1) {
+        for (var dj = -1; dj <= 1; dj = dj + 1) {
+            if (di == 0 && dj == 0) {
+                continue;
+            }
+            if (solid_at(air + t1 * di + t2 * dj)) {
+                occ = occ + 1.0;
+            }
+        }
+    }
+    return 1.0 - AO_STRENGTH * (occ / 8.0);
+}
+
+// Brick-local hard self-shadow: point-march along the sun direction `l` from the
+// air cell in front of the lit face. Returns 0 if a solid voxel occludes the sun
+// before the ray leaves the brick, else 1. Point sampling via `dag_lookup` keeps
+// this identical to the CPU twin (both reuse the mirrored point lookup).
+fn sun_shadow(cell: vec3<i32>, ni: vec3<i32>, l: vec3<f32>) -> f32 {
+    let edge = f32(dag_meta.brick_edge);
+    var p = vec3<f32>(cell) + vec3<f32>(0.5) + vec3<f32>(ni);
+    let step = l * SHADOW_STEP;
+    for (var i = 0; i < SHADOW_MAX_STEPS; i = i + 1) {
+        p = p + step;
+        if (any(p < vec3<f32>(0.0)) || any(p >= vec3<f32>(edge))) {
+            return 1.0; // left the brick without an occluder
+        }
+        let c = vec3<i32>(floor(p));
+        if (dag_lookup(u32(c.x), u32(c.y), u32(c.z)) >= 0) {
+            return 0.0; // occluded
+        }
+    }
+    return 1.0;
+}
+
+fn shade(mat_id: u32, world_normal: vec3<f32>, cell: vec3<i32>, view_dir: vec3<f32>) -> vec3<f32> {
     let entry = palette[mat_id];
     let base = entry.base_color.rgb;
 
@@ -163,10 +265,9 @@ fn shade(mat_id: u32, world_normal: vec3<f32>) -> vec3<f32> {
         return base;
     }
 
-    // Lambert (and Pbr, for now): diffuse from the scene's first directional
-    // light. Use the light's DIRECTION for the geometry term and its HUE for
-    // tint, but not its raw illuminance magnitude (which would blow out before
-    // tonemapping); a fixed ambient floor keeps unlit faces visible.
+    // Sun for the geometry term: use the light's DIRECTION and its HUE for tint,
+    // but not its raw illuminance magnitude (which would blow out before
+    // tonemapping); the fixed AMBIENT floor keeps shaded faces visible.
     var l = vec3<f32>(0.0, 1.0, 0.0);
     var sun_rgb = vec3<f32>(1.0);
     if (lights.n_directional_lights > 0u) {
@@ -175,16 +276,45 @@ fn shade(mat_id: u32, world_normal: vec3<f32>) -> vec3<f32> {
         let m = max(max(c.r, c.g), max(c.b, 1e-6));
         sun_rgb = c / m;
     }
-    let ndl = max(dot(world_normal, l), 0.0);
-    let ambient = 0.30;
-    var lit = base * (ambient + (1.0 - ambient) * ndl) * sun_rgb;
+    let n = normalize(world_normal);
+    let ndl = max(dot(n, l), 0.0);
 
-    if (dag_meta.shading_tier == TIER_PBR) {
-        // Future-facing tier: today just adds the palette's emissive. Real
-        // roughness/metallic/AO/shadows land here later.
-        lit = lit + entry.emissive.rgb;
+    if (dag_meta.shading_tier == TIER_LAMBERT) {
+        return base * (AMBIENT + (1.0 - AMBIENT) * ndl) * sun_rgb;
     }
-    return lit;
+
+    // --- TIER_PBR: Cook-Torrance specular + occupancy AO + self-shadow --------
+    let ni = vec3<i32>(round(n));
+    let v = normalize(view_dir);
+    let h = normalize(l + v);
+    let ndv = max(dot(n, v), 1e-4);
+    let ndh = max(dot(n, h), 0.0);
+    let vdh = max(dot(v, h), 0.0);
+
+    let roughness = clamp(entry.pbr.x, 0.045, 1.0);
+    let metal = clamp(entry.pbr.y, 0.0, 1.0);
+    let a = roughness * roughness;
+
+    let f0 = mix(vec3<f32>(0.04), base, metal);
+    let d_term = distribution_ggx(ndh, a);
+    let g_term = geometry_smith(ndv, ndl, roughness);
+    let f_term = fresnel_schlick(vdh, f0);
+    // The ndl in the BRDF denominator cancels the cosine term applied below.
+    let spec_brdf = (d_term * g_term * f_term) / (4.0 * ndv * ndl + 1e-4);
+
+    let ao = ao_from_occupancy(cell, ni);
+    var shadow = 1.0;
+    if (ndl > 0.0) {
+        shadow = sun_shadow(cell, ni, l);
+    }
+
+    // Diffuse keeps the Lambert brightness regime (so PBR is not a brightness
+    // jump): ambient floor is AO-modulated, direct term is shadowed and
+    // metal-suppressed. Specular is the sun's highlight, also direct-shadowed.
+    let diffuse = base * (1.0 - metal)
+        * (AMBIENT * ao + (1.0 - AMBIENT) * ndl * shadow);
+    let specular = spec_brdf * ndl * shadow * (1.0 - AMBIENT);
+    return (diffuse + specular) * sun_rgb + entry.emissive.rgb;
 }
 
 @fragment
@@ -291,6 +421,9 @@ fn fragment(in: Varyings) -> RaymarchOutput {
         n = -dir; // camera started inside this voxel; face it
     }
 
-    out.color = vec4<f32>(shade(u32(hit_mat), n), 1.0);
+    // View direction (surface -> camera) in voxel space; the brick has no
+    // rotation, so voxel-space directions are world-space directions.
+    let v_dir = normalize(cam_local - p_hit);
+    out.color = vec4<f32>(shade(u32(hit_mat), n, cell, v_dir), 1.0);
     return out;
 }

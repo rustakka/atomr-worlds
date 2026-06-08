@@ -213,7 +213,11 @@ place:
   brick's occupancy AABB so the empty rim is never rasterized or marched (the
   one overdraw mitigation that helps while the shader writes `frag_depth`).
 - **Pluggable shading tiers** — `--raymarch-tier unlit|lambert|pbr`, an engine
-  setting orthogonal to the strategy slot.
+  setting orthogonal to the strategy slot. `unlit` = flat palette color;
+  `lambert` = directional `n·l` over a fixed ambient floor (default); `pbr` =
+  Cook-Torrance GGX specular from the palette roughness/metallic, ambient
+  occlusion from local DAG occupancy, and a brick-local sun self-shadow, in the
+  same normalized-hue / fixed-ambient exposure regime as `lambert`.
 - **Determinism gate** — the WGSL traversal mirrors the CPU
   `atomr_worlds_voxel::{gpu_get, ray_dda_first_hit}` reference line-for-line,
   pinned by a deterministic CPU render golden in `atomr-worlds-view`

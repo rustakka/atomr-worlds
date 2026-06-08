@@ -13,7 +13,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
-use atomr_worlds_voxel::{ray_dda_first_hit, Brick, DagGpu};
+use atomr_worlds_voxel::{gpu_get, ray_dda_first_hit, Brick, DagGpu, RayHit, Voxel, BRICK_EDGE};
 
 use crate::camera::{transform_point, Camera};
 use crate::mesh::{greedy_mesh, Mesh, Vertex};
@@ -116,6 +116,29 @@ pub fn material_color(material: u16) -> [u8; 3] {
             let b = ((m * 251) & 0xFF) as u8;
             [r, g, b]
         }
+    }
+}
+
+/// Map a material id to `(perceptual_roughness, metallic, emissive_rgb)`.
+///
+/// Mirrors the client `HardcodedPalette`
+/// (`atomr-worlds-client/src/render/defaults.rs`) so the [`RaymarchTier::Pbr`]
+/// CPU twin uses the same PBR inputs the GPU palette buffer carries. Emissive
+/// uses the same ×2 upload scale as the GPU palette. Unknown ids fall back to a
+/// rough dielectric. This is the PBR analogue of [`material_color`].
+pub fn material_pbr(material: u16) -> (f32, f32, [f32; 3]) {
+    match material {
+        1 => (0.85, 0.0, [0.0; 3]),  // stone
+        2 => (0.95, 0.0, [0.0; 3]),  // dirt
+        3 => (0.75, 0.0, [0.0; 3]),  // sand
+        4 => (0.70, 0.0, [0.0; 3]),  // snow
+        5 => (0.05, 0.0, [0.0; 3]),  // water (smooth)
+        6 => (0.90, 0.0, [0.0; 3]),  // grass
+        7 => (0.85, 0.0, [0.0; 3]),  // wood
+        8 => (0.95, 0.0, [0.0; 3]),  // leaves
+        9 => (0.50, 0.0, [1.2 * 2.0, 0.8 * 2.0, 0.2 * 2.0]), // glow_rock (emissive)
+        10 => (0.10, 0.0, [0.0; 3]), // ice (smooth)
+        _ => (1.0, 0.0, [0.0; 3]),
     }
 }
 
@@ -622,15 +645,21 @@ fn rasterize_triangle_mode(
 
 /// Shading tier for [`render_raymarch`].
 ///
-/// CPU twin of the client's `render::raymarch::RaymarchShadingTier`; Pbr folds
-/// into Lambert as the shader does. Kept separate to avoid inverting the crate
-/// dep graph.
+/// CPU twin of the client's `render::raymarch::RaymarchShadingTier`, kept
+/// separate to avoid inverting the crate dep graph. Each tier mirrors the WGSL
+/// `shade()` branch of the same name. Shading math is hash-exempt (the golden
+/// pins [`Unlit`](RaymarchTier::Unlit)); the twin exists so the lit tiers — and
+/// the DAG-occupancy sampling the PBR tier adds — stay testable deterministically.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RaymarchTier {
     /// Flat material color, no lighting term. The golden pins this tier.
     Unlit,
     /// Single directional `n·l` term over a fixed ambient floor.
     Lambert,
+    /// Cook-Torrance PBR: GGX specular from the material's roughness/metallic,
+    /// ambient occlusion from local DAG occupancy, and a brick-local sun
+    /// self-shadow — over the same ambient floor as [`Lambert`](Self::Lambert).
+    Pbr,
 }
 
 /// CPU reference render of a single brick's [`DagGpu`] via per-pixel ray-DDA —
@@ -721,6 +750,15 @@ pub fn render_raymarch(dag: &DagGpu, camera: &Camera, cfg: &RenderConfig, tier: 
                         (base[2] as f32 * shade).clamp(0.0, 255.0) as u8,
                     ]
                 }
+                // Cook-Torrance PBR — mirrors the WGSL TIER_PBR branch. View dir
+                // is surface→camera = -normalize(ray dir). Same sRGB-base caveat
+                // as Lambert: NOT byte-comparable to the GPU (which shades in
+                // linear), and the golden therefore stays on Unlit.
+                RaymarchTier::Pbr => {
+                    let v = norm3([-dir[0], -dir[1], -dir[2]]);
+                    let (roughness, metal, emissive) = material_pbr(hit.material);
+                    pbr_shade(dag, &hit, light, v, base, roughness, metal, emissive)
+                }
             };
             let idx = (y as u32 * fb.width + x as u32) as usize;
             let pi = idx * 4;
@@ -732,4 +770,284 @@ pub fn render_raymarch(dag: &DagGpu, camera: &Camera, cfg: &RenderConfig, tier: 
     }
 
     fb
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PBR shading — CPU mirror of voxel_raymarch.wgsl `shade()`'s TIER_PBR branch.
+//
+// Constants and formulas are a line-for-line port of the WGSL. Math runs in
+// normalized [0, 1] space (base color converted from the sRGB-ish u8
+// `material_color`), then scaled back to u8 — so it is NOT byte-comparable to
+// the GPU (which shades in linear), exactly like the Lambert twin. The point is
+// behavioural parity (AO darkens crevices, overhangs self-shadow, smoother
+// materials get sharper highlights), tested deterministically below.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fixed ambient floor — shared with Lambert; `1 - AMBIENT` is the direct weight.
+const RM_AMBIENT: f32 = 0.30;
+/// How strongly local occupancy darkens the ambient term (`voxel_raymarch.wgsl`).
+const RM_AO_STRENGTH: f32 = 0.7;
+/// Self-shadow march: half-voxel steps, one brick edge of reach (`32 * 0.5`).
+const RM_SHADOW_STEP: f32 = 0.5;
+const RM_SHADOW_MAX_STEPS: i32 = 32;
+const RM_EDGE: i32 = BRICK_EDGE as i32;
+
+#[inline]
+fn rm_solid_at(dag: &DagGpu, c: [i32; 3]) -> bool {
+    if c.iter().any(|&v| !(0..RM_EDGE).contains(&v)) {
+        return false; // out of brick = air (brick-local AO/shadow only)
+    }
+    gpu_get(dag, c[0] as u8, c[1] as u8, c[2] as u8) != Voxel::EMPTY
+}
+
+/// Ambient occlusion from the 8-neighbour ring (in the lit face's tangent plane)
+/// around the air cell in front of the hit. Mirror of WGSL `ao_from_occupancy`.
+fn rm_ao(dag: &DagGpu, cell: [i32; 3], ni: [i32; 3]) -> f32 {
+    let air = [cell[0] + ni[0], cell[1] + ni[1], cell[2] + ni[2]];
+    let (t1, t2): ([i32; 3], [i32; 3]) = if ni[0].abs() > 0 {
+        ([0, 1, 0], [0, 0, 1])
+    } else if ni[1].abs() > 0 {
+        ([1, 0, 0], [0, 0, 1])
+    } else {
+        ([1, 0, 0], [0, 1, 0])
+    };
+    let mut occ = 0.0f32;
+    for di in -1..=1 {
+        for dj in -1..=1 {
+            if di == 0 && dj == 0 {
+                continue;
+            }
+            let c = [
+                air[0] + t1[0] * di + t2[0] * dj,
+                air[1] + t1[1] * di + t2[1] * dj,
+                air[2] + t1[2] * di + t2[2] * dj,
+            ];
+            if rm_solid_at(dag, c) {
+                occ += 1.0;
+            }
+        }
+    }
+    1.0 - RM_AO_STRENGTH * (occ / 8.0)
+}
+
+/// Brick-local hard self-shadow: point-march toward the sun from the air cell in
+/// front of the lit face. 0 = occluded, 1 = lit. Mirror of WGSL `sun_shadow`.
+fn rm_shadow(dag: &DagGpu, cell: [i32; 3], ni: [i32; 3], l: [f32; 3]) -> f32 {
+    let edge = RM_EDGE as f32;
+    let mut p = [
+        cell[0] as f32 + 0.5 + ni[0] as f32,
+        cell[1] as f32 + 0.5 + ni[1] as f32,
+        cell[2] as f32 + 0.5 + ni[2] as f32,
+    ];
+    for _ in 0..RM_SHADOW_MAX_STEPS {
+        p[0] += l[0] * RM_SHADOW_STEP;
+        p[1] += l[1] * RM_SHADOW_STEP;
+        p[2] += l[2] * RM_SHADOW_STEP;
+        if p.iter().any(|&v| v < 0.0 || v >= edge) {
+            return 1.0; // left the brick without an occluder
+        }
+        let c = [p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32];
+        if rm_solid_at(dag, c) {
+            return 0.0;
+        }
+    }
+    1.0
+}
+
+#[inline]
+fn rm_distribution_ggx(ndh: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    let d = ndh * ndh * (a2 - 1.0) + 1.0;
+    a2 / (std::f32::consts::PI * d * d).max(1e-7)
+}
+
+#[inline]
+fn rm_geometry_schlick(nd: f32, k: f32) -> f32 {
+    nd / (nd * (1.0 - k) + k).max(1e-7)
+}
+
+#[inline]
+fn rm_geometry_smith(ndv: f32, ndl: f32, roughness: f32) -> f32 {
+    let r1 = roughness + 1.0;
+    let k = (r1 * r1) / 8.0;
+    rm_geometry_schlick(ndv, k) * rm_geometry_schlick(ndl, k)
+}
+
+#[inline]
+fn rm_fresnel(cos_theta: f32, f0: f32) -> f32 {
+    f0 + (1.0 - f0) * (1.0 - cos_theta).clamp(0.0, 1.0).powi(5)
+}
+
+/// Cook-Torrance shade of one hit. CPU mirror of the WGSL `shade()` TIER_PBR
+/// branch (see the module-level note on the deliberate sRGB-vs-linear divergence).
+#[allow(clippy::too_many_arguments)]
+fn pbr_shade(
+    dag: &DagGpu,
+    hit: &RayHit,
+    l: [f32; 3],
+    v: [f32; 3],
+    base_u8: [u8; 3],
+    roughness: f32,
+    metal: f32,
+    emissive: [f32; 3],
+) -> [u8; 3] {
+    let n = hit.normal;
+    let ni = [
+        n[0].round() as i32,
+        n[1].round() as i32,
+        n[2].round() as i32,
+    ];
+    let ndl = dot3(n, l).max(0.0);
+    let ndv = dot3(n, v).max(1e-4);
+    let h = norm3([l[0] + v[0], l[1] + v[1], l[2] + v[2]]);
+    let ndh = dot3(n, h).max(0.0);
+    let vdh = dot3(v, h).max(0.0);
+
+    let roughness = roughness.clamp(0.045, 1.0);
+    let metal = metal.clamp(0.0, 1.0);
+    let a = roughness * roughness;
+    let base01 = [
+        base_u8[0] as f32 / 255.0,
+        base_u8[1] as f32 / 255.0,
+        base_u8[2] as f32 / 255.0,
+    ];
+
+    let d_term = rm_distribution_ggx(ndh, a);
+    let g_term = rm_geometry_smith(ndv, ndl, roughness);
+    let ao = rm_ao(dag, hit.cell, ni);
+    let shadow = if ndl > 0.0 {
+        rm_shadow(dag, hit.cell, ni, l)
+    } else {
+        1.0
+    };
+
+    let mut out = [0u8; 3];
+    for i in 0..3 {
+        let f0 = 0.04 * (1.0 - metal) + base01[i] * metal;
+        let f_term = rm_fresnel(vdh, f0);
+        let spec_brdf = (d_term * g_term * f_term) / (4.0 * ndv * ndl + 1e-4);
+        let diffuse = base01[i] * (1.0 - metal) * (RM_AMBIENT * ao + (1.0 - RM_AMBIENT) * ndl * shadow);
+        let specular = spec_brdf * ndl * shadow * (1.0 - RM_AMBIENT);
+        let lit = diffuse + specular + emissive[i];
+        out[i] = (lit * 255.0).clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
+#[cfg(test)]
+mod pbr_tests {
+    //! Behavioural property tests for the [`RaymarchTier::Pbr`] CPU twin (the
+    //! mirror of the WGSL `shade()` TIER_PBR branch). These assert *relative*
+    //! shading behaviour — AO darkens crevices, overhangs self-shadow, smoother
+    //! materials get sharper highlights — not exact bytes (PBR float math makes a
+    //! pinned hash fragile; the byte-determinism golden stays on `Unlit`).
+
+    use super::*;
+    use atomr_worlds_core::coord::IVec3;
+    use atomr_worlds_voxel::{DagBrick, RayHit};
+
+    fn gpu(brick: &Brick) -> DagGpu {
+        DagBrick::from_brick(brick).to_gpu()
+    }
+
+    fn solid(brick: &mut Brick, p: [i32; 3], mat: u16) {
+        brick.set(IVec3::new(p[0] as i64, p[1] as i64, p[2] as i64), Voxel::new(mat));
+    }
+
+    /// AO darkens a hit whose surrounding air cell is walled in (inside corner)
+    /// relative to a hit with an open face.
+    #[test]
+    fn ao_darkens_enclosed_corner() {
+        let ni = [0, 1, 0]; // +y top face
+        let cell = [8, 0, 8];
+        let air = [8, 1, 8];
+
+        // Exposed: only the hit voxel is solid → no occlusion.
+        let mut exposed = Brick::new();
+        solid(&mut exposed, cell, 1);
+        let ao_open = rm_ao(&gpu(&exposed), cell, ni);
+
+        // Enclosed: the 8-neighbour ring around the air cell (xz plane) is solid.
+        let mut enclosed = exposed.clone();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                solid(&mut enclosed, [air[0] + dx, air[1], air[2] + dz], 1);
+            }
+        }
+        let ao_closed = rm_ao(&gpu(&enclosed), cell, ni);
+
+        assert!((ao_open - 1.0).abs() < 1e-6, "open face = full ambient, got {ao_open}");
+        assert!(ao_closed < ao_open, "enclosed corner must be darker: {ao_closed} !< {ao_open}");
+        // 8/8 ring solid → 1 - 0.7 = 0.30.
+        assert!((ao_closed - 0.30).abs() < 1e-6, "fully ringed AO should be 0.30, got {ao_closed}");
+    }
+
+    /// A voxel under an overhang is shadowed from a straight-overhead sun; an
+    /// open voxel is lit.
+    #[test]
+    fn overhang_casts_self_shadow() {
+        let ni = [0, 1, 0];
+        let cell = [8, 0, 8];
+        let sun_up = norm3([0.0, 1.0, 0.0]);
+
+        let mut open = Brick::new();
+        solid(&mut open, cell, 1);
+        assert_eq!(rm_shadow(&gpu(&open), cell, ni, sun_up), 1.0, "open voxel is lit");
+
+        let mut roofed = open.clone();
+        solid(&mut roofed, [8, 5, 8], 1); // occluder directly above
+        assert_eq!(rm_shadow(&gpu(&roofed), cell, ni, sun_up), 0.0, "roofed voxel is shadowed");
+    }
+
+    /// At the mirror angle, a smoother (lower-roughness) material produces a
+    /// brighter specular highlight than a rough one (same base/metal/AO/shadow).
+    #[test]
+    fn smoother_material_has_sharper_highlight() {
+        let mut brick = Brick::new();
+        solid(&mut brick, [8, 8, 8], 1);
+        let dag = gpu(&brick);
+        let hit = RayHit {
+            cell: [8, 8, 8],
+            material: 1,
+            t_entry: 0.0,
+            enter_axis: 1,
+            normal: [0.0, 1.0, 0.0],
+        };
+        // l and v symmetric about the +y normal → half-vector ≈ normal (peak D).
+        let l = norm3([0.3, 0.95, 0.0]);
+        let v = norm3([-0.3, 0.95, 0.0]);
+        let base = [128, 128, 128];
+
+        let smooth = pbr_shade(&dag, &hit, l, v, base, 0.08, 0.0, [0.0; 3]);
+        let rough = pbr_shade(&dag, &hit, l, v, base, 0.85, 0.0, [0.0; 3]);
+        let lum = |c: [u8; 3]| c[0] as u32 + c[1] as u32 + c[2] as u32;
+        assert!(
+            lum(smooth) > lum(rough),
+            "smooth highlight {smooth:?} must outshine rough {rough:?} at the mirror angle"
+        );
+    }
+
+    /// The Pbr tier is no longer the Lambert stub: rendering the same brick under
+    /// each tier must produce different pixels.
+    #[test]
+    fn pbr_differs_from_lambert() {
+        let mut brick = Brick::new();
+        let edge = BRICK_EDGE as i32;
+        for z in 0..edge {
+            for y in 0..(edge / 2) {
+                for x in 0..edge {
+                    solid(&mut brick, [x, y, z], 3);
+                }
+            }
+        }
+        let dag = gpu(&brick);
+        let cam = Camera::isometric_default(1.0);
+        let cfg = RenderConfig { width: 64, height: 64, ..Default::default() };
+        let lambert = render_raymarch(&dag, &cam, &cfg, RaymarchTier::Lambert);
+        let pbr = render_raymarch(&dag, &cam, &cfg, RaymarchTier::Pbr);
+        assert_ne!(lambert.pixels, pbr.pixels, "Pbr must no longer equal Lambert");
+    }
 }
