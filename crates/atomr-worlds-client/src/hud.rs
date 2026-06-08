@@ -21,7 +21,10 @@ use std::collections::VecDeque;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
+use atomr_worlds_core::interaction::ToolKind;
+
 use crate::modes::blit::BlitCamera;
+use crate::modes::edit::EditState;
 use crate::modes::fp::{FpState, WorldCamera};
 use crate::view_mode::ViewMode;
 
@@ -33,7 +36,14 @@ impl Plugin for HudPlugin {
             .add_systems(Startup, setup_hud)
             .add_systems(
                 Update,
-                (route_hud_target, update_fps, update_coords, update_mode),
+                (
+                    route_hud_target,
+                    update_fps,
+                    update_coords,
+                    update_mode,
+                    update_edit_readout,
+                    update_crosshair_visibility,
+                ),
             );
     }
 }
@@ -143,7 +153,16 @@ struct CoordsText;
 #[derive(Component)]
 struct ModeText;
 
-fn setup_hud(mut commands: Commands) {
+/// The voxel-edit tool/material/radius readout line in the HUD panel.
+#[derive(Component)]
+struct EditText;
+
+/// A full-screen centered crosshair container. Two of these (one per bar) form
+/// the `+`. Toggled visible only in FP by [`update_crosshair_visibility`].
+#[derive(Component)]
+struct Crosshair;
+
+fn setup_hud(mut commands: Commands, harness: Option<Res<crate::harness::HarnessActive>>) {
     // Bevy 0.15+ Text API: each text node is `Text` + `TextFont` + `TextColor`;
     // the root is a `Node` + `BackgroundColor` (bundles were removed in favor of
     // required components).
@@ -172,7 +191,70 @@ fn setup_hud(mut commands: Commands) {
             parent.spawn((Text::new("mode: fp"), font.clone(), color, ModeText));
             parent.spawn((Text::new("fps: --"), font.clone(), color, FpsText));
             parent.spawn((Text::new("xyz: (--, --, --)"), font.clone(), color, CoordsText));
+            parent.spawn((Text::new("tool: voxel  mat: 1"), font.clone(), color, EditText));
         });
+
+    // Crosshair: two thin centered bars forming a `+`. Each lives in its own
+    // full-screen flex-centered container so the bars overlap dead-center.
+    // Tagged `HudUiRoot` so `route_hud_target` points it at the live camera,
+    // and `Crosshair` so `update_crosshair_visibility` shows it only in FP.
+    // Skipped under the harness so FP captures don't gain crosshair pixels.
+    if harness.is_none() {
+        for (w, h) in [(2.0_f32, 14.0_f32), (14.0_f32, 2.0_f32)] {
+            commands
+                .spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    Visibility::Hidden,
+                    HudUiRoot,
+                    Crosshair,
+                ))
+                .with_children(|p| {
+                    p.spawn((
+                        Node { width: Val::Px(w), height: Val::Px(h), ..default() },
+                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
+                    ));
+                });
+        }
+    }
+}
+
+/// Show the crosshair only in first-person (where editing happens); hide it in
+/// every other view mode.
+fn update_crosshair_visibility(mode: Res<ViewMode>, mut q: Query<&mut Visibility, With<Crosshair>>) {
+    let want = if *mode == ViewMode::Fp { Visibility::Visible } else { Visibility::Hidden };
+    for mut v in q.iter_mut() {
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
+/// Mirror the current edit tool / material / brush radius into the HUD readout.
+fn update_edit_readout(edit: Option<Res<EditState>>, mut q: Query<&mut Text, With<EditText>>) {
+    let Some(edit) = edit else { return };
+    let tool = match edit.tool {
+        ToolKind::Voxel => "voxel",
+        ToolKind::Sphere => "sphere",
+        ToolKind::Cube => "cube",
+        ToolKind::Cone => "cone",
+    };
+    let want = if edit.tool == ToolKind::Voxel {
+        format!("tool: {tool}  mat: {}", edit.selected_material)
+    } else {
+        format!("tool: {tool} r{:.0}  mat: {}", edit.radius_voxels, edit.selected_material)
+    };
+    if let Ok(mut text) = q.single_mut() {
+        if text.0 != want {
+            text.0 = want;
+        }
+    }
 }
 
 /// Per-frame: point the HUD UI root at whichever camera is `is_active`

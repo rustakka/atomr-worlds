@@ -16,6 +16,7 @@ pub mod raymarch;
 pub mod storage;
 pub mod store;
 pub mod voxel;
+pub mod world_dda;
 
 pub use brick::{Brick, BrickDecodeError, BRICK_EDGE, BRICK_LEN};
 pub use codec::{BrickCodec, CodecError, PaletteRle, RawU16, Rle, Zlib};
@@ -23,6 +24,7 @@ pub use dag::{
     gpu_get, DagBrick, DagGpu, DagGpuWithDigest, DAG_GPU_EMPTY_ROOT, DAG_LEAF_FLAG,
 };
 pub use raymarch::{ray_dda_first_hit, RayHit};
+pub use world_dda::{world_ray_first_solid, WorldRayHit};
 pub use error::VoxelError;
 pub use light::{LightOverlay, LIGHT_OVERLAY_BYTES};
 pub use octree::{InternalNode, NodeId, NodeKind, Octree, OCTREE_NULL};

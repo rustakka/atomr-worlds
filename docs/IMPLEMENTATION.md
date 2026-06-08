@@ -1339,3 +1339,56 @@ file/line map.
   W/S/A/D, cycles the z-band via Q/E and Space/Ctrl.
 - [`examples/view-slice/src/main.rs`](../examples/view-slice/src/main.rs)
   — `SliceConfig` literal updated for the two new fields.
+
+## AVA Rec 1 finish — raymarch default + first-person voxel editing
+
+The GPU DAG raymarcher is now the **default** render path, and first-person
+voxel editing landed. Module-by-module:
+
+- [`crates/atomr-worlds-voxel/src/world_dda.rs`](../crates/atomr-worlds-voxel/src/world_dda.rs)
+  — `world_ray_first_solid(origin, dir, max_reach_m, sample) -> Option<WorldRayHit>`,
+  a pure f64 Amanatides–Woo DDA over the unbounded 1 m/voxel grid. Returns the
+  hit `cell`, the entry-face `normal`, the empty `place_cell` (`cell + normal`),
+  the `material`, and `t_entry`. Origin-inside-solid ⇒ `normal == ZERO`
+  (remove-only). Explicitly **not** a WGSL mirror (no determinism-gate
+  obligation), so it lives apart from `raymarch.rs`'s `ray_dda_first_hit`.
+  Re-exported from the crate root.
+- [`crates/atomr-worlds-client/src/world_stream.rs`](../crates/atomr-worlds-client/src/world_stream.rs)
+  — `LoadedChunk` gains `brick: Option<Arc<Brick>>`, populated only for LOD-0
+  chunks (the near ring). Powers the picker + crosshair highlight with zero host
+  round-trips; drops with the chunk on eviction.
+- [`crates/atomr-worlds-client/src/brick_gen.rs`](../crates/atomr-worlds-client/src/brick_gen.rs)
+  — `fetch_and_build(host, ao, addr, coord, lod) -> BrickReady` extracted from
+  `BrickGenWorkers::dispatch` (GetBrick + decode + greedy mesh/AO +
+  `to_gpu_with_digest`). Shared by the streamer (spawned on the reactor) and the
+  edit refresh (`block_on` from the main thread), so a streamed and an edited
+  brick are built identically. `BrickGenWorkers::forget` drops an in-flight key
+  so the large-brush refresh can re-stream.
+- [`crates/atomr-worlds-client/src/modes/fp.rs`](../crates/atomr-worlds-client/src/modes/fp.rs)
+  — `spawn_edited_brick` reuses `spawn_brick_entity` verbatim, then forces the
+  fresh entity visible at full LOD scale (no fade-in) and despawns the old entity
+  + decrefs its `DagBufferCache` entry — a flicker-free make-before-break swap
+  that works for every `ShadingMode`. `FpPlugin` registers the edit + highlight
+  systems in the existing `.chain()` (after `fp_sync_camera`, before
+  `fp_stream_bricks`).
+- [`crates/atomr-worlds-client/src/modes/edit.rs`](../crates/atomr-worlds-client/src/modes/edit.rs)
+  — `EditState` (selected material / tool / brush radius / reach / last hit),
+  `edit_select_tool_material` (digits / `Tab` / `[` `]`), and `fp_edit_voxels`
+  (cast the crosshair ray, store the hit, and on a click while the cursor is
+  grabbed apply the edit). Single-voxel edits send `WriteVoxel` with the integer
+  `pos` (immune to the metric grid); brushes send `WriteRegion` with
+  `voxel_center_metric(cell) = (cell + 0.5) * mpv` and a `radius_voxels * mpv`
+  radius, mirroring the host's `apply_region`. The host stays the sole mutator;
+  the client predicts the touched bricks via `InteractionUnit::affected_voxels`
+  (the same call the host uses) and re-fetches authoritative bytes. Refresh is
+  size-gated: `<= MAX_SYNC_REFRESH_BRICKS` (16) synchronously in place, larger
+  brushes drop the entries and let the async streamer re-fetch.
+- [`crates/atomr-worlds-client/src/render/config.rs`](../crates/atomr-worlds-client/src/render/config.rs)
+  — `RenderConfig::default().shading` flipped `LegacyVertexColor` →
+  `RaymarchDagShading`. `RenderPreset::Legacy` keeps `LegacyVertexColor` as the
+  mesh escape hatch; `--shading mesh` maps to it. A bare run (and `--shading
+  default`) now renders via the raymarcher.
+- [`crates/atomr-worlds-client/src/hud.rs`](../crates/atomr-worlds-client/src/hud.rs)
+  — a centered `+` crosshair (two absolute nodes, shown only in FP), a
+  tool/material/radius readout line, both skipped under the harness; the 3D
+  selection highlight cube lives in `edit.rs`.

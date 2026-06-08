@@ -68,19 +68,23 @@ pub struct RenderConfig {
 }
 
 impl Default for RenderConfig {
-    /// Ships the upgraded look that's the focus of this build: greedy
-    /// meshing, Minecraft-style corner AO, the keyframe-LUT sun curve,
-    /// cascaded shadows, a procedural sky dome, exp²-fog tinted by the
-    /// sky horizon, ACES tonemapping, and the nested-summary LOD
-    /// coverage that crossfades through tier transitions. Legacy
-    /// (pre-upgrade) behaviour is still reachable via
-    /// `RenderPreset::Legacy`.
+    /// Ships the upgraded look that's the focus of this build: the **GPU
+    /// DAG raymarcher** as the default render path (Rec 1), Minecraft-style
+    /// corner AO, the keyframe-LUT sun curve, cascaded shadows, a procedural
+    /// sky dome, exp²-fog tinted by the sky horizon, ACES tonemapping, and the
+    /// nested-summary LOD coverage that crossfades through tier transitions.
+    /// The greedy-mesh path is still fully supported and reachable via
+    /// `--shading mesh` / `RenderPreset::Legacy` (which also restores the
+    /// pre-upgrade look).
     fn default() -> Self {
         Self {
             mesher:    Arc::new(GreedyFlat),
             palette:   Arc::new(HardcodedPalette),
             ao:        Arc::new(MinecraftCornerAo),
-            shading:   Arc::new(LegacyVertexColor),
+            // Rec 1 (Advanced Voxel Architectures): the GPU DAG raymarcher is
+            // now the shipped default render path. The mesh path stays fully
+            // reachable via `--shading mesh` / `RenderPreset::Legacy`.
+            shading:   Arc::new(RaymarchDagShading),
             sky:       Arc::new(ProceduralDomeSky),
             sun_curve: Arc::new(KeyframeLutSun),
             shadow:    Arc::new(BasicCascades::default()),

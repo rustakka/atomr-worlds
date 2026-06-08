@@ -62,11 +62,10 @@ pub type Key = (IVec3, u8);
 pub struct BrickReady {
     pub coord: IVec3,
     pub lod: Lod,
-    /// Decoded brick (if the host had one). Not currently consumed by
-    /// the streaming system — meshes already encode the rendered
-    /// surface — but kept for future call-sites that need raw voxels
-    /// (e.g. neighbor stitching, physics collider build).
-    #[allow(dead_code)]
+    /// Decoded brick (if the host had one). Consumed by the streaming
+    /// system to populate [`crate::world_stream::LoadedChunk::brick`] for
+    /// LOD-0 chunks, which powers the client voxel picker / brush refresh
+    /// (`crate::modes::edit`). `None` for empty / missing bricks.
     pub brick: Option<Arc<Brick>>,
     pub meshes: std::collections::HashMap<u16, ViewMesh>,
     /// Flattened DAG + content digest + occupancy AABB for the raymarch path,
@@ -142,43 +141,8 @@ impl BrickGenWorkers {
         let ao = self.ao.clone();
         let address: Address = addr.into();
         self.handle.spawn(async move {
-            let env = Envelope::new(
-                0,
-                address,
-                WorldRequest::GetBrick { addr: address, brick: coord, lod },
-            );
-            let brick: Option<Arc<Brick>> = match host.request(env).await {
-                Ok(resp) => match resp.body {
-                    WorldEvent::BrickSnapshot { payload, .. } => {
-                        Brick::from_bytes(&payload).ok().map(Arc::new)
-                    }
-                    _ => None,
-                },
-                Err(_) => None,
-            };
-            // Mesh + AO bake + DAG build on tokio's blocking pool so the reactor
-            // stays free. Both the mesh and the raymarch DAG are derived from the
-            // same brick here, off the main thread. Empty brick ⇒ empty meshes +
-            // no DAG.
-            let (meshes, dag): (std::collections::HashMap<u16, ViewMesh>, Option<DagGpuWithDigest>) =
-                match brick.as_ref() {
-                    Some(b) => {
-                        let b = b.clone();
-                        let ao = ao.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let mut by_mat = greedy_mesh_by_material(&b);
-                            for sub in by_mat.values_mut() {
-                                ao.bake(sub, &b);
-                            }
-                            let dag = DagBrick::from_brick(&b).to_gpu_with_digest(&b);
-                            (by_mat, dag)
-                        })
-                        .await
-                        .unwrap_or_default()
-                    }
-                    None => Default::default(),
-                };
-            let _ = tx.send(BrickReady { coord, lod, brick, meshes, dag });
+            let ready = fetch_and_build(host, ao, address, coord, lod).await;
+            let _ = tx.send(ready);
         });
         true
     }
@@ -207,6 +171,68 @@ impl BrickGenWorkers {
     pub fn contains(&self, key: &Key) -> bool {
         self.in_flight.contains(key)
     }
+
+    /// Forget an in-flight key so the streamer is free to re-dispatch it.
+    /// Used by the large-brush edit refresh (`crate::modes::edit`), which
+    /// drops the affected `LoadedChunks` entries and lets the normal async
+    /// pipeline re-stream them; any stale in-flight fetch for the key would
+    /// otherwise block that re-dispatch. A dropped result for a forgotten
+    /// key is harmless — `drain` just removes it from `in_flight` again.
+    #[inline]
+    pub fn forget(&mut self, key: &Key) {
+        self.in_flight.remove(key);
+    }
+}
+
+/// Fetch one brick from the host, decode it, and build *both* render
+/// representations off the calling task: the per-material greedy mesh (with
+/// AO baked by `ao`) and the flattened DAG + content digest for the raymarch
+/// path. Empty / missing bricks yield empty meshes and no DAG.
+///
+/// This is the shared core of the streaming pipeline (`dispatch` spawns it on
+/// the tokio reactor) and the client edit refresh (`crate::modes::edit` runs
+/// it via `block_on` to rebuild exactly the bricks an edit touched). Keeping a
+/// single implementation guarantees a streamed brick and an edited brick are
+/// built identically — same mesher, same AO, same DAG digest, so the
+/// `DagBufferCache` dedups across both paths.
+///
+/// The mesh + AO + DAG build runs on tokio's blocking pool so it never stalls
+/// the reactor; callers driving this from a synchronous context (the edit
+/// refresh) must `block_on` it from a thread that is *not* a runtime worker.
+pub async fn fetch_and_build(
+    host: Arc<dyn WorldHost>,
+    ao: Arc<dyn AoStrategy>,
+    addr: Address,
+    coord: IVec3,
+    lod: Lod,
+) -> BrickReady {
+    let env = Envelope::new(0, addr, WorldRequest::GetBrick { addr, brick: coord, lod });
+    let brick: Option<Arc<Brick>> = match host.request(env).await {
+        Ok(resp) => match resp.body {
+            WorldEvent::BrickSnapshot { payload, .. } => Brick::from_bytes(&payload).ok().map(Arc::new),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    let (meshes, dag): (std::collections::HashMap<u16, ViewMesh>, Option<DagGpuWithDigest>) =
+        match brick.as_ref() {
+            Some(b) => {
+                let b = b.clone();
+                let ao = ao.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut by_mat = greedy_mesh_by_material(&b);
+                    for sub in by_mat.values_mut() {
+                        ao.bake(sub, &b);
+                    }
+                    let dag = DagBrick::from_brick(&b).to_gpu_with_digest(&b);
+                    (by_mat, dag)
+                })
+                .await
+                .unwrap_or_default()
+            }
+            None => Default::default(),
+        };
+    BrickReady { coord, lod, brick, meshes, dag }
 }
 
 /// Bevy plugin: registers the [`BrickGenWorkers`] resource. The
