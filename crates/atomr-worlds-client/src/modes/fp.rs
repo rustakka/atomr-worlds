@@ -72,6 +72,7 @@ impl Plugin for FpPlugin {
             .init_resource::<CameraMotionState>()
             .init_resource::<LadderHysteresis>()
             .init_resource::<crate::modes::edit::EditState>()
+            .add_message::<crate::modes::edit::VoxelEditEvent>()
             .add_systems(Startup, (setup_fp_scene, crate::modes::edit::setup_edit_highlight))
             .add_systems(
                 Update,

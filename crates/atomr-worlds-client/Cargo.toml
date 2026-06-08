@@ -13,6 +13,14 @@ description = "Bevy-driven interactive client for atomr-worlds. Talks to LocalHo
 name = "atomr-worlds-client"
 path = "src/main.rs"
 
+[features]
+# Client-side rapier physics (Rec 2): static voxel colliders + flood-fill
+# fracture → falling debris. On by default for the shipped binary; disable with
+# `--no-default-features` to prove the determinism crates stay rapier-free, or at
+# runtime with `--physics off`.
+default = ["physics"]
+physics = ["dep:bevy_rapier3d", "dep:atomr-worlds-physics"]
+
 [dependencies]
 atomr-worlds-core     = { workspace = true }
 atomr-worlds-voxel    = { workspace = true }
@@ -21,6 +29,8 @@ atomr-worlds-host     = { workspace = true }
 atomr-worlds-view     = { workspace = true }
 atomr-worlds-remote   = { workspace = true }
 atomr-worlds-generate = { workspace = true }
+atomr-worlds-physics  = { workspace = true, optional = true }
+bevy_rapier3d         = { workspace = true, optional = true }
 
 bevy    = { workspace = true }
 tokio   = { workspace = true }

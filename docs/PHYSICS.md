@@ -3,9 +3,11 @@
 The physics subsystem implements **Recommendation 2** of the *Advanced Voxel
 Architectures* plan (`~/.claude/plans/take-a-look-at-groovy-sedgewick.md`):
 destructible structures that fracture into independently-simulated debris. This
-document covers the **Phase-1 foundations** that have landed — the pure,
-deterministic, engine-agnostic core — and how the later Bevy/rapier integration
-builds on them.
+document covers the **Phase-1 foundations** (the pure, deterministic,
+engine-agnostic core) and the **Phase-A Bevy/rapier integration** that builds on
+them — static voxel colliders and carve→flood-fill→falling debris, all
+client-side (see "Phase A — client integration" below, and PHASES.md
+"Phase 20.3").
 
 ## Why a separate, dependency-free crate
 
@@ -87,20 +89,54 @@ handling lands with the Rec 2 / Rec 4 phases. Appending them as enum variants
 later is bincode-safe; adding fields to existing persisted structs is not (see
 the plan's schema-evolution note).
 
-## What's next (not yet implemented)
+## Phase A — client integration (landed)
 
-Per the plan, the remaining Rec 2 work is the engine integration, which is
-gated on the **Bevy 0.13 → 0.18 upgrade** (Phase 0): `bevy_rapier3d` collider
-generation from bricks (leaf-LOD only), the TGS-Soft solver tick with
-voxel-coord warm-start caching, flood-fill-driven `DebrisSpawnEvent`s on a
-background thread, and the multiplayer destruction sync (Rec 4) that reuses the
-fracture protocol here over `atomr`'s CRDT + actor layers.
+The first engine-integration slice lives in **`atomr-worlds-client`** behind a
+`physics` feature (default on); `bevy_rapier3d 0.34` (TGS-Soft solver) is confined
+to that crate so the determinism-tested crates stay rapier-free. It is **purely
+additive and client-side** — the canonical voxel changes still go through the
+host's journaled `WriteVoxel`/`WriteRegion`, and debris never flows into
+`GetBrick`.
+
+- **Greedy box-merge** (`atomr-worlds-physics::box_merge`) — the one new piece of
+  engine-agnostic core: `greedy_boxes(dims, is_solid)` coalesces a brick's solid
+  voxels into a small set of axis-aligned boxes (a fully-solid brick → one box).
+  Pure and deterministic, mirroring `flood_fill`'s closure API. It feeds both the
+  collider and the debris render mesh.
+- **Static terrain colliders** — `attach_brick_colliders` turns a LOD-0 brick's
+  resident `Arc<Brick>` into a rapier compound collider (one cuboid per merged
+  box) and attaches it (`RigidBody::Fixed`) to the brick entity. Leaf-LOD only;
+  the collider strategy is pluggable (`ColliderStrategy`: `GreedyBoxCompound`
+  default, `PerVoxelCompound` for A/B) and mirrors the render `RenderConfig` spine.
+- **Fracture → debris** — `process_fracture_checks` listens for the editor's
+  `VoxelEditEvent`, runs `connected_components` over the affected region (anchor =
+  solid on the region shell except its top face), and for each unanchored island
+  builds a `DebrisBody`, spawns a `RigidBody::Dynamic` (mass from the per-material
+  densities, rendered with the existing per-material `MaterialPool`), removes the
+  island's canonical voxels through the host, and refreshes the touched bricks.
+  Debris is reaped on sleep / kill-plane / lifetime cap. The render grid is
+  1 m/voxel, so debris uses `voxel_size_m = 1.0`.
+
+### Still deferred
+
+A collidable first-person character controller (the camera is still free-fly);
+Tier-1 raymarched debris and rounded/per-voxel narrow-phase (v2); off-thread
+flood-fill (the Rec 3 `ComputeTaskPool` lever) for large brushes; and the Rec 4
+multiplayer wiring (`FractureRequest`/`FractureApplied` into the actor + the
+HLC-timestamped LWW overlay) — single-client debris needs none of the fracture
+protocol, since it rides the already-journaled carve.
 
 ## Tests
 
 `cargo test -p atomr-worlds-core -p atomr-worlds-physics -p atomr-worlds-proto`
 covers: palette lookups + density ordering + determinism; flood-fill island
-detection (anchored vs floating, 6-connectivity, deterministic labels); mass
+detection (anchored vs floating, 6-connectivity, deterministic labels); the
+`box_merge` greedy decomposition (exact-cover + disjointness + determinism); mass
 conservation, centroid centering, symmetric-cube inertia, and thin-body inverse
 stability; `Mat3` inverse correctness; `DebrisBody` mass-from-palette; and serde
-round-trips for the fracture types.
+round-trips for the fracture types. `cargo test -p atomr-worlds-client` covers the
+client integration: collider generation, `spawn_island` (a dynamic body with a
+merged child mesh), `attach_brick_colliders` (LOD-0 gets a `Fixed` collider, coarse
+LODs are skipped), and the fracture region math. The rapier dependency is proven
+isolated via `cargo build -p atomr-worlds-client --no-default-features` and
+`cargo tree -p atomr-worlds-host -i bevy_rapier3d`.

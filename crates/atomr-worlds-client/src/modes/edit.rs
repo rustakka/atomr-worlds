@@ -99,6 +99,21 @@ impl Default for EditState {
     }
 }
 
+/// Broadcast whenever a first-person edit is applied, so other subsystems can
+/// react without the editor depending on them. `bricks` is the affected-brick
+/// superset the editor already computed; `removed` distinguishes carves (which
+/// can detach structure into debris) from placements.
+///
+/// Client-side physics (the `physics` feature) consumes this to run flood-fill
+/// fracture; it is registered unconditionally in [`crate::modes::fp::FpPlugin`]
+/// so the editor can emit it whether or not a reader is present.
+#[derive(Message, Clone, Debug)]
+pub struct VoxelEditEvent {
+    pub addr: Address,
+    pub removed: bool,
+    pub bricks: Vec<IVec3>,
+}
+
 /// The host brush metric scale — must match the host's `brush_scale`
 /// (`local.rs`), which uses [`MetricScale::DEFAULT_WORLD`] for world addresses.
 #[inline]
@@ -131,7 +146,7 @@ pub(crate) fn brick_of(cell: IVec3) -> IVec3 {
 /// the brick isn't resident (the picker treats unloaded space as air, so a ray
 /// through a not-yet-streamed region simply finds no target — correct).
 #[inline]
-fn sample_cell(loaded: &LoadedChunks, c: IVec3) -> Voxel {
+pub(crate) fn sample_cell(loaded: &LoadedChunks, c: IVec3) -> Voxel {
     let e = BRICK_EDGE as i64;
     match loaded.get(&(brick_of(c), 0)) {
         Some(chunk) => match &chunk.brick {
@@ -237,6 +252,7 @@ pub fn fp_edit_voxels(
     mut loaded: ResMut<LoadedChunks>,
     mut workers: ResMut<BrickGenWorkers>,
     mut spawn: EditSpawn,
+    mut edit_tx: MessageWriter<VoxelEditEvent>,
     mut commands: Commands,
 ) {
     if harness.is_some() || *mode != ViewMode::Fp || !state.ready {
@@ -367,6 +383,10 @@ pub fn fp_edit_voxels(
             workers.forget(&key);
         }
     }
+
+    // Broadcast the edit so client-side physics (and any future listener) can
+    // react. `affected` is the brick superset the host touched.
+    edit_tx.write(VoxelEditEvent { addr: address, removed: remove, bricks: affected });
 }
 
 /// Marker on the reusable selection-highlight cube repositioned each frame from
