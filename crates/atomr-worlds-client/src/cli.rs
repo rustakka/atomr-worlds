@@ -40,6 +40,24 @@ pub enum RaymarchTier {
     Pbr,
 }
 
+/// Client-side physics master switch (Rec 2). `on` (default) enables rapier
+/// terrain colliders + flood-fill fracture debris; `off` keeps the world inert.
+#[cfg(feature = "physics")]
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum PhysicsToggle {
+    On,
+    Off,
+}
+
+/// Voxel-collider strategy. `greedy` (default) merges solid voxels into a small
+/// set of boxes; `per-voxel` is the un-merged form (heavier, useful for A/B).
+#[cfg(feature = "physics")]
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum ColliderArg {
+    Greedy,
+    PerVoxel,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "atomr-worlds-client",
@@ -91,6 +109,17 @@ pub struct Cli {
     /// Raymarch shading tier (only used with `--shading raymarch`).
     #[arg(long, value_enum, default_value_t = RaymarchTier::Lambert)]
     pub raymarch_tier: RaymarchTier,
+
+    /// Client-side physics (Rec 2): rapier terrain colliders + flood-fill
+    /// fracture debris. On by default; forced off in harness mode.
+    #[cfg(feature = "physics")]
+    #[arg(long, value_enum, default_value_t = PhysicsToggle::On)]
+    pub physics: PhysicsToggle,
+
+    /// Voxel-collider strategy (only used when physics is on).
+    #[cfg(feature = "physics")]
+    #[arg(long, value_enum, default_value_t = ColliderArg::Greedy)]
+    pub collider: ColliderArg,
 }
 
 fn parse_seed(s: &str) -> Result<u64, String> {

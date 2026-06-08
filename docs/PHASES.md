@@ -2113,3 +2113,72 @@ atomr-dependent crates (host/remote/server/client) and therefore the Bevy client
 The Rec 1 GPU raymarcher (consuming the `DagBrick::to_gpu()` buffers from Phase
 20.1) and the Rec 2 rapier physics integration (native voxel colliders) — both
 previously gated on this upgrade.
+
+## Phase 20.3 *(landed)* — Rec 2: client-side physics (debris-first slice)
+
+The first slice of Rec 2 (client-side destruction physics), built on the Phase-1
+`atomr-worlds-physics` foundations. Headline payoff: **carve a ledge → the
+disconnected piece breaks off, falls under gravity, lands on the terrain it broke
+from, settles, and despawns.** Static leaf-LOD terrain colliders give the debris
+something to land on. All client-side and ephemeral — the determinism contract is
+untouched.
+
+**Dependency / isolation.** `bevy_rapier3d 0.34` (`dim3`, TGS-Soft default solver;
+`bevy ^0.18.1` — an exact match) enters **only** `atomr-worlds-client`, behind a
+new `physics` feature (default on). The determinism-tested crates
+(core/voxel/proto/host/physics/generate/persist) stay rapier-free — proven by
+`cargo build -p atomr-worlds-client --no-default-features` and
+`cargo tree -p atomr-worlds-host -i bevy_rapier3d` (empty). The engine-agnostic
+`atomr-worlds-physics` gains a pure, deterministic
+[`box_merge`](../crates/atomr-worlds-physics/src/box_merge.rs) (greedy 3D
+box-merge: a fully-solid 16³ brick collapses to one box — the collision analogue
+of greedy meshing), mirroring `flood_fill`'s `dims + is_solid` closure API.
+
+**Client `physics/` module** (gated, mirrors the `render/` strategy spine):
+- `PhysicsConfig` resource + pluggable `ColliderStrategy` (`GreedyBoxCompound`
+  default, `PerVoxelCompound` for A/B) + `apply_strategy_by_name` registry;
+  `--physics on|off` and `--collider greedy|per-voxel` CLI flags. Harness mode
+  forces physics off so golden FP captures are never perturbed.
+- **Static terrain colliders** — `attach_brick_colliders` builds a rapier
+  compound collider from a LOD-0 brick's resident `Arc<Brick>` voxels and attaches
+  it (`RigidBody::Fixed`, `ColliderScale::Absolute` so the fade-in scale tween is
+  ignored) to the `BrickLod` parent entity. Coarse LODs / empty bricks are skipped;
+  `detach_brick_colliders` strips it on fade-out. The render spawn path
+  (`spawn_brick_entity` / `spawn_edited_brick`) is untouched.
+- **Fracture → debris** — the editor (`modes::edit`) now broadcasts a feature-
+  agnostic `VoxelEditEvent`; `process_fracture_checks` consumes carves, runs the
+  deterministic `connected_components` flood-fill over the affected-brick AABB +
+  skirt (anchor = solid on the region's outer shell *except* the top face, so an
+  overhang whose support is carved falls while surrounding terrain stays), builds a
+  `DebrisBody` per unanchored island (mass from per-material densities), spawns a
+  `RigidBody::Dynamic` rendered with one cuboid per greedy box via the existing
+  `MaterialPool`, then journals the island's voxel removal through the host and
+  synchronously refreshes the touched bricks (reusing the editor's
+  make-before-break `spawn_edited_brick`). `settle_and_despawn_debris` reaps bodies
+  on sleep / kill-plane / lifetime.
+
+**Coordinate frames.** The render grid is 1 m/voxel, so debris uses
+`voxel_size_m = 1.0` (not the host brush metric `mpv ≈ 0.596 m`); the body
+transform sits at the island's world grid origin and rapier derives the COM.
+
+### Verification
+
+`cargo test -p atomr-worlds-physics` (7 new `box_merge` tests: empty / full-brick
+single box / single voxel / L-shape & checkerboard exact-cover + disjointness /
+slab merge / determinism). `cargo test -p atomr-worlds-client` (89 total, +12
+physics: collider-gen Some/None + greedy-vs-per-voxel same-cover; `spawn_island`
+produces a dynamic body with a merged child mesh; `attach_brick_colliders` gives a
+LOD-0 brick a `Fixed` collider and skips coarse LODs; region/skirt + `brick_of`
+math). The `atomr-worlds-view` render golden (the determinism gate) is unchanged.
+Live boot confirmed the rapier plugin + all physics systems initialize without
+panic. Rapier isolation checks (above) green.
+
+### Out of scope (deferred follow-ups)
+
+A collidable first-person character controller (the camera is still free-fly);
+raymarched debris (Tier 1) and rounded/per-voxel narrow-phase (v2); off-thread
+flood-fill (the Rec 3 `ComputeTaskPool` lever) for large brushes; a generous
+region cap means only locally-bounded fractures are detected; and the Rec 4
+multiplayer wiring (`proto::fracture` into `WorldRequest`/`WorldEvent` + the
+HLC-LWW overlay) — debris here is purely client-side off the already-journaled
+carve, so it needs none of the fracture protocol yet.

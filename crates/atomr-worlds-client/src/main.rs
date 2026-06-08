@@ -18,6 +18,8 @@ mod harness;
 mod host_backend;
 mod hud;
 mod modes;
+#[cfg(feature = "physics")]
+mod physics;
 mod render;
 mod view_mode;
 mod world_runtime;
@@ -166,6 +168,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_plugins(hud::HudPlugin)
         .add_plugins(hud::FrameDiagPlugin)
         .add_systems(Update, view_mode_input_system);
+
+    // Client-side physics (Rec 2). Forced off under the harness so golden
+    // captures are never perturbed by collision. The plugin is fully inert
+    // when `enabled` is false.
+    #[cfg(feature = "physics")]
+    {
+        let mut pcfg = physics::PhysicsConfig::default();
+        pcfg.enabled = harness_bits.is_none() && matches!(cli.physics, cli::PhysicsToggle::On);
+        match cli.collider {
+            cli::ColliderArg::Greedy => {}
+            cli::ColliderArg::PerVoxel => {
+                physics::apply_strategy_by_name(&mut pcfg, "collider", "PerVoxelCompound");
+            }
+        }
+        app.insert_resource(pcfg);
+        app.add_plugins(physics::PhysicsPlugin);
+    }
 
     if let Some((scenario, out_abs)) = harness_bits {
         // Offscreen render target + capture plugin sized to the scenario

@@ -60,7 +60,7 @@ subsystem** that never flows into `GetBrick` / the `Journal`. Fracture
 | **Phase 0** | Bevy 0.13 → 0.18 upgrade (4 majors; 0.15 skipped) | ✅ landed (PRs #6–#10) — see [PHASES.md](PHASES.md) "Phase 0 (Advanced Voxel Architectures)" |
 | **Phase 1** | Shared foundations | ✅ landed (PRs #1–#4) — see [PHYSICS.md](PHYSICS.md), PHASES.md "Phase 20/20.1/20.2" |
 | **Rec 1** | SVDAG + GPU raymarcher + voxel editing | ✅ finished — GPU DAG raymarcher is now the **default** render path (proxy-cube fragment raymarcher + off-thread build + cross-brick buffer dedup + occupancy-AABB proxy + CPU render golden); first-person **voxel editing** landed (single-voxel + sphere/cube brushes, host-authoritative, live refresh in both paths); mesh path stays via `--shading mesh` / `RenderPreset::Legacy` |
-| **Rec 2** | rapier physics + fracture | ⬜ unblocked (foundations + Bevy ready) |
+| **Rec 2** | rapier physics + fracture | 🟢 Phase A landed (PHASES.md "Phase 20.3") — `bevy_rapier3d` client integration: static leaf-LOD terrain colliders + carve→flood-fill→falling debris. Char-controller / Tier-1 debris / off-thread fracture deferred |
 | **Rec 4** | Actor-CRDT destruction sync | 🟡 `HlcTimestamp` landed; actor/proto/CRDT wiring remains |
 | **Rec 3** | physics-island scheduler | ⬜ deferred — use Bevy `ComputeTaskPool`; micropool only if profiling warrants |
 
@@ -117,9 +117,15 @@ subsystem** that never flows into `GetBrick` / the `Journal`. Fracture
   currently covers the LOD-0 near ring; coarse-tier edits self-heal on re-stream,
   and a harness-driven edit hook (for automated edit captures) is a small
   follow-up.
-- **Rec 2** — `bevy_rapier3d` integration with native voxel colliders
-  (leaf-LOD-only), mass injected from `InertiaSolver`, flood-fill fracture →
-  `DebrisBody` spawning. Client-side only; never touches the determinism path.
+- **Rec 2** — 🟢 Phase A landed (`bevy_rapier3d`, client-side only, behind the
+  client's `physics` feature; never touches the determinism path): static
+  leaf-LOD voxel colliders from resident bricks (greedy box-merge → rapier
+  compound) + carve→flood-fill→falling `DebrisBody` debris that lands on the
+  terrain, rendered via the existing `MaterialPool`. Pluggable `ColliderStrategy`
+  (`--collider greedy|per-voxel`) mirrors the render strategy spine. Deferred to
+  later slices: a collidable first-person character controller (camera is still
+  free-fly), raymarched/Tier-1 debris + rounded narrow-phase (v2), and off-thread
+  flood-fill (the Rec 3 lever) for large brushes.
 - **Rec 4** — wire `FractureRequest`/`FractureApplied` into `WorldRequest`/
   `WorldEvent` + the `WorldActor`; promote the write overlay to an
   HLC-timestamped LWW map; deterministic geometry (reliable channel) + debris

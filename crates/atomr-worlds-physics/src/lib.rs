@@ -10,6 +10,9 @@
 //!
 //! - [`flood_fill`] — deterministic 6-connected structural connectivity used to
 //!   detect floating islands when a structure is damaged.
+//! - [`box_merge`] — greedy 3D box-merge that coalesces a region's solid voxels
+//!   into a small set of axis-aligned boxes (the collision analogue of greedy
+//!   meshing), feeding the client's rapier compound-collider builder.
 //! - [`inertia`] — center of mass + inertia tensor from per-voxel density.
 //! - [`debris`] — a [`debris::DebrisBody`] extracted from a voxel island, with
 //!   its mass properties and rigid-body state.
@@ -26,11 +29,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod box_merge;
 pub mod debris;
 pub mod flood_fill;
 pub mod inertia;
 pub mod math;
 
+pub use box_merge::{greedy_boxes, Cuboid};
 pub use debris::DebrisBody;
 pub use flood_fill::{connected_components, Components};
 pub use inertia::{mass_properties, MassProperties};

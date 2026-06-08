@@ -124,3 +124,9 @@ bevy = { version = "0.18", default-features = false, features = [
     # Bevy 0.17: Bloom moved from core_pipeline into bevy_post_process.
     "bevy_post_process",
 ] }
+# Rec 2 (Advanced Voxel Architectures): client-side rapier physics. Confined to
+# the client crate, behind its `physics` feature — the determinism-tested crates
+# (core/voxel/proto/host/physics/generate/persist) never gain a rapier edge.
+# `default-features = false` + only `dim3` drops the async-collider / debug-render
+# / to-bevy-mesh / picking features we don't use (TGS-Soft is rapier's default).
+bevy_rapier3d = { version = "0.34", default-features = false, features = ["dim3"] }
