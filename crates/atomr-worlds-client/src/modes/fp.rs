@@ -227,6 +227,12 @@ pub struct BrickFadeIn {
     pub age: f32,
     /// Final scale to land on (= the LOD's voxel-edge scale).
     pub final_scale: f32,
+    /// World-space brick origin (corner). The tween scales about the brick's
+    /// *centre* (keeping it fixed at `origin + final_scale * BRICK_HALF_VOX`)
+    /// rather than its corner, so a mid-fade brick stays in place instead of
+    /// sweeping toward the corner — which used to rasterize as thin triangular
+    /// "needle" slivers at grazing angles.
+    pub origin: Vec3,
 }
 
 /// Tags a brick entity that is fading out before despawn. Mirror of
@@ -246,6 +252,25 @@ pub struct BrickFadeOut {
     /// entry, so the fade-out completion can drop the entry and
     /// release the parent brick to the visibility system.
     pub key: (IVec3, u8),
+    /// World-space brick origin (corner); see [`BrickFadeIn::origin`]. The
+    /// shrink collapses toward the brick's centre, not its corner.
+    pub origin: Vec3,
+}
+
+/// Half the brick edge in *local voxel units* — the pivot offset that keeps a
+/// fading brick centred in place while its [`Transform`] scale tweens (scaling
+/// about the centre instead of the corner-origin).
+const BRICK_HALF_VOX: f32 = BRICK_EDGE as f32 * 0.5;
+
+/// World-space origin (corner) of the brick at `(coord, depth)`. Its voxel-edge
+/// size in meters is `BRICK_EDGE * 2^depth`.
+fn brick_origin(coord: IVec3, depth: u8) -> Vec3 {
+    let edge_m = BRICK_EDGE as f32 * (1u64 << depth as u32) as f32;
+    Vec3::new(
+        coord.x as f32 * edge_m,
+        coord.y as f32 * edge_m,
+        coord.z as f32 * edge_m,
+    )
 }
 
 /// `(coord, lod_depth)` of the brick rendered by this entity. Stored
@@ -984,7 +1009,12 @@ fn fp_stream_bricks(
         commands
             .entity(ent)
             .remove::<BrickFadeIn>()
-            .insert(BrickFadeOut { age: 0.0, from_scale, key: k });
+            .insert(BrickFadeOut {
+                age: 0.0,
+                from_scale,
+                key: k,
+                origin: brick_origin(k.0, k.1),
+            });
         // Mirror the BrickFadeOut on the ECS into LoadedChunks so the
         // visibility pass's child_counts index stays incremental — this
         // is the "begin fade-out" decrement that lets the parent be
@@ -1173,9 +1203,10 @@ fn spawn_brick_entity(
         .spawn((
             // Bevy 0.15+: SpatialBundle removed — Transform + Visibility carry
             // their required components (GlobalTransform / inherited visibility).
-            Transform::from_translation(origin).with_scale(Vec3::splat(start_scale)),
+            Transform::from_translation(origin + Vec3::splat((lod_scale - start_scale) * BRICK_HALF_VOX))
+                .with_scale(Vec3::splat(start_scale)),
             Visibility::Hidden,
-            BrickFadeIn { age: 0.0, final_scale: lod_scale },
+            BrickFadeIn { age: 0.0, final_scale: lod_scale, origin },
             BrickLod { coord: bc, depth: lod.depth },
         ))
         .id();
@@ -1412,8 +1443,13 @@ fn fp_animate_fade_in(
         let s = t * t * (3.0 - 2.0 * t);
         let scale = fade.final_scale * (FADE_IN_START_FRACTION + (1.0 - FADE_IN_START_FRACTION) * s);
         tf.scale = Vec3::splat(scale);
+        // Scale about the brick centre, not the corner-origin: shift the corner
+        // by the shrinkage so the centre stays put. Recomputed from `origin`
+        // each frame (never accumulated), so freeze/restart while hidden is safe.
+        tf.translation = fade.origin + Vec3::splat((fade.final_scale - scale) * BRICK_HALF_VOX);
         if t >= 1.0 {
             tf.scale = Vec3::splat(fade.final_scale);
+            tf.translation = fade.origin;
             commands.entity(ent).remove::<BrickFadeIn>();
         }
     }
@@ -1437,8 +1473,10 @@ fn fp_animate_fade_out(
         let t = (fade.age / FADE_OUT_SECONDS).clamp(0.0, 1.0);
         // Reverse smoothstep so the shrink starts slow and accelerates.
         let s = t * t * (3.0 - 2.0 * t);
-        let scale = fade.from_scale * (1.0 - s);
-        tf.scale = Vec3::splat(scale.max(0.0));
+        let scale = (fade.from_scale * (1.0 - s)).max(0.0);
+        tf.scale = Vec3::splat(scale);
+        // Collapse toward the brick centre, not the corner (see fade-in).
+        tf.translation = fade.origin + Vec3::splat((fade.from_scale - scale) * BRICK_HALF_VOX);
         if t >= 1.0 {
             // Fade-out complete: drop the LoadedChunks entry. The
             // parent's child_count was already decremented when the
@@ -1519,9 +1557,11 @@ fn fp_update_lod_visibility(
             // very next frame).
             if fade_in.is_none() {
                 let lod_scale = (1u64 << lod.depth as u32) as f32;
-                commands
-                    .entity(ent)
-                    .insert(BrickFadeIn { age: 0.0, final_scale: lod_scale });
+                commands.entity(ent).insert(BrickFadeIn {
+                    age: 0.0,
+                    final_scale: lod_scale,
+                    origin: brick_origin(lod.coord, lod.depth),
+                });
             }
         }
     }
@@ -1664,7 +1704,7 @@ mod tests {
             .spawn((
                 Transform::from_scale(Vec3::splat(0.5)),
                 Visibility::Hidden,
-                BrickFadeIn { age: 0.0, final_scale: 1.0 },
+                BrickFadeIn { age: 0.0, final_scale: 1.0, origin: Vec3::ZERO },
                 BrickLod { coord: IVec3::new(0, 0, 0), depth: 0 },
             ))
             .id();

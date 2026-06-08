@@ -33,6 +33,14 @@ const TIER_UNLIT: u32 = 0u;
 const TIER_LAMBERT: u32 = 1u;
 const TIER_PBR: u32 = 2u;
 
+// Half-voxel overdraw the tightened proxy box carries on every side. Adjacent
+// bricks' proxies then overlap at their shared faces, so the sub-pixel
+// rasterization gap between them (visible as dotted seam lines at grazing
+// angles) is covered by a neighbour. The DDA still clamps cells to [0, edge),
+// so the visible voxel content is unchanged — only the proxy silhouette and the
+// slab entry t grow by the pad.
+const PROXY_PAD: f32 = 0.5;
+
 struct PaletteEntry {
     base_color: vec4<f32>,
     pbr: vec4<f32>,       // (perceptual_roughness, metallic, _, _)
@@ -86,8 +94,9 @@ fn vertex(v: Vertex) -> Varyings {
     // empty rim is never rasterized (and the DDA's empty prefix is skipped).
     // aabb_max is the inclusive max voxel, so the continuous upper bound is +1.
     let edge = f32(dag_meta.brick_edge);
-    let amin = unpack_aabb(dag_meta.aabb_min);
-    let amax = unpack_aabb(dag_meta.aabb_max) + vec3<f32>(1.0);
+    let pad = vec3<f32>(PROXY_PAD);
+    let amin = unpack_aabb(dag_meta.aabb_min) - pad;
+    let amax = unpack_aabb(dag_meta.aabb_max) + vec3<f32>(1.0) + pad;
     let vpos = amin + (v.position / edge) * (amax - amin);
 
     let world_from_local = get_world_from_local(v.instance_index);
@@ -193,8 +202,9 @@ fn fragment(in: Varyings) -> RaymarchOutput {
     // Slab-intersect the ray against the occupancy AABB [amin, amax+1] (tighter
     // than the full [0, edge]^3 cube — skips the brick's empty rim). The DDA
     // still indexes cells in [0, edge); the tight slab only moves the entry t.
-    let amin = unpack_aabb(dag_meta.aabb_min);
-    let amax = unpack_aabb(dag_meta.aabb_max) + vec3<f32>(1.0);
+    let pad = vec3<f32>(PROXY_PAD);
+    let amin = unpack_aabb(dag_meta.aabb_min) - pad;
+    let amax = unpack_aabb(dag_meta.aabb_max) + vec3<f32>(1.0) + pad;
     let inv_dir = 1.0 / dir;                       // inf for axis-parallel rays (handled by min/max)
     let ta = (amin - cam_local) * inv_dir;
     let tb = (amax - cam_local) * inv_dir;
