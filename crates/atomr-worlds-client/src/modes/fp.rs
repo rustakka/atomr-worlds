@@ -618,6 +618,13 @@ pub fn world_walk_input(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut state: ResMut<FpState>,
+    // Present only with the `physics` feature; `Option` so the system still
+    // compiles (and runs the free-fly path) when the resources are absent —
+    // which is exactly the case under the harness / `--physics off`, since
+    // `PhysicsPlugin` only inits them when enabled.
+    #[cfg(feature = "physics")] cfg: Option<Res<crate::physics::PhysicsConfig>>,
+    #[cfg(feature = "physics")] char_state: Option<Res<crate::physics::CharacterState>>,
+    #[cfg(feature = "physics")] mut intent: Option<ResMut<crate::physics::CharacterIntent>>,
 ) {
     if !state.ready {
         return;
@@ -626,6 +633,42 @@ pub fn world_walk_input(
     // walks with it. Slice has its own pan state; Overview has its own.
     if !matches!(*mode, ViewMode::Fp | ViewMode::Tp | ViewMode::Rts) {
         return;
+    }
+    // When the rapier character controller owns position (physics enabled + FP
+    // + player spawned), feed the WASD heading into its intent and return
+    // *before* integrating into `observer.position` — `writeback_character`
+    // writes the collision-resolved position back. Orientation still comes from
+    // `fp_input_look`; vertical motion is gravity/jump, not Space/Ctrl fly. Any
+    // other case (physics off, non-FP, feature off) falls through to the
+    // unchanged free-fly path below.
+    #[cfg(feature = "physics")]
+    if let (Some(cfg), Some(cs), Some(intent)) =
+        (cfg.as_ref(), char_state.as_ref(), intent.as_mut())
+    {
+        if cfg.enabled && *mode == ViewMode::Fp && cs.spawned {
+            let mut local = [0.0f32, 0.0, 0.0];
+            if keys.pressed(KeyCode::KeyW) {
+                local[2] += 1.0;
+            }
+            if keys.pressed(KeyCode::KeyS) {
+                local[2] -= 1.0;
+            }
+            // Same screen-right convention as the free-fly path below
+            // (A = +x_local, D = -x_local).
+            if keys.pressed(KeyCode::KeyA) {
+                local[0] += 1.0;
+            }
+            if keys.pressed(KeyCode::KeyD) {
+                local[0] -= 1.0;
+            }
+            let world = state.walk.rotate_local_to_world(local);
+            intent.move_world = Vec3::new(world[0], 0.0, world[2]);
+            intent.sprint =
+                keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            intent.crouch = keys.pressed(KeyCode::KeyC);
+            state.walk.set_crouch(intent.crouch);
+            return;
+        }
     }
     let dt = time.delta_secs().min(0.05);
     let speed = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
