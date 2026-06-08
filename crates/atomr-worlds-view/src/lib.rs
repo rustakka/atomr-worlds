@@ -48,7 +48,9 @@ pub use mesh::{
     bake_ao, bake_sky_light, dual_contouring_mesh, greedy_mesh, greedy_mesh_by_material,
     marching_cubes_mesh, marching_cubes_mesh_with_iso, naive_mesh, Mesh, Quad, Vertex,
 };
-pub use modes::fp::{build_fp_scene, render_fp, FpScene, MeshCacheKey, WalkCamera, WalkInput};
+pub use modes::fp::{
+    build_fp_scene, render_fp, FpScene, MeshCacheKey, WalkCamera, WalkInput, CROUCH_EYE_RATIO,
+};
 pub use modes::rts::{render_rts, ObliqueCamera};
 pub use modes::slice::{render_slice, render_slice_cached, SliceCamera, SliceConfig, SliceShading};
 pub use modes::tp::{render_tp, ChaseCamera};
