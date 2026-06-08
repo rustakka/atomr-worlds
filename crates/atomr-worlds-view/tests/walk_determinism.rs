@@ -11,7 +11,9 @@ use atomr_worlds_core::coord::{DVec3, IVec3};
 use atomr_worlds_core::lod::Lod;
 use atomr_worlds_core::vehicle::ContainingFrame;
 use atomr_worlds_proto::{WorldEvent, AABB};
-use atomr_worlds_view::{render_fp, RenderConfig, WalkCamera, WalkInput, WorldQuery};
+use atomr_worlds_view::{
+    render_fp, RenderConfig, WalkCamera, WalkInput, WorldQuery, CROUCH_EYE_RATIO,
+};
 use atomr_worlds_voxel::brick::Brick;
 use atomr_worlds_voxel::voxel::Voxel;
 use atomr_worlds_voxel::BRICK_EDGE;
@@ -91,4 +93,30 @@ fn scripted_walk_is_deterministic() {
     assert_eq!(a, b, "two identical walk runs must produce identical framebuffers");
     // Not all-zeros — would mean the stub never produced visible geometry.
     assert!(a.iter().any(|&d| d != 0), "walk should render something visible");
+}
+
+/// Crouch lowers the camera eye by exactly `CROUCH_EYE_RATIO`, and standing
+/// restores full eye height. The eye Y is `observer.y + eye_height_m * ratio`,
+/// so the crouch delta is observable directly off `camera().eye[1]`.
+#[test]
+fn crouch_lowers_eye_by_ratio() {
+    let addr = WorldAddr::ROOT;
+    let start = DVec3::new(0.0, 0.0, 0.0);
+    let mut cam = WalkCamera::new(start, ContainingFrame::World(addr), 1.0);
+    let base_y = start.y as f32;
+
+    let standing_eye = cam.camera().eye[1] - base_y;
+    cam.set_crouch(true);
+    let crouched_eye = cam.camera().eye[1] - base_y;
+    cam.set_crouch(false);
+    let restored_eye = cam.camera().eye[1] - base_y;
+
+    assert!(standing_eye > 0.0, "standing eye above feet");
+    assert!(
+        (crouched_eye - standing_eye * CROUCH_EYE_RATIO).abs() < 1e-5,
+        "crouched eye = standing * ratio: {crouched_eye} vs {}",
+        standing_eye * CROUCH_EYE_RATIO
+    );
+    assert!((restored_eye - standing_eye).abs() < 1e-6, "standing again restores full eye");
+    assert!(crouched_eye < standing_eye, "crouch is lower than standing");
 }

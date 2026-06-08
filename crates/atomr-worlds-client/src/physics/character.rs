@@ -37,15 +37,28 @@ use super::config::PhysicsConfig;
 use crate::modes::fp::FpState;
 use crate::view_mode::ViewMode;
 
-/// Capsule radius (m). Total standing height is `CAPSULE_HEAD_Y + radius`.
+/// Capsule radius (m). Total standing height is `CAPSULE_HEAD_Y_STAND + radius`.
 const CAPSULE_RADIUS: f32 = 0.3;
-/// Lower segment endpoint (bottom hemisphere center), feet-relative.
+/// Lower segment endpoint (bottom hemisphere center), feet-relative. The same in
+/// both stances — crouch only lowers the *top*, so the feet (and thus
+/// snap-to-ground / autostep, which key off the bottom hemisphere) are
+/// unchanged.
 const CAPSULE_FOOT_Y: f32 = CAPSULE_RADIUS; // 0.3 → capsule bottom touches y=0
-/// Upper segment endpoint (top hemisphere center), feet-relative. With the
-/// radius this gives a ~1.8 m standing capsule whose origin is at the feet, so
-/// `observer.position` (the eye-base) maps to the capsule translation with no
+/// Standing upper segment endpoint (top hemisphere center), feet-relative. With
+/// the radius this gives a ~1.8 m standing capsule whose origin is at the feet,
+/// so `observer.position` (the eye-base) maps to the capsule translation with no
 /// offset arithmetic on writeback.
-const CAPSULE_HEAD_Y: f32 = 1.5;
+const CAPSULE_HEAD_Y_STAND: f32 = 1.5;
+/// Crouched upper segment endpoint — feet stay put, the head drops so the total
+/// capsule is ~0.9 m (`0.6 + radius 0.3`), low enough to fit under a 1 m ledge.
+const CAPSULE_HEAD_Y_CROUCH: f32 = 0.6;
+/// While crouched, walk/sprint speed is scaled by this (a slow shuffle).
+const CROUCH_WALK_SCALE: f32 = 0.5;
+/// Headroom-probe slack (m). To stand back up, a standing capsule shrunk by this
+/// on its top and radius must clear of any collider — so "clear" means ≥ this
+/// much room (matches the controller `offset`), preventing stand/crouch
+/// oscillation in a corridor exactly standing-height tall.
+const HEADROOM_SKIN_M: f32 = 0.05;
 
 const WALK_SPEED: f32 = 4.0;
 const SPRINT_SPEED: f32 = 12.0;
@@ -79,6 +92,29 @@ const FLY_SPRINT_SPEED: f32 = 20.0;
 const FLY_VERTICAL_SPEED: f32 = 6.0;
 const FLY_SPRINT_VERTICAL_SPEED: f32 = 16.0;
 
+/// Feet-relative capsule segment endpoints `(foot_y, head_y, radius)` for the
+/// given stance. Feet and radius are stance-invariant; only the head moves.
+/// Pure / testable.
+pub fn capsule_endpoints(crouched: bool) -> (f32, f32, f32) {
+    let head = if crouched { CAPSULE_HEAD_Y_CROUCH } else { CAPSULE_HEAD_Y_STAND };
+    (CAPSULE_FOOT_Y, head, CAPSULE_RADIUS)
+}
+
+/// Build the player capsule [`Collider`] for the given stance. Single source of
+/// truth for both the initial spawn and the crouch resize, so the two can never
+/// drift.
+fn crouch_collider(crouched: bool) -> Collider {
+    let (foot, head, radius) = capsule_endpoints(crouched);
+    Collider::capsule(Vec3::new(0.0, foot, 0.0), Vec3::new(0.0, head, 0.0), radius)
+}
+
+/// Resolve the *effective* crouch state from intent and headroom. Holding the
+/// crouch key always crouches; releasing it only stands when there is headroom —
+/// so you can't pop up into a low ceiling. Pure / testable.
+pub fn resolve_crouch_state(intent_crouch: bool, headroom_clear: bool) -> bool {
+    intent_crouch || !headroom_clear
+}
+
 /// Marker on the single capsule entity representing the player.
 #[derive(Component)]
 pub struct Player;
@@ -94,6 +130,10 @@ pub struct CharacterState {
     pub grounded: bool,
     /// Y the player spawned at — the kill-plane respawn target.
     pub spawn_y: f32,
+    /// Resolved (effective) crouch state — drives both the physics capsule size
+    /// and the camera eye height. May lag intent: releasing crouch under a low
+    /// ceiling keeps this `true` until there is headroom to stand.
+    pub crouched: bool,
     /// Creative-flight toggle (double-tap Space). When set, gravity is replaced
     /// by direct up/down control, but rapier still resolves collisions — you
     /// can't fly through terrain.
@@ -158,11 +198,7 @@ pub fn spawn_player(
         .spawn((
             Player,
             RigidBody::KinematicPositionBased,
-            Collider::capsule(
-                Vec3::new(0.0, CAPSULE_FOOT_Y, 0.0),
-                Vec3::new(0.0, CAPSULE_HEAD_Y, 0.0),
-                CAPSULE_RADIUS,
-            ),
+            crouch_collider(false),
             character_controller(),
             Transform::from_translation(translation),
         ))
@@ -174,6 +210,7 @@ pub fn spawn_player(
     state.grounded = false;
     state.flying = false;
     state.last_space_tap = None;
+    state.crouched = false;
 }
 
 /// Advance the vertical-velocity integrator one tick. Pure so it can be unit
@@ -222,10 +259,42 @@ pub fn fly_vertical_velocity(up: bool, down: bool, sprint: bool) -> f32 {
     dir * speed
 }
 
+/// True when a standing-height capsule at `feet` would clear all terrain (other
+/// than the player itself) — i.e. there is headroom to stand up. The probe is
+/// the standing capsule shrunk by [`HEADROOM_SKIN_M`] on its top and radius, so
+/// "clear" means a small margin of slack and standing won't clip a ceiling. A
+/// one-shot rapier shape-overlap against the existing static colliders; one
+/// frame of staleness is harmless against static terrain. Returns `true` if the
+/// physics context isn't up yet (no terrain to block standing).
+fn standing_headroom_clear(rapier: &ReadRapierContext<'_, '_>, player: Entity, feet: Vec3) -> bool {
+    let Ok(ctx) = rapier.single() else {
+        return true;
+    };
+    let (foot, head, radius) = capsule_endpoints(false);
+    let probe = Collider::capsule(
+        Vec3::new(0.0, foot, 0.0),
+        Vec3::new(0.0, head - HEADROOM_SKIN_M, 0.0),
+        radius - HEADROOM_SKIN_M,
+    );
+    let filter = QueryFilter::default().exclude_collider(player);
+    let mut blocked = false;
+    ctx.intersect_shape(feet, Quat::IDENTITY, &*probe.raw, filter, |_e| {
+        blocked = true;
+        false // stop on first hit
+    });
+    !blocked
+}
+
 /// Set `controller.translation` from gravity (or creative flight) + the input
-/// intent. Ordered `.before(PhysicsSet::SyncBackend)` so rapier consumes it this
-/// frame. Either way the move goes through the controller, so terrain collision
-/// is always enforced — fly mode just removes gravity and adds up/down control.
+/// intent, and resize the capsule for crouch. Ordered
+/// `.before(PhysicsSet::SyncBackend)` so rapier consumes both this frame. The
+/// move always goes through the controller, so terrain collision is enforced —
+/// fly mode just removes gravity and adds up/down control.
+///
+/// **Crouch (hold C):** shrinks the capsule to ~0.9 m so you fit under a 1 m
+/// ledge and lowers the eye to match (via `writeback_character`). Releasing C
+/// only stands back up when a standing capsule would clear the terrain, so the
+/// head can't pop up into a low ceiling.
 ///
 /// **Fly mode (double-tap Space):** while `state.flying`, Space = ascend,
 /// Left Ctrl = descend, Shift = faster. A single Space tap still jumps when
@@ -236,8 +305,9 @@ pub fn drive_character(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     intent: Res<CharacterIntent>,
+    rapier: ReadRapierContext,
     mut state: ResMut<CharacterState>,
-    mut q: Query<&mut KinematicCharacterController, With<Player>>,
+    mut q: Query<(Entity, &Transform, &mut Collider, &mut KinematicCharacterController), With<Player>>,
 ) {
     if !character_active(&cfg, *mode, &state) {
         return;
@@ -256,7 +326,26 @@ pub fn drive_character(
         }
     }
 
-    let speed;
+    let Ok((entity, transform, mut collider, mut controller)) = q.single_mut() else {
+        return;
+    };
+
+    // Resolve crouch and resize the capsule on a stance flip only (no per-frame
+    // collider churn). Feet stay at the origin, so the resize is upward-only and
+    // never penetrates the ground.
+    let want = intent.crouch;
+    let headroom_clear = if state.crouched && !want {
+        standing_headroom_clear(&rapier, entity, transform.translation)
+    } else {
+        true
+    };
+    let effective = resolve_crouch_state(want, headroom_clear);
+    if effective != state.crouched {
+        *collider = crouch_collider(effective);
+        state.crouched = effective;
+    }
+
+    let mut speed;
     let snap: Option<CharacterLength>;
     if state.flying {
         // No gravity: vertical comes straight from the up/down keys. Collisions
@@ -272,6 +361,10 @@ pub fn drive_character(
         state.vertical_velocity =
             step_vertical(state.vertical_velocity, state.grounded, jump, dt, cfg.gravity.y);
         speed = if intent.sprint { SPRINT_SPEED } else { WALK_SPEED };
+        // A crouched walk is a slow shuffle (fly speed is unaffected).
+        if state.crouched {
+            speed *= CROUCH_WALK_SCALE;
+        }
         // Disable snap while ascending so the jump isn't immediately cancelled.
         snap = if state.vertical_velocity > 0.0 {
             None
@@ -281,11 +374,8 @@ pub fn drive_character(
     }
 
     let translation = desired_translation(intent.move_world, state.vertical_velocity, speed, dt);
-
-    if let Ok(mut controller) = q.single_mut() {
-        controller.snap_to_ground = snap;
-        controller.translation = Some(translation);
-    }
+    controller.snap_to_ground = snap;
+    controller.translation = Some(translation);
 }
 
 /// Read the resolved capsule pose + ground state back into the walk camera.
@@ -297,7 +387,6 @@ pub fn writeback_character(
     cfg: Res<PhysicsConfig>,
     mode: Res<ViewMode>,
     time: Res<Time>,
-    intent: Res<CharacterIntent>,
     mut state: ResMut<CharacterState>,
     mut fp: ResMut<FpState>,
     q: Query<(&Transform, Option<&KinematicCharacterControllerOutput>), With<Player>>,
@@ -334,9 +423,10 @@ pub fn writeback_character(
     fp.walk
         .observer
         .tick(DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64), None, dt);
-    // Lower the eye for the frame when crouching (capsule resize deferred to a
-    // later phase — see module docs).
-    fp.walk.set_crouch(intent.crouch);
+    // Lower the eye to match the *resolved* capsule stance (`state.crouched`,
+    // set by `drive_character`) — not raw intent — so the eye can't pop up while
+    // the body is physically held crouched under a low ceiling.
+    fp.walk.set_crouch(state.crouched);
 }
 
 #[cfg(test)]
@@ -445,6 +535,56 @@ mod tests {
     }
 
     #[test]
+    fn capsule_endpoints_have_grounded_feet_and_expected_heights() {
+        let (sf, sh, sr) = capsule_endpoints(false);
+        let (cf, ch, cr) = capsule_endpoints(true);
+        // Feet and radius are stance-invariant — only the head moves.
+        assert_eq!((sf, sr), (CAPSULE_FOOT_Y, CAPSULE_RADIUS));
+        assert_eq!((cf, cr), (CAPSULE_FOOT_Y, CAPSULE_RADIUS));
+        assert_eq!(sh, CAPSULE_HEAD_Y_STAND);
+        assert_eq!(ch, CAPSULE_HEAD_Y_CROUCH);
+        assert!(ch < sh, "crouched head is below standing head");
+        // Total capsule height = (head - foot) + 2·radius. Standing 1.8 m, crouched 0.9 m.
+        let total = |f: f32, h: f32, r: f32| (h - f) + 2.0 * r;
+        assert!((total(sf, sh, sr) - 1.8).abs() < 1e-6, "standing ~1.8 m");
+        assert!((total(cf, ch, cr) - 0.9).abs() < 1e-6, "crouched ~0.9 m");
+    }
+
+    #[test]
+    fn resolve_crouch_truth_table() {
+        // Holding crouch always crouches, regardless of headroom.
+        assert!(resolve_crouch_state(true, true));
+        assert!(resolve_crouch_state(true, false));
+        // Releasing: stand only when headroom is clear; stay crouched if blocked.
+        assert!(!resolve_crouch_state(false, true));
+        assert!(resolve_crouch_state(false, false));
+    }
+
+    #[test]
+    fn crouch_collider_builds_expected_capsule() {
+        let standing_col = crouch_collider(false);
+        let crouched_col = crouch_collider(true);
+        let standing = standing_col.as_capsule().expect("capsule shape");
+        let crouched = crouched_col.as_capsule().expect("capsule shape");
+        assert!((standing.radius() - CAPSULE_RADIUS).abs() < 1e-6);
+        assert!((crouched.radius() - CAPSULE_RADIUS).abs() < 1e-6);
+        // half_height = (head - foot) / 2 for the feet-origin segment.
+        assert!((standing.half_height() - (CAPSULE_HEAD_Y_STAND - CAPSULE_FOOT_Y) / 2.0).abs() < 1e-6);
+        assert!((crouched.half_height() - (CAPSULE_HEAD_Y_CROUCH - CAPSULE_FOOT_Y) / 2.0).abs() < 1e-6);
+        assert!(crouched.half_height() < standing.half_height(), "crouched capsule is shorter");
+    }
+
+    #[test]
+    fn crouched_eye_sits_below_capsule_crown() {
+        // The lowered eye (standing eye-height × the view crate's crouch ratio)
+        // must sit below the crouched capsule crown (head + radius) so the
+        // camera never pokes above the physical body under a ledge.
+        let eye = 1.7 * atomr_worlds_view::CROUCH_EYE_RATIO; // WalkCamera default eye_height_m
+        let crown = CAPSULE_HEAD_Y_CROUCH + CAPSULE_RADIUS;
+        assert!(eye < crown, "crouched eye {eye} below crown {crown}");
+    }
+
+    #[test]
     fn desired_translation_scales_and_normalizes() {
         let dt = 0.5;
         // Pure-forward heading, walk speed.
@@ -513,6 +653,63 @@ mod tests {
             Some(RigidBody::KinematicPositionBased)
         ));
         assert!(app.world().get::<KinematicCharacterController>(ent).is_some());
+    }
+
+    /// `drive_character` resizes the capsule when the crouch stance flips, and
+    /// writes the resolved stance to `state.crouched`. With no rapier context in
+    /// the test `App`, the headroom probe reads "clear", so releasing crouch
+    /// stands back up — exercising the resize-on-flip + writeback. The actual
+    /// headroom *blocking* (a real overlap) is covered by interactive
+    /// verification, since the repo has no stepped-rapier headless test harness.
+    #[test]
+    fn drive_character_resizes_capsule_on_stance_flip() {
+        fn setup(start_crouched: bool, intent_crouch: bool) -> (App, Entity) {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins);
+            app.init_resource::<ButtonInput<KeyCode>>();
+            app.insert_resource(ViewMode::Fp);
+            app.insert_resource(PhysicsConfig::default());
+            app.insert_resource(CharacterIntent { crouch: intent_crouch, ..default() });
+            let ent = app
+                .world_mut()
+                .spawn((
+                    Player,
+                    RigidBody::KinematicPositionBased,
+                    crouch_collider(start_crouched),
+                    character_controller(),
+                    Transform::from_translation(Vec3::new(0.0, 50.0, 0.0)),
+                ))
+                .id();
+            app.insert_resource(CharacterState {
+                spawned: true,
+                entity: Some(ent),
+                crouched: start_crouched,
+                ..default()
+            });
+            app.add_systems(Update, drive_character);
+            (app, ent)
+        }
+
+        let half = |c: &Collider| c.as_capsule().unwrap().half_height();
+        let stand_hh = (CAPSULE_HEAD_Y_STAND - CAPSULE_FOOT_Y) / 2.0;
+        let crouch_hh = (CAPSULE_HEAD_Y_CROUCH - CAPSULE_FOOT_Y) / 2.0;
+
+        // Standing + hold crouch → capsule shrinks, state goes crouched.
+        {
+            let (mut app, ent) = setup(false, true);
+            app.update();
+            assert!(app.world().resource::<CharacterState>().crouched);
+            let c = app.world().get::<Collider>(ent).unwrap();
+            assert!((half(c) - crouch_hh).abs() < 1e-6, "held crouch shrinks capsule");
+        }
+        // Crouched + release with clear headroom → stands back up.
+        {
+            let (mut app, ent) = setup(true, false);
+            app.update();
+            assert!(!app.world().resource::<CharacterState>().crouched);
+            let c = app.world().get::<Collider>(ent).unwrap();
+            assert!((half(c) - stand_hh).abs() < 1e-6, "released crouch restores standing capsule");
+        }
     }
 
     /// No player is spawned when the view isn't FP or the scene isn't ready.

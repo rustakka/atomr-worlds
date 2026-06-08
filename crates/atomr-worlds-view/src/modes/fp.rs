@@ -40,11 +40,16 @@ pub struct WalkInput {
     pub crouch: bool,
 }
 
+/// Fraction of [`WalkCamera::eye_height_m`] the eye sits at while crouching
+/// (1.7 m → 0.85 m). Kept just under the crouched physics-capsule crown so the
+/// camera matches the resized body driven by the character controller.
+pub const CROUCH_EYE_RATIO: f32 = 0.5;
+
 /// 1st-person walking camera. Yaw is rotation around world-up (+Y); pitch
 /// is rotation around the right axis with `[-π/2, +π/2]` clamping so the
 /// look-vector never inverts. Eye height adds to the observer's Y so the
-/// camera sits at standing height by default; `crouch` halves it for the
-/// frame.
+/// camera sits at standing height by default; crouching scales it by
+/// [`CROUCH_EYE_RATIO`] for the frame.
 #[derive(Debug)]
 pub struct WalkCamera {
     pub observer: ObserverState,
@@ -53,8 +58,10 @@ pub struct WalkCamera {
     pub eye_height_m: f32,
     pub fov_y_rad: f32,
     pub aspect: f32,
-    /// Last `crouch` flag — read by [`Self::camera`] to halve eye height.
-    crouched: bool,
+    /// Multiplier applied to `eye_height_m` by [`Self::camera`]. `1.0` standing,
+    /// [`CROUCH_EYE_RATIO`] crouching. A ratio (not a bool) keeps the eye in
+    /// step with the physics capsule's resolved height.
+    crouch_ratio: f32,
 }
 
 impl WalkCamera {
@@ -66,7 +73,7 @@ impl WalkCamera {
             eye_height_m: 1.7,
             fov_y_rad: std::f32::consts::FRAC_PI_3, // 60° vertical FOV
             aspect,
-            crouched: false,
+            crouch_ratio: 1.0,
         }
     }
 
@@ -74,7 +81,7 @@ impl WalkCamera {
     pub fn tick(&mut self, input: WalkInput, dt_s: f32) {
         self.yaw += input.yaw_delta;
         self.pitch = (self.pitch + input.pitch_delta).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-        self.crouched = input.crouch;
+        self.set_crouch(input.crouch);
         // Rotate `move_local` by yaw into world space. `+z_local = forward`,
         // `+x_local = right`. yaw=0 ⇒ forward = -Z world (camera looks down
         // -Z in atomr's RH convention), but for a walk camera we treat
@@ -105,15 +112,16 @@ impl WalkCamera {
     /// Set the crouch flag directly. Used when an external driver (e.g. a
     /// physics character controller) owns position but still wants
     /// [`Self::camera`] to lower the eye height for the frame, without routing
-    /// a full [`WalkInput`] through [`Self::tick`].
+    /// a full [`WalkInput`] through [`Self::tick`]. Maps the bool to the
+    /// [`CROUCH_EYE_RATIO`] eye-height multiplier.
     pub fn set_crouch(&mut self, crouch: bool) {
-        self.crouched = crouch;
+        self.crouch_ratio = if crouch { CROUCH_EYE_RATIO } else { 1.0 };
     }
 
     /// Build the [`Camera`] for the current pose. Eye sits at observer +
-    /// `up * eye_height_m` (halved if crouched).
+    /// `up * eye_height_m * crouch_ratio` (the ratio is < 1 while crouched).
     pub fn camera(&self) -> Camera {
-        let eye_h = if self.crouched { self.eye_height_m * 0.5 } else { self.eye_height_m };
+        let eye_h = self.eye_height_m * self.crouch_ratio;
         let pos = self.observer.position;
         let eye = [pos.x as f32, pos.y as f32 + eye_h, pos.z as f32];
         // Forward vector from yaw/pitch. Yaw rotates around +Y; pitch around
