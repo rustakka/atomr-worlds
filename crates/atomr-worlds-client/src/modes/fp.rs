@@ -71,7 +71,8 @@ impl Plugin for FpPlugin {
             .init_resource::<RaymarchResources>()
             .init_resource::<CameraMotionState>()
             .init_resource::<LadderHysteresis>()
-            .add_systems(Startup, setup_fp_scene)
+            .init_resource::<crate::modes::edit::EditState>()
+            .add_systems(Startup, (setup_fp_scene, crate::modes::edit::setup_edit_highlight))
             .add_systems(
                 Update,
                 (
@@ -80,6 +81,12 @@ impl Plugin for FpPlugin {
                     fp_input_look,
                     fp_update_motion_state,
                     fp_sync_camera,
+                    // Voxel editing runs after the camera is synced (so the
+                    // pick ray matches the rendered view) and before streaming
+                    // (so refreshed bricks are consistent within the frame).
+                    crate::modes::edit::edit_select_tool_material,
+                    crate::modes::edit::fp_edit_voxels,
+                    crate::modes::edit::fp_edit_highlight,
                     fp_update_ladder,
                     fp_stream_bricks,
                     fp_update_lod_visibility,
@@ -275,7 +282,7 @@ struct WorldSun;
 
 /// Marker for an entity carrying a brick mesh.
 #[derive(Component)]
-struct BrickMesh;
+pub(crate) struct BrickMesh;
 
 /// 1st-person walk state. Public so other view modes can read the
 /// camera pose (slice/rts follow the player; tp orbits it).
@@ -1073,10 +1080,14 @@ fn spawn_brick_entity(
     commands: &mut Commands,
     loaded: &mut LoadedChunks,
 ) {
-    let BrickReady { coord: bc, lod, brick: _, meshes: mut by_material, dag } = ready;
+    let BrickReady { coord: bc, lod, brick, meshes: mut by_material, dag } = ready;
     let key = LoadedChunk::key(bc, lod);
     let lod_scale = (1u64 << lod.depth as u32) as f32;
     let edge_m = BRICK_EDGE as f32 * lod_scale;
+    // Keep the decoded voxels resident only on the LOD-0 near ring — that's
+    // the zone the voxel picker / brush refresh (`crate::modes::edit`) reads.
+    // Coarse tiers drop it (they're never edited and would bloat memory).
+    let resident_brick = if lod.depth == 0 { brick } else { None };
     if by_material.is_empty() {
         loaded.insert(
             key,
@@ -1088,6 +1099,7 @@ fn spawn_brick_entity(
                 is_fading_out: false,
                 dag_digest: None,
                 dag_tier: None,
+                brick: resident_brick,
             },
         );
         return;
@@ -1163,6 +1175,7 @@ fn spawn_brick_entity(
                         is_fading_out: false,
                         dag_digest: None,
                         dag_tier: None,
+                        brick: resident_brick,
                     },
                 );
                 return;
@@ -1229,6 +1242,7 @@ fn spawn_brick_entity(
             is_fading_out: false,
             dag_digest: dag_release.map(|(d, _)| d),
             dag_tier: dag_release.map(|(_, t)| t),
+            brick: resident_brick,
         },
     );
 }
@@ -1236,10 +1250,94 @@ fn spawn_brick_entity(
 /// Release a brick's cached raymarch buffers/material when its `LoadedChunks`
 /// entry is dropped, keeping [`DagBufferCache`] refcounts in lockstep with
 /// eviction. No-op for mesh-path / empty bricks (no `dag_digest` recorded).
-fn release_chunk_dag(loaded: &LoadedChunks, key: &(IVec3, u8), cache: &mut DagBufferCache) {
+pub(crate) fn release_chunk_dag(loaded: &LoadedChunks, key: &(IVec3, u8), cache: &mut DagBufferCache) {
     if let Some(chunk) = loaded.get(key) {
         if let (Some(digest), Some(tier)) = (chunk.dag_digest, chunk.dag_tier) {
             cache.release(digest, tier);
+        }
+    }
+}
+
+/// Refresh an already-loaded brick after an authoritative edit — flicker-free,
+/// reusing [`spawn_brick_entity`] verbatim so every [`ShadingMode`] and both
+/// render paths update for free.
+///
+/// **Make-before-break.** We (1) spawn a *fresh* parent + children +
+/// `LoadedChunk` for `key` (this overwrites the entry, installing the new
+/// `Arc<Brick>` and incrementing the new DAG's refcount via the dedup cache),
+/// (2) force the new entity fully visible at full LOD scale immediately — an
+/// edit is instant, not a 0.18 s fade-in bloom — and only then (3) despawn the
+/// *old* entity and decref its prior `(digest, tier)`. Old and new overlap zero
+/// frames, so there is no gap and no flicker. `DagBufferCache` dedup means
+/// editing toward an already-resident shape costs zero new GPU buffers.
+///
+/// Edits are LOD-0-only (matching the host's carving semantics), and a LOD-0
+/// brick is never "covered" by finer children, so `fp_update_lod_visibility`
+/// leaves the forced-visible state untouched.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_edited_brick(
+    ready: BrickReady,
+    frame: u64,
+    shading_mode: ShadingMode,
+    pool: &MaterialPool,
+    voxel_pool: &VoxelMaterialPool,
+    raymarch_res: &RaymarchResources,
+    raymarch_tier: RaymarchShadingTier,
+    cache: &mut DagBufferCache,
+    stats: &mut BrickGpuStats,
+    meshes: &mut Assets<BevyMesh>,
+    raymarch_materials: &mut Assets<RaymarchMaterial>,
+    storage_buffers: &mut Assets<bevy::render::storage::ShaderStorageBuffer>,
+    commands: &mut Commands,
+    loaded: &mut LoadedChunks,
+) {
+    let (bc, lod) = (ready.coord, ready.lod);
+    let key = LoadedChunk::key(bc, lod);
+    // Snapshot the entry we're about to replace so we can break *after* make.
+    let old = loaded.get(&key).map(|c| (c.entity, c.dag_digest, c.dag_tier));
+
+    // MAKE: spawn the fresh brick. `spawn_brick_entity`'s `loaded.insert`
+    // overwrites `key` (a replace, so the parent's child_count is preserved),
+    // installs the resident `Arc<Brick>`, and incref's the new DAG buffers.
+    spawn_brick_entity(
+        ready,
+        frame,
+        shading_mode,
+        pool,
+        voxel_pool,
+        raymarch_res,
+        raymarch_tier,
+        cache,
+        stats,
+        meshes,
+        raymarch_materials,
+        storage_buffers,
+        commands,
+        loaded,
+    );
+
+    // Force the new entity visible at full scale now, stripping the fade-in.
+    let new_entity = loaded.get(&key).and_then(|c| c.entity);
+    if let Some(new_ent) = new_entity {
+        let lod_scale = (1u64 << lod.depth as u32) as f32;
+        let edge_m = BRICK_EDGE as f32 * lod_scale;
+        let origin =
+            Vec3::new(bc.x as f32 * edge_m, bc.y as f32 * edge_m, bc.z as f32 * edge_m);
+        commands
+            .entity(new_ent)
+            .insert(Transform::from_translation(origin).with_scale(Vec3::splat(lod_scale)))
+            .insert(Visibility::Inherited)
+            .remove::<BrickFadeIn>();
+    }
+
+    // BREAK: despawn the prior entity (if any, and distinct from the new one)
+    // and decref its cached DAG buffers in lockstep.
+    if let Some((Some(old_ent), digest, tier)) = old {
+        if Some(old_ent) != new_entity {
+            commands.entity(old_ent).despawn();
+            if let (Some(d), Some(t)) = (digest, tier) {
+                cache.release(d, t);
+            }
         }
     }
 }
@@ -1483,4 +1581,138 @@ fn atomr_to_bevy_mesh(m: &atomr_worlds_view::Mesh) -> BevyMesh {
     mesh.insert_attribute(BevyMesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(m.indices.clone()));
     mesh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atomr_worlds_core::lod::Lod;
+    use atomr_worlds_voxel::brick::Brick;
+    use atomr_worlds_voxel::dag::DagBrick;
+    use atomr_worlds_voxel::voxel::Voxel;
+    use atomr_worlds_view::greedy_mesh_by_material;
+    use bevy::ecs::world::CommandQueue;
+
+    fn solid_block_brick() -> Brick {
+        let mut b = Brick::new();
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    b.set(IVec3::new(x, y, z), Voxel::new(1));
+                }
+            }
+        }
+        b
+    }
+
+    /// `spawn_edited_brick` is a flicker-free make-before-break swap: the old
+    /// parent (and its mesh children) is despawned and a fresh parent appears
+    /// for the same key carrying `BrickLod` + a full-scale `Transform` + at
+    /// least one `BrickMesh` child, with the fade-in stripped and visibility
+    /// forced on (an edit is instant, not a fade-in bloom).
+    #[test]
+    fn spawn_edited_brick_swaps_in_place_without_fade() {
+        let mut world = World::new();
+
+        // Seed an "old" loaded brick at (0,0,0)@LOD0 — a hidden, mid-fade-in
+        // parent with one mesh child.
+        let old_parent = world
+            .spawn((
+                Transform::from_scale(Vec3::splat(0.5)),
+                Visibility::Hidden,
+                BrickFadeIn { age: 0.0, final_scale: 1.0 },
+                BrickLod { coord: IVec3::new(0, 0, 0), depth: 0 },
+            ))
+            .id();
+        let old_child = world.spawn(BrickMesh).id();
+        world.entity_mut(old_parent).add_child(old_child);
+
+        let key = LoadedChunk::key(IVec3::new(0, 0, 0), Lod::new(0));
+        let mut loaded = LoadedChunks::default();
+        loaded.insert(
+            key,
+            LoadedChunk {
+                coord: IVec3::new(0, 0, 0),
+                lod: Lod::new(0),
+                entity: Some(old_parent),
+                last_seen_frame: 0,
+                is_fading_out: false,
+                dag_digest: None,
+                dag_tier: None,
+                brick: None,
+            },
+        );
+
+        // Replacement payload: a non-empty brick that meshes to something.
+        let b = std::sync::Arc::new(solid_block_brick());
+        let meshes_map = greedy_mesh_by_material(&b);
+        assert!(!meshes_map.is_empty(), "a solid block must mesh to something");
+        let dag = DagBrick::from_brick(&b).to_gpu_with_digest(&b);
+        let ready = BrickReady {
+            coord: IVec3::new(0, 0, 0),
+            lod: Lod::new(0),
+            brick: Some(b),
+            meshes: meshes_map,
+            dag,
+        };
+
+        // Spawn deps as locals — `spawn_edited_brick` takes `&mut`, so they
+        // don't need to live in the World.
+        let pool = MaterialPool { handles: vec![Handle::default(), Handle::default()] };
+        let voxel_pool = VoxelMaterialPool::default();
+        let raymarch_res = RaymarchResources::default();
+        let mut cache = DagBufferCache::default();
+        let mut stats = BrickGpuStats::default();
+        let mut meshes = Assets::<BevyMesh>::default();
+        let mut rm_materials = Assets::<RaymarchMaterial>::default();
+        let mut storage = Assets::<bevy::render::storage::ShaderStorageBuffer>::default();
+
+        let mut queue = CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            spawn_edited_brick(
+                ready,
+                10,
+                ShadingMode::SplitPerMaterial,
+                &pool,
+                &voxel_pool,
+                &raymarch_res,
+                RaymarchShadingTier::Lambert,
+                &mut cache,
+                &mut stats,
+                &mut meshes,
+                &mut rm_materials,
+                &mut storage,
+                &mut commands,
+                &mut loaded,
+            );
+        }
+        queue.apply(&mut world);
+
+        // BREAK: the old parent + its child are gone.
+        assert!(!world.entities().contains(old_parent), "old parent despawned");
+        assert!(!world.entities().contains(old_child), "old mesh child despawned with parent");
+
+        // MAKE: a fresh, distinct entity is recorded for the key.
+        let new_ent =
+            loaded.get(&key).and_then(|c| c.entity).expect("new entity recorded in LoadedChunks");
+        assert_ne!(new_ent, old_parent);
+        assert!(loaded.get(&key).unwrap().brick.is_some(), "LOD-0 brick stays resident");
+
+        // The new parent keeps its identity + is instantly visible at full scale.
+        let lod = world.get::<BrickLod>(new_ent).expect("BrickLod present on the new parent");
+        assert_eq!((lod.coord, lod.depth), (IVec3::new(0, 0, 0), 0));
+        let tf = world.get::<Transform>(new_ent).expect("Transform present");
+        assert_eq!(tf.scale, Vec3::splat(1.0), "an edit lands at full LOD scale, no bloom");
+        assert!(world.get::<BrickFadeIn>(new_ent).is_none(), "fade-in stripped on an edit");
+        assert!(
+            matches!(world.get::<Visibility>(new_ent), Some(Visibility::Inherited)),
+            "edited brick is forced visible"
+        );
+
+        // Exactly the fresh mesh children remain (the old one was despawned).
+        let mut q = world.query::<&BrickMesh>();
+        let mesh_children = q.iter(&world).count();
+        assert!(mesh_children >= 1, "the new parent has fresh BrickMesh children");
+    }
 }

@@ -29,7 +29,7 @@ Bevy resource with nine `Arc<dyn Trait>` fields, one per decision:
 | `mesher`   | `MeshStrategy`       | `GreedyFlat`          | —                                                       |
 | `palette`  | `PaletteStrategy`    | `HardcodedPalette`    | —                                                       |
 | `ao`       | `AoStrategy`         | `MinecraftCornerAo`   | `NoAo`                                                  |
-| `shading`  | `ShadingStrategy`    | `LegacyVertexColor`   | `PaletteVoxelMaterial` (custom WGSL — Step 8)           |
+| `shading`  | `ShadingStrategy`    | `RaymarchDagShading` (GPU DAG raymarch — AVA Rec 1) | `LegacyVertexColor` (mesh; `--shading mesh` / `Legacy` preset), `PaletteVoxelMaterial` (custom WGSL — Step 8) |
 | `sky`      | `SkyStrategy`        | `SkyTinted`           | `ConstantSky`, `ProceduralDomeSky` (dome shader — Step 9) |
 | `sun_curve`| `SunCurveStrategy`   | `KeyframeLutSun`      | `StaticSun`                                             |
 | `shadow`   | `ShadowStrategy`     | `BasicCascades`       | `NoShadows`                                             |
@@ -314,10 +314,14 @@ the iteration loop. See
 
 Two opt-in shading + sky impls landed alongside the spine. Both ship as
 strategies — opt in by writing the slot from a harness `set_strategy`
-event or by hand. The Stylized preset still uses the
-`StandardMaterial` paths (`LegacyVertexColor` / `SkyTinted`); the
-custom-shader paths are available but not the defaults so the
-deterministic-PNG gates in the view crate stay stable.
+event or by hand. (Note: the **default `shading` slot is now
+`RaymarchDagShading`**, the GPU DAG raymarcher — see "GPU DAG raymarcher
+(AVA Rec 1)" in the README; the `StandardMaterial` mesh path
+`LegacyVertexColor` is reachable via `--shading mesh` / the `Legacy`
+preset, and `PaletteVoxelMaterial` below is the custom-WGSL mesh path.)
+The deterministic-PNG gates live in the **view crate's** CPU renderer,
+which is independent of the client shading slot, so the default flip
+doesn't move any golden.
 
 ### Step 8 — `PaletteVoxelMaterial`
 

@@ -59,7 +59,7 @@ subsystem** that never flows into `GetBrick` / the `Journal`. Fracture
 | **Prereq** | atomr path-dep pin 0.9.2 → 0.10.1 (workspace wouldn't resolve) | ✅ landed (PR #5) |
 | **Phase 0** | Bevy 0.13 → 0.18 upgrade (4 majors; 0.15 skipped) | ✅ landed (PRs #6–#10) — see [PHASES.md](PHASES.md) "Phase 0 (Advanced Voxel Architectures)" |
 | **Phase 1** | Shared foundations | ✅ landed (PRs #1–#4) — see [PHYSICS.md](PHYSICS.md), PHASES.md "Phase 20/20.1/20.2" |
-| **Rec 1** | SVDAG + GPU raymarcher | 🟡 selectable render path landed (proxy-cube fragment raymarcher + off-thread build + cross-brick buffer dedup + occupancy-AABB proxy + CPU render golden); default-flip is data-gated on a release-build frame-time measurement |
+| **Rec 1** | SVDAG + GPU raymarcher + voxel editing | ✅ finished — GPU DAG raymarcher is now the **default** render path (proxy-cube fragment raymarcher + off-thread build + cross-brick buffer dedup + occupancy-AABB proxy + CPU render golden); first-person **voxel editing** landed (single-voxel + sphere/cube brushes, host-authoritative, live refresh in both paths); mesh path stays via `--shading mesh` / `RenderPreset::Legacy` |
 | **Rec 2** | rapier physics + fracture | ⬜ unblocked (foundations + Bevy ready) |
 | **Rec 4** | Actor-CRDT destruction sync | 🟡 `HlcTimestamp` landed; actor/proto/CRDT wiring remains |
 | **Rec 3** | physics-island scheduler | ⬜ deferred — use Bevy `ComputeTaskPool`; micropool only if profiling warrants |
@@ -83,32 +83,40 @@ subsystem** that never flows into `GetBrick` / the `Journal`. Fracture
   `DagBrick::to_gpu()` flat GPU buffers with occupancy/color decoupled, plus
   `gpu_get()` + `ray_dda_first_hit()` (`atomr-worlds-voxel::raymarch`) — the CPU
   point + ray traversals that mirror the WGSL DDA shader (the raymarcher's
-  determinism gate). **GPU render path:** `RaymarchDagShading` shading strategy
-  (`--shading raymarch`) draws each brick by raymarching its DAG in a fragment
-  shader (`voxel_raymarch.wgsl`) with pluggable shading tiers; the DAG is built
-  off the main thread (`DagGpuWithDigest` on `BrickReady`), a refcounted
-  `DagBufferCache` dedups GPU buffers + materials across identical bricks
-  (freed in lockstep with eviction), and the proxy/DDA are clipped to each
-  brick's occupancy AABB to cut overdraw. A deterministic CPU render golden
+  determinism gate). **GPU render path (now the default):** `RaymarchDagShading`
+  shading strategy draws each brick by raymarching its DAG in a fragment shader
+  (`voxel_raymarch.wgsl`) with pluggable shading tiers; the DAG is built off the
+  main thread (`DagGpuWithDigest` on `BrickReady`), a refcounted `DagBufferCache`
+  dedups GPU buffers + materials across identical bricks (freed in lockstep with
+  eviction), and the proxy/DDA are clipped to each brick's occupancy AABB to cut
+  overdraw. A deterministic CPU render golden
   (`atomr-worlds-view/tests/raymarch_golden.rs`) pins the path; a debug A/B
-  showed ~19× lower GPU memory vs meshing. All derived, non-canonical state.
+  showed ~19× lower GPU memory vs meshing. The greedy-mesh path stays reachable
+  via `--shading mesh` / `RenderPreset::Legacy`. All derived, non-canonical state.
+  **Voxel editing:** `world_ray_first_solid` (`atomr-worlds-voxel::world_dda`, a
+  pure world-space Amanatides–Woo picker, *not* WGSL-mirrored) +
+  `crate::modes::edit` drive first-person carve/place (single-voxel `WriteVoxel`
+  and sphere/cube `WriteRegion` brushes). The host remains the sole mutator; the
+  client predicts the touched bricks (`InteractionUnit::affected_voxels`) and
+  re-fetches authoritative bytes (`fetch_and_build`), swapping them in
+  flicker-free (`spawn_edited_brick`) — so edits show in both render paths.
 - **Phase 0:** Bevy upgraded to the latest stable (0.18); `cargo test
   --workspace` green.
 
 ### Next (now unblocked)
 
-- **Rec 1** — the proxy-cube fragment raymarcher is landed and selectable
-  (above). Remaining, in priority order: (1) **run the release-build perf gate**
-  (`harness/scenes/perf_raymarch_ab.toml`, `--shading mesh` vs `raymarch`) and
-  flip the default to `RaymarchDagShading` if it clears the bar — the one-line
-  change is `RenderConfig::default().shading`; (2) if proxy-cube overdraw is the
-  bottleneck (the fragment writes `frag_depth`, disabling early-Z), move to a
-  **single-pass / render-graph compute node** with a top-level brick acceleration
-  structure that composites against the PBR pass via reversed-Z depth — the route
-  to truly "pure" raymarching; (3) **client voxel editing**
-  (input → `WriteRegion` → `RegionDelta` → per-brick DAG rebuild via the dedup
-  cache) to unlock raymarching the editable near zone (SVDAGs are static, so an
-  edit rebuilds just that brick's DAG).
+- **Rec 1** — ✅ done: the GPU DAG raymarcher is the default render path and
+  first-person voxel editing landed (above). The release-build A/B
+  (`harness/scenes/perf_raymarch_ab.toml`, `--shading mesh` vs `raymarch`) is
+  recorded as data, not a gate — the flip was committed regardless, keeping mesh
+  one flag away. The named follow-up lever, if the recorded p50 regression is
+  large: (2) if proxy-cube overdraw is the bottleneck (the fragment writes
+  `frag_depth`, disabling early-Z), move to a **single-pass / render-graph compute
+  node** with a top-level brick acceleration structure that composites against the
+  PBR pass via reversed-Z depth — the route to truly "pure" raymarching. Editing
+  currently covers the LOD-0 near ring; coarse-tier edits self-heal on re-stream,
+  and a harness-driven edit hook (for automated edit captures) is a small
+  follow-up.
 - **Rec 2** — `bevy_rapier3d` integration with native voxel colliders
   (leaf-LOD-only), mass injected from `InertiaSolver`, flood-fill fracture →
   `DebrisBody` spawning. Client-side only; never touches the determinism path.

@@ -91,20 +91,26 @@ debris bodies), a deterministic fracture-event protocol, an `HlcTimestamp`, and 
 strategic recommendations (GPU raymarching, rigid-body physics, multiplayer
 destruction sync, low-latency scheduling) now in progress.
 
-**Rec 1 (GPU DAG raymarching) is now a working, selectable render path.** Each
-non-empty brick can be drawn by GPU-raymarching its sparse-voxel DAG in a
-fragment shader instead of uploading a triangle mesh (`--shading raymarch`,
-with `--raymarch-tier unlit|lambert|pbr`). The DAG is built off the main thread
-alongside meshing; a content-digest **buffer cache dedups GPU buffers + materials
-across structurally-identical bricks** (so a mostly-uniform world collapses to a
-handful of buffer sets), and the proxy is tightened to each brick's occupancy
-AABB to cut overdraw. The WGSL traversal is a line-for-line mirror of the CPU
-`gpu_get` / `ray_dda_first_hit` reference, pinned by a deterministic view-crate
-render golden. In a debug A/B the raymarcher used **~19× less GPU memory** than
-the mesh path; meshing remains the default and the selectable fallback
-(`--shading mesh`) pending a release-build frame-time measurement (see the
-`harness/scenes/perf_raymarch_ab.toml` gate). The eventual displacement of
-meshing as the default is data-gated on that measurement.
+**Rec 1 (GPU DAG raymarching) is finished and now the default render path.**
+Each non-empty brick is drawn by GPU-raymarching its sparse-voxel DAG in a
+fragment shader instead of uploading a triangle mesh. The DAG is built off the
+main thread alongside meshing; a content-digest **buffer cache dedups GPU buffers
++ materials across structurally-identical bricks** (so a mostly-uniform world
+collapses to a handful of buffer sets), and the proxy is tightened to each
+brick's occupancy AABB to cut overdraw. The WGSL traversal is a line-for-line
+mirror of the CPU `gpu_get` / `ray_dda_first_hit` reference, pinned by a
+deterministic view-crate render golden. In a debug A/B the raymarcher used
+**~19× less GPU memory** than the mesh path. The greedy-mesh path stays fully
+supported and one flag away (`--shading mesh` / `RenderPreset::Legacy`); the
+release-build A/B (`harness/scenes/perf_raymarch_ab.toml`) is recorded as data,
+not a gate.
+
+**First-person voxel editing also landed with Rec 1.** Aim with the camera and
+**left-click to carve / right-click to place** — single voxels plus sphere and
+cube brushes, with a live tool/material/radius HUD readout. Every edit routes
+through the authoritative `WorldActor` (the host stays the only mutator — the
+client predicts which bricks changed and re-fetches the authoritative bytes),
+and the touched bricks refresh live and flicker-free in **both** render paths.
 
 ### Documentation
 
@@ -137,7 +143,7 @@ meshing as the default is data-gated on that measurement.
 | 19 | Slice rework + algorithm-topologies layered pipeline; async plan rebuild + horizon imposter (19.1/19.2) | ✅ |
 | AVA Phase 0 | Bevy 0.13 → 0.18 engine upgrade | ✅ |
 | AVA Phase 1 | Physics palette + `atomr-worlds-physics` + fracture proto + HLC + `DagBrick` SVDAG | ✅ |
-| AVA Rec 1 | GPU DAG raymarcher: selectable render path + off-thread build + cross-brick buffer dedup + occupancy-AABB proxy + CPU determinism golden (default-flip data-gated) | 🟡 selectable; default-flip pending release perf |
+| AVA Rec 1 | GPU DAG raymarcher (**now the default render path**) + off-thread build + cross-brick buffer dedup + occupancy-AABB proxy + CPU determinism golden + **first-person voxel editing** (single-voxel + sphere/cube brushes) | ✅ raymarch default; mesh via `--shading mesh` |
 | AVA Rec 2–4 | rigid-body physics · CRDT destruction sync · scheduler | 🟡 foundations landed |
 
 (AVA = *Advanced Voxel Architectures* — see the roadmap doc above.)
@@ -174,7 +180,7 @@ each with a default and at least one alternative:
 | `mesher`     | `MeshStrategy`       | `GreedyFlat`             | —                                            |
 | `palette`    | `PaletteStrategy`    | `HardcodedPalette`       | —                                            |
 | `ao`         | `AoStrategy`         | `MinecraftCornerAo`      | `NoAo`                                       |
-| `shading`    | `ShadingStrategy`    | `LegacyVertexColor`      | `PaletteVoxelMaterial` (custom WGSL), `RaymarchDagShading` (GPU DAG raymarch) |
+| `shading`    | `ShadingStrategy`    | `RaymarchDagShading` (GPU DAG raymarch) | `LegacyVertexColor` (mesh; `--shading mesh` / `Legacy` preset), `PaletteVoxelMaterial` (custom WGSL mesh) |
 | `sky`        | `SkyStrategy`        | `ProceduralDomeSky` (WGSL) | `ConstantSky`, `SkyTinted`                 |
 | `sun_curve`  | `SunCurveStrategy`   | `KeyframeLutSun`         | `StaticSun`                                  |
 | `shadow`     | `ShadowStrategy`     | `BasicCascades`          | `NoShadows`                                  |
@@ -189,12 +195,13 @@ the registry) so scenarios can capture A/B comparisons deterministically.
 
 ### GPU DAG raymarcher (AVA Rec 1)
 
-The `RaymarchDagShading` shading mode (`--shading raymarch`) draws each brick
-by GPU-raymarching its sparse-voxel DAG (`atomr_worlds_voxel::DagBrick::to_gpu`)
-in a fragment shader (`assets/shaders/voxel_raymarch.wgsl`) instead of uploading
-a triangle mesh — the route to *displacing meshing where it's performant*. The
-strategic intent is for raymarching to become a first-class, can-be-default path
-across LOD tiers, with meshing as the fallback. What's in place:
+The `RaymarchDagShading` shading mode (**the default**; the mesh path is
+`--shading mesh`) draws each brick by GPU-raymarching its sparse-voxel DAG
+(`atomr_worlds_voxel::DagBrick::to_gpu`) in a fragment shader
+(`assets/shaders/voxel_raymarch.wgsl`) instead of uploading a triangle mesh —
+*displacing meshing where it's performant*. Raymarching is now the first-class
+default path across LOD tiers, with meshing as the one-flag fallback. What's in
+place:
 
 - **Off-thread build** — the DAG (`DagGpuWithDigest`: flat buffers + content
   digest + occupancy AABB) is built on the blocking pool alongside greedy mesh,
@@ -211,10 +218,33 @@ across LOD tiers, with meshing as the fallback. What's in place:
   `atomr_worlds_voxel::{gpu_get, ray_dda_first_hit}` reference line-for-line,
   pinned by a deterministic CPU render golden in `atomr-worlds-view`
   (`tests/raymarch_golden.rs`); the GPU float output stays hash-exempt.
-- **Perf gate** — `harness/scenes/perf_raymarch_ab.toml` run twice
+- **Perf A/B** — `harness/scenes/perf_raymarch_ab.toml` run twice
   (`--shading mesh` vs `--shading raymarch`) emits `FRAME_DIAG_SUMMARY`
   (p50/p99/max) + `BRICK_MEM` (dedup hit-rate, resident VRAM, acquire cost) for
-  the mesh-vs-DAG comparison that gates flipping the default.
+  the mesh-vs-DAG comparison. Recorded as data; the default flip is committed
+  regardless (mesh stays reachable via `--shading mesh`).
+
+### First-person voxel editing (AVA Rec 1)
+
+Aim with the FP camera; **left-click removes** the targeted voxel, **right-click
+places** the selected material against the hit face. Single voxels plus sphere /
+cube brushes (`Tab` cycles the tool, `[` / `]` size the brush, digit keys pick
+the material), with a crosshair, a selection highlight, and a tool/material HUD
+readout. Key pieces:
+
+- **World-space picker** — `atomr_worlds_voxel::world_ray_first_solid`, a pure
+  Amanatides–Woo DDA over the unbounded 1 m/voxel grid (kept separate from the
+  WGSL-mirrored brick DDA — it has no determinism-gate obligation). Samples the
+  resident LOD-0 bricks (`LoadedChunk::brick`) with zero host round-trips.
+- **Host stays authoritative** — edits send `WriteVoxel` (integer pos) or
+  `WriteRegion` (brush) to the `WorldActor`, the only mutator. The client merely
+  *predicts* which bricks changed (the same `InteractionUnit::affected_voxels`
+  the host uses) and *re-fetches* the authoritative bytes via `GetBrick`; nothing
+  render- or DAG-derived flows back into the world state.
+- **Flicker-free live refresh** — a make-before-break swap (`spawn_edited_brick`)
+  rebuilds the touched bricks via the shared `fetch_and_build` path, so edits
+  update instantly in **both** render paths; the `DagBufferCache` dedups an edit
+  toward an already-resident shape to zero new buffers.
 
 ### Lighting and atmosphere (Phase 16)
 

@@ -47,6 +47,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use atomr_worlds_core::coord::{DVec3, IVec3};
 use atomr_worlds_core::lod::Lod;
 use atomr_worlds_proto::streaming::StreamingPolicy;
+use atomr_worlds_voxel::brick::Brick;
 use atomr_worlds_voxel::BRICK_EDGE;
 use bevy::prelude::*;
 
@@ -316,6 +317,13 @@ pub struct LoadedChunk {
     /// empty bricks. (Both are set together; see `spawn_brick_entity`.)
     pub dag_digest: Option<u64>,
     pub dag_tier: Option<RaymarchShadingTier>,
+    /// Resident decoded voxels, populated **only for LOD-0** chunks (the
+    /// near ring). Powers the client-side voxel picker / brush refresh
+    /// (`crate::modes::edit`) and the crosshair highlight with zero host
+    /// round-trips. `None` for coarse LODs, empty bricks, and raster-mode
+    /// loaders. Drops with the chunk on eviction — no separate lifecycle.
+    /// At ~8 KiB/brick over the LOD-0 ring the cost lands where it's cheap.
+    pub brick: Option<Arc<Brick>>,
 }
 
 impl LoadedChunk {
@@ -1251,6 +1259,7 @@ mod tests {
                 is_fading_out: false,
                 dag_digest: None,
                 dag_tier: None,
+                brick: None,
             },
         );
         // At frame 6 (1 tick later), still fresh.
@@ -1272,6 +1281,7 @@ mod tests {
             is_fading_out: false,
             dag_digest: None,
             dag_tier: None,
+            brick: None,
         }
     }
 
