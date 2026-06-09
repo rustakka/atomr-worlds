@@ -108,23 +108,28 @@ host's journaled `WriteVoxel`/`WriteRegion`, and debris never flows into
   box) and attaches it (`RigidBody::Fixed`) to the brick entity. Leaf-LOD only;
   the collider strategy is pluggable (`ColliderStrategy`: `GreedyBoxCompound`
   default, `PerVoxelCompound` for A/B) and mirrors the render `RenderConfig` spine.
-- **Fracture → debris** — `process_fracture_checks` listens for the editor's
-  `VoxelEditEvent`, runs `connected_components` over the affected region (anchor =
-  solid on the region shell except its top face), and for each unanchored island
-  builds a `DebrisBody`, spawns a `RigidBody::Dynamic` (mass from the per-material
-  densities, rendered with the existing per-material `MaterialPool`), removes the
-  island's canonical voxels through the host, and refreshes the touched bricks.
-  Debris is reaped on sleep / kill-plane / lifetime cap. The render grid is
-  1 m/voxel, so debris uses `voxel_size_m = 1.0`.
+- **Fracture → debris (off-thread, Rec 3)** — the carve pipeline listens for the
+  editor's `VoxelEditEvent` and is split across two systems so a big carve never
+  stalls the frame (PHASES.md "Phase 20.5"). `dispatch_fracture_checks` snapshots
+  the resident `Arc<Brick>`s around the carve and runs the analysis on a worker:
+  `atomr-worlds-physics::analyze_region` flood-fills (anchor = solid on the region
+  shell except its top face) and, for each unanchored island, bakes the material
+  grid, the greedy boxes, and the `DebrisBody` mass. `apply_fracture_results`
+  drains finished analyses, spawns the `RigidBody::Dynamic` debris (rendered with
+  the per-material `MaterialPool`), removes the island's canonical voxels through
+  the host, and dispatches the touched-brick refresh (`fetch_and_build`) through
+  the async streaming pool — swapped in flicker-free (make-before-break). Debris
+  is reaped on sleep / kill-plane / lifetime cap. The render grid is 1 m/voxel, so
+  debris uses `voxel_size_m = 1.0`.
 
 ### Still deferred
 
-A collidable first-person character controller (the camera is still free-fly);
-Tier-1 raymarched debris and rounded/per-voxel narrow-phase (v2); off-thread
-flood-fill (the Rec 3 `ComputeTaskPool` lever) for large brushes; and the Rec 4
+Tier-1 raymarched debris and rounded/per-voxel narrow-phase (v2); and the Rec 4
 multiplayer wiring (`FractureRequest`/`FractureApplied` into the actor + the
 HLC-timestamped LWW overlay) — single-client debris needs none of the fracture
-protocol, since it rides the already-journaled carve.
+protocol, since it rides the already-journaled carve. (Phase B/C added the
+collidable FP character controller + true crouch; Phase 20.5 moved the fracture
+analysis + brick refresh off the render thread.)
 
 ## Tests
 

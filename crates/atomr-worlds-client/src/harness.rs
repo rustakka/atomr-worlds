@@ -294,6 +294,9 @@ fn key_from_name(s: &str) -> Option<KeyCode> {
         "Digit4" => KeyCode::Digit4,
         "Digit5" => KeyCode::Digit5,
         "Tab" => KeyCode::Tab,
+        // Edit brush radius (`[` / `]`)
+        "BracketLeft" => KeyCode::BracketLeft,
+        "BracketRight" => KeyCode::BracketRight,
         // FP movement
         "KeyW" => KeyCode::KeyW,
         "KeyA" => KeyCode::KeyA,
@@ -365,6 +368,16 @@ pub struct HarnessState {
 /// to bypass cursor grab and read `MouseMotion` unconditionally.
 #[derive(Resource)]
 pub struct HarnessActive;
+
+/// Whether the scripted-edit harness hook is active: the harness is running
+/// **and** `ATOMR_HARNESS_EDIT` is set. Editing + the targeting highlight are
+/// normally inert under the harness; this opts them in so a scene can carve /
+/// cycle the brush. Treated as "actively editing" by the input systems (the
+/// harness never grabs the cursor), so `Tab` / the number row drive the editor
+/// rather than the view switcher.
+pub fn scripted_edit_active(harness: Option<&HarnessActive>) -> bool {
+    harness.is_some() && std::env::var_os("ATOMR_HARNESS_EDIT").is_some()
+}
 
 // ---------------------------------------------------------------------------
 // Plugin

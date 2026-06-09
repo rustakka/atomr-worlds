@@ -1,0 +1,68 @@
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+# Generous warmup so the LOD-0 near ring is resident before we carve (the
+# picker + fracture only act on resident bricks).
+warmup_frames = 200
+output_prefix = "fracture_carve"
+
+# Visual verification for the Rec 3 off-thread fracture scheduler. Requires the
+# scripted-edit + physics harness hooks:
+#   ATOMR_HARNESS_PHYSICS=1 ATOMR_HARNESS_EDIT=1 \
+#     atomr-worlds-client --physics on \
+#     --harness harness/scenes/fracture_carve.toml --harness-out <dir>
+# With both unset the scene is inert (no physics, no edits) and matches a
+# normal FP capture.
+
+# --- Baseline: look down at the terrain in front of the spawn --------------
+[[events]]
+frame = 0
+kind  = "key_press"
+key   = "ArrowDown"
+
+[[events]]
+frame = 24
+kind  = "key_release"
+key   = "ArrowDown"
+
+[[events]]
+frame = 30
+kind  = "screenshot"
+note  = "baseline terrain before the carve"
+
+[[events]]
+frame = 31
+kind  = "dump_frame_diag"
+note  = "frame timing on a normal (non-carve) frame"
+
+# --- Carve: left-click removes the targeted voxel --------------------------
+[[events]]
+frame = 40
+kind   = "mouse_button_press"
+button = "Left"
+
+[[events]]
+frame = 41
+kind   = "mouse_button_release"
+button = "Left"
+
+[[events]]
+frame = 42
+kind  = "dump_frame_diag"
+note  = "the carve frame — must NOT spike (analysis + refresh are off-thread)"
+
+# --- After: the hole swaps in flicker-free a few frames later --------------
+[[events]]
+frame = 70
+kind  = "screenshot"
+note  = "carved hole visible; any detached island has begun to fall"
+
+[[events]]
+frame = 120
+kind  = "screenshot"
+note  = "debris settled / fallen; terrain shows the hole"
+
+[[events]]
+frame = 125
+kind  = "exit"

@@ -44,23 +44,14 @@ use bevy::prelude::*;
 use bevy::render::storage::ShaderStorageBuffer;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-use crate::brick_gen::{fetch_and_build, BrickGenWorkers};
-use crate::modes::fp::{
-    release_chunk_dag, spawn_edited_brick, FpState, MaterialPool, VoxelMaterialPool,
-};
+use crate::modes::edit_workers::EditApplyWorkers;
+use crate::modes::fp::{spawn_edited_brick, FpState, MaterialPool, VoxelMaterialPool};
 use crate::render::{
     BrickGpuStats, DagBufferCache, RaymarchMaterial, RaymarchResources, RenderConfig,
 };
 use crate::view_mode::ViewMode;
 use crate::world_runtime::WorldRuntime;
 use crate::world_stream::{ChunkStreamer, LoadedChunks};
-
-/// Above this many affected bricks an edit refreshes asynchronously (drop the
-/// entries + let the normal streamer re-fetch) instead of synchronously on the
-/// main thread. Single-voxel and small brushes stay under it, so a discrete
-/// click is a sub-ms-to-few-ms hitch; a fat brush over cache-cold terrain
-/// doesn't stall the frame.
-pub const MAX_SYNC_REFRESH_BRICKS: usize = 16;
 
 /// Editing state: the selected material + tool, the brush radius, the reach,
 /// and the most recent picker hit (refreshed every frame for the crosshair /
@@ -142,15 +133,25 @@ pub(crate) fn brick_of(cell: IVec3) -> IVec3 {
     IVec3::new(cell.x.div_euclid(e), cell.y.div_euclid(e), cell.z.div_euclid(e))
 }
 
+/// Read the voxel at world cell `c` from the brick that contains it. The
+/// brick-local index is `c mod BRICK_EDGE` per axis (`rem_euclid` so negatives
+/// wrap correctly). Shared by the on-thread [`sample_cell`] and the off-thread
+/// fracture snapshot sampler (`super::super::physics::fracture`) so the two
+/// can't drift.
+#[inline]
+pub(crate) fn local_voxel(brick: &atomr_worlds_voxel::brick::Brick, c: IVec3) -> Voxel {
+    let e = BRICK_EDGE as i64;
+    brick.get(IVec3::new(c.x.rem_euclid(e), c.y.rem_euclid(e), c.z.rem_euclid(e)))
+}
+
 /// Sample the resident LOD-0 voxel at integer world cell `c`, or `EMPTY` when
 /// the brick isn't resident (the picker treats unloaded space as air, so a ray
 /// through a not-yet-streamed region simply finds no target — correct).
 #[inline]
 pub(crate) fn sample_cell(loaded: &LoadedChunks, c: IVec3) -> Voxel {
-    let e = BRICK_EDGE as i64;
     match loaded.get(&(brick_of(c), 0)) {
         Some(chunk) => match &chunk.brick {
-            Some(b) => b.get(IVec3::new(c.x.rem_euclid(e), c.y.rem_euclid(e), c.z.rem_euclid(e))),
+            Some(b) => local_voxel(b, c),
             None => Voxel::EMPTY,
         },
         None => Voxel::EMPTY,
@@ -173,15 +174,64 @@ pub(crate) fn keys_to_refresh(affected: &[IVec3], loaded: &LoadedChunks) -> Vec<
         .collect()
 }
 
+/// Eagerly apply a single-voxel edit to the resident LOD-0 brick (copy-on-write,
+/// via [`LoadedChunks::patch_resident`]). Mirrors the host's `WriteVoxel` so the
+/// **same-frame** fracture snapshot and the next picker sample see the post-edit
+/// voxel immediately — the authoritative remeshed brick lands a frame or two
+/// later via the off-thread refresh ([`apply_edit_refreshes`]).
+pub(crate) fn patch_resident_voxel(loaded: &mut LoadedChunks, cell: IVec3, voxel: Voxel) {
+    let e = BRICK_EDGE as i64;
+    let local = IVec3::new(cell.x.rem_euclid(e), cell.y.rem_euclid(e), cell.z.rem_euclid(e));
+    loaded.patch_resident(&(brick_of(cell), 0u8), |b| {
+        b.set(local, voxel);
+    });
+}
+
+/// Eagerly apply a brush edit to every resident LOD-0 brick it touches
+/// (copy-on-write), replaying the host's exact predicate — `unit.contains` over
+/// voxel centres (`voxel_center_metric`) — so the eager patch matches the host's
+/// `apply_region` journal cell-for-cell.
+pub(crate) fn patch_resident_brush(
+    loaded: &mut LoadedChunks,
+    affected: &[IVec3],
+    center: DVec3,
+    unit: InteractionUnit,
+    voxel: Voxel,
+) {
+    let e = BRICK_EDGE as i64;
+    for &bc in affected {
+        loaded.patch_resident(&(bc, 0u8), |b| {
+            b.set_region(
+                |local| {
+                    let world =
+                        IVec3::new(bc.x * e + local.x, bc.y * e + local.y, bc.z * e + local.z);
+                    unit.contains(center, voxel_center_metric(world))
+                },
+                voxel,
+            );
+        });
+    }
+}
+
 /// Digit keys pick the place material; `Tab` cycles the tool; `[` / `]` adjust
-/// the brush radius. FP-only.
+/// the brush radius. FP-only, and **only while the cursor is grabbed** (actively
+/// editing) — so these keys belong to the editor here, while the global view
+/// switcher owns `Tab` / the number row when the cursor is free. This split
+/// keeps `Tab` (cycle brush) from also flipping the camera to third-person.
 pub fn edit_select_tool_material(
     mode: Res<ViewMode>,
     keys: Res<ButtonInput<KeyCode>>,
+    cursors: Query<&CursorOptions, With<PrimaryWindow>>,
+    harness: Option<Res<crate::harness::HarnessActive>>,
     pool: Res<MaterialPool>,
     mut edit: ResMut<EditState>,
 ) {
-    if *mode != ViewMode::Fp {
+    let cursor_grabbed = cursors
+        .single()
+        .map(|c| c.grab_mode != CursorGrabMode::None)
+        .unwrap_or(false);
+    let editing = cursor_grabbed || crate::harness::scripted_edit_active(harness.as_deref());
+    if *mode != ViewMode::Fp || !editing {
         return;
     }
     // Palette ids are dense `1..=max_id`; `handles[id]` is indexed by id, so
@@ -247,18 +297,22 @@ pub fn fp_edit_voxels(
     harness: Option<Res<crate::harness::HarnessActive>>,
     runtime: Res<WorldRuntime>,
     render_cfg: Res<RenderConfig>,
-    streamer: Res<ChunkStreamer>,
+    perf: Res<crate::perf::Perf>,
     mut edit: ResMut<EditState>,
     mut loaded: ResMut<LoadedChunks>,
-    mut workers: ResMut<BrickGenWorkers>,
-    mut spawn: EditSpawn,
+    mut edit_workers: ResMut<EditApplyWorkers>,
     mut edit_tx: MessageWriter<VoxelEditEvent>,
-    mut commands: Commands,
 ) {
-    if harness.is_some() || *mode != ViewMode::Fp || !state.ready {
+    // Editing is normally inert under the harness (golden captures must not
+    // carve). `ATOMR_HARNESS_EDIT` opts a harness run into scripted editing —
+    // the documented "harness-driven edit hook" — so a scene can fire a carve
+    // (`mouse_button_press`) and we can capture the fracture / debris result.
+    let harness_edit = crate::harness::scripted_edit_active(harness.as_deref());
+    if (harness.is_some() && !harness_edit) || *mode != ViewMode::Fp || !state.ready {
         edit.last_hit = None;
         return;
     }
+    let _scope = perf.scope(crate::perf::Phase::EditApply);
 
     // Ray from the rendered camera pose (eye/target — *not* the smoothed motion
     // forward) so the crosshair and the pick agree pixel-for-pixel.
@@ -283,7 +337,10 @@ pub fn fp_edit_voxels(
         .single()
         .map(|c| c.grab_mode != CursorGrabMode::None)
         .unwrap_or(false);
-    let edits_enabled = locked_now && edit.prev_cursor_locked;
+    // Under the scripted-edit harness the cursor is never grabbed, so accept the
+    // click directly; interactively, require a prior-frame grab so the click
+    // that grabs the cursor doesn't also carve.
+    let edits_enabled = harness_edit || (locked_now && edit.prev_cursor_locked);
     edit.prev_cursor_locked = locked_now;
 
     let remove = mouse.just_pressed(MouseButton::Left);
@@ -305,12 +362,13 @@ pub fn fp_edit_voxels(
     };
 
     let address: Address = state.addr.into();
-    let frame = streamer.frame;
-    let shading_mode = render_cfg.shading.mode();
-    let raymarch_tier = render_cfg.raymarch_tier;
 
-    // The bricks an edit can touch (a superset the client refreshes).
-    let affected: Vec<IVec3> = match edit.tool {
+    // Build the write `Envelope` + predict the affected bricks — all pure, no
+    // host call on the render thread. We also eager-patch the resident voxels
+    // (copy-on-write) so the same-frame fracture snapshot and the picker see the
+    // carve immediately; the authoritative remeshed brick lands a frame or two
+    // later via the off-thread refresh (`apply_edit_refreshes`).
+    let (write_env, affected): (Envelope<WorldRequest>, Vec<IVec3>) = match edit.tool {
         ToolKind::Voxel => {
             // Single voxel: integer `pos` (no metric conversion), exactly one brick.
             let env = Envelope::new(0, address, WorldRequest::WriteVoxel {
@@ -318,8 +376,8 @@ pub fn fp_edit_voxels(
                 pos: target_cell,
                 voxel,
             });
-            let _ = runtime.runtime.handle().block_on(runtime.host.request(env));
-            vec![brick_of(target_cell)]
+            patch_resident_voxel(&mut loaded, target_cell, voxel);
+            (env, vec![brick_of(target_cell)])
         }
         kind => {
             // Brush: convert the integer target to the host's metric space.
@@ -337,101 +395,143 @@ pub fn fp_edit_voxels(
                 unit,
                 voxel,
             });
-            let _ = runtime.runtime.handle().block_on(runtime.host.request(env));
             // Predict the touched bricks with the *same* call the host uses.
-            unit.affected_voxels(scale, center, BRICK_EDGE as i64).bricks
+            let affected = unit.affected_voxels(scale, center, BRICK_EDGE as i64).bricks;
+            patch_resident_brush(&mut loaded, &affected, center, unit, voxel);
+            (env, affected)
         }
     };
 
+    // Apply the write + refresh the touched bricks ENTIRELY off the render
+    // thread. Previously this was up to three `block_on`s on the main thread
+    // (the write, then `fetch_and_build` per brick — FBM gen + greedy mesh + AO
+    // bake) — a small brush over cache-cold terrain stalled the frame for ~240
+    // ms. The single off-thread task journals the write, then refetches +
+    // remeshes each brick; `apply_edit_refreshes` swaps the results in
+    // make-before-break, so the edit is flicker-free and the frame never blocks.
     let keys = keys_to_refresh(&affected, &loaded);
-    if keys.len() <= MAX_SYNC_REFRESH_BRICKS {
-        // Sync: re-fetch authoritative bytes and swap each brick in place.
-        for key in keys {
-            let ready = runtime.runtime.handle().block_on(fetch_and_build(
-                runtime.host.clone(),
-                render_cfg.ao.clone(),
-                address,
-                key.0,
-                Lod::new(0),
-            ));
-            spawn_edited_brick(
-                ready,
-                frame,
-                shading_mode,
-                &spawn.pool,
-                &spawn.voxel_pool,
-                &spawn.res,
-                raymarch_tier,
-                &mut spawn.cache,
-                &mut spawn.stats,
-                &mut spawn.meshes,
-                &mut spawn.materials,
-                &mut spawn.storage_buffers,
-                &mut commands,
-                &mut loaded,
-            );
-        }
-    } else {
-        // Large brush: drop the affected entries (despawn + decref) and let the
-        // normal async pipeline re-stream them, so the frame doesn't stall.
-        for key in keys {
-            if let Some(ent) = loaded.get(&key).and_then(|c| c.entity) {
-                commands.entity(ent).despawn();
-            }
-            release_chunk_dag(&loaded, &key, &mut spawn.cache);
-            loaded.remove(&key);
-            workers.forget(&key);
-        }
-    }
+    edit_workers.dispatch_edit(runtime.host.clone(), render_cfg.ao.clone(), address, write_env, keys);
 
     // Broadcast the edit so client-side physics (and any future listener) can
     // react. `affected` is the brick superset the host touched.
     edit_tx.write(VoxelEditEvent { addr: address, removed: remove, bricks: affected });
 }
 
-/// Marker on the reusable selection-highlight cube repositioned each frame from
-/// [`EditState::last_hit`].
+/// Drain finished edit-brick refreshes and swap them in make-before-break: the
+/// old brick stayed visible until now, so the carve / placement appears with no
+/// gap or flicker. Skips bricks the streamer has since evicted / started fading
+/// (don't resurrect them). Mirrors the fracture pipeline's step-0 swap, and runs
+/// right after [`fp_edit_voxels`] in the FP system chain.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_edit_refreshes(
+    render_cfg: Res<RenderConfig>,
+    streamer: Res<ChunkStreamer>,
+    perf: Res<crate::perf::Perf>,
+    mut loaded: ResMut<LoadedChunks>,
+    mut edit_workers: ResMut<EditApplyWorkers>,
+    mut spawn: EditSpawn,
+    mut commands: Commands,
+) {
+    let _scope = perf.scope(crate::perf::Phase::EditRefresh);
+    let frame = streamer.frame;
+    let shading_mode = render_cfg.shading.mode();
+    let raymarch_tier = render_cfg.raymarch_tier;
+    for ready in edit_workers.drain_refresh() {
+        let key = (ready.coord, ready.lod.depth);
+        if loaded.get(&key).map(|c| c.is_fading_out).unwrap_or(true) {
+            continue;
+        }
+        spawn_edited_brick(
+            ready,
+            frame,
+            shading_mode,
+            &spawn.pool,
+            &spawn.voxel_pool,
+            &spawn.res,
+            raymarch_tier,
+            &mut spawn.cache,
+            &mut spawn.stats,
+            &mut spawn.meshes,
+            &mut spawn.materials,
+            &mut spawn.storage_buffers,
+            &mut commands,
+            &mut loaded,
+        );
+    }
+    perf.set_edit_refresh_in_flight(edit_workers.refresh_in_flight_count());
+}
+
+/// Marker on the reusable selection-highlight mesh repositioned + reshaped each
+/// frame from [`EditState`] (the pick, the tool, and the brush radius).
 #[derive(Component)]
 pub struct EditHighlight;
 
-/// Spawn the single reusable selection-highlight cube (hidden until a pick
-/// lands). Skipped under the harness so FP captures don't gain the overlay.
+/// Unit highlight meshes (1 m cube, 1 m-radius sphere) the highlight swaps
+/// between per tool. Sizing is done with `Transform::scale` so a brush-radius
+/// change shows live without rebuilding a mesh.
+#[derive(Resource)]
+pub struct EditHighlightMeshes {
+    cube: Handle<Mesh>,
+    sphere: Handle<Mesh>,
+}
+
+/// Spawn the single reusable selection highlight (hidden until a pick lands) and
+/// register its unit meshes. Skipped under the harness so FP captures don't gain
+/// the overlay.
 pub fn setup_edit_highlight(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     harness: Option<Res<crate::harness::HarnessActive>>,
 ) {
-    if harness.is_some() {
+    // Inert under the harness so golden captures don't gain the overlay — unless
+    // the scripted-edit hook is on, where showing the targeting highlight is the
+    // point (see `ATOMR_HARNESS_EDIT` in `fp_edit_voxels`).
+    if harness.is_some() && !crate::harness::scripted_edit_active(harness.as_deref()) {
         return;
     }
-    // Slightly larger than a unit voxel so it reads as an outline hugging the
-    // targeted cell. Unlit + translucent so it tints rather than occludes.
-    let mesh = meshes.add(Cuboid::new(1.04, 1.04, 1.04));
+    // Unit shapes — `fp_edit_highlight` scales them to the brush each frame.
+    let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let sphere = meshes.add(Sphere::new(1.0));
+    // Unlit + translucent so it tints the affected volume rather than occluding.
+    // Double-sided (`cull_mode: None`) so a brush sphere/cube still reads when the
+    // camera sits inside it — e.g. aiming a fat brush at the ground underfoot.
     let material = materials.add(StandardMaterial {
         base_color: Color::srgba(1.0, 0.95, 0.25, 0.22),
         unlit: true,
         alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        double_sided: true,
         ..default()
     });
     commands.spawn((
-        Mesh3d(mesh),
+        Mesh3d(cube.clone()),
         MeshMaterial3d(material),
         Transform::default(),
         Visibility::Hidden,
         EditHighlight,
     ));
+    commands.insert_resource(EditHighlightMeshes { cube, sphere });
 }
 
-/// Reposition the highlight cube onto the currently-targeted voxel (centered at
-/// `cell + 0.5`, since the render grid is 1 m/voxel), or hide it when there's no
-/// pick / we're not in first-person.
+/// Match the highlight to the targeted voxel **and** the active brush: a
+/// single-voxel cube for the `Voxel` tool, a sphere of radius `radius_voxels` for
+/// `Sphere`/`Cone`, and a cube of half-edge `radius_voxels` for `Cube` — so the
+/// highlighted volume is exactly the set of voxels an edit will affect.
+///
+/// The render grid is 1 m/voxel and the host brush's metric scale cancels out
+/// (a brush of `radius_voxels` reaches integer cells within `radius_voxels` of
+/// the target, which draw at 1 m each), so the brush radius in world meters *is*
+/// `radius_voxels`, centred at the voxel centre `cell + 0.5`. Hidden when there's
+/// no pick or we're not in first-person.
 pub fn fp_edit_highlight(
     mode: Res<ViewMode>,
     edit: Res<EditState>,
-    mut q: Query<(&mut Transform, &mut Visibility), With<EditHighlight>>,
+    meshes: Option<Res<EditHighlightMeshes>>,
+    mut q: Query<(&mut Transform, &mut Visibility, &mut Mesh3d), With<EditHighlight>>,
 ) {
-    let Ok((mut tf, mut vis)) = q.single_mut() else { return };
+    let Ok((mut tf, mut vis, mut mesh)) = q.single_mut() else { return };
+    let Some(meshes) = meshes else { return };
     if *mode == ViewMode::Fp {
         if let Some(hit) = edit.last_hit {
             tf.translation = Vec3::new(
@@ -439,6 +539,23 @@ pub fn fp_edit_highlight(
                 hit.cell.y as f32 + 0.5,
                 hit.cell.z as f32 + 0.5,
             );
+            // Effective brush radius in voxels (= world metres). The `0.5` floor
+            // mirrors the host's `radius_m.max(mpv*0.5)` so a tiny brush still
+            // reads as ~one voxel.
+            let r = edit.radius_voxels.max(0.5) as f32;
+            let (want, scale) = match edit.tool {
+                // Single voxel: a unit cube hugging the cell (slightly oversized
+                // so it reads as an outline, not a coplanar face).
+                ToolKind::Voxel => (&meshes.cube, Vec3::splat(1.04)),
+                // Cube brush: half-edge `r` → full side `2 r`.
+                ToolKind::Cube => (&meshes.cube, Vec3::splat(2.0 * r)),
+                // Sphere / cone: unit-radius sphere scaled to radius `r`.
+                _ => (&meshes.sphere, Vec3::splat(r)),
+            };
+            if mesh.0.id() != want.id() {
+                mesh.0 = want.clone();
+            }
+            tf.scale = scale;
             if *vis != Visibility::Visible {
                 *vis = Visibility::Visible;
             }

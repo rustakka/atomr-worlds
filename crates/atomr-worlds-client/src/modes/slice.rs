@@ -15,15 +15,25 @@
 
 use atomr_worlds_core::coord::DVec3;
 use atomr_worlds_view::derived::slice_index::build_slice_table_with_lod_fn;
-use atomr_worlds_view::{SliceCamera, SliceConfig, WorldQuery};
+use atomr_worlds_view::{SliceCamera, SliceConfig, SliceTable, WorldQuery};
 use bevy::prelude::*;
 
 use crate::modes::blit::{copy_framebuffer_to_image, RasterTarget, RASTER_H, RASTER_W};
 use crate::modes::fp::FpState;
+use crate::modes::raster_async::AsyncBuild;
 use crate::render::{RenderConfig, SliceRenderInputs, WorldTime};
 use crate::view_mode::ViewMode;
 use crate::world_runtime::WorldRuntime;
 use crate::world_stream::ChunkStreamer;
+
+/// Footprint key that decides when the off-thread [`SliceTable`] rebuild fires:
+/// the sampled-region min corner (1 voxel granularity) + the z-band top.
+type SliceKey = (i32, i32, i32);
+
+/// Caches the most-recent [`SliceTable`], rebuilt off the render thread by
+/// [`slice_render`] when the footprint moves. See [`AsyncBuild`] for why.
+#[derive(Resource, Default)]
+pub struct SliceTableCache(pub AsyncBuild<SliceTable, SliceKey>);
 
 /// Z-band thickness in voxels. 3 ≈ DF default.
 const Z_BAND_THICKNESS: u8 = 3;
@@ -39,6 +49,7 @@ pub struct SlicePlugin;
 impl Plugin for SlicePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SliceState>()
+            .init_resource::<SliceTableCache>()
             .add_systems(Update, slice_input)
             .add_systems(Update, slice_render);
     }
@@ -146,50 +157,124 @@ fn slice_render(
     render_cfg: Res<RenderConfig>,
     world_time: Res<WorldTime>,
     target: Res<RasterTarget>,
+    perf: Res<crate::perf::Perf>,
+    harness: Option<Res<crate::harness::HarnessActive>>,
+    mut cache: ResMut<SliceTableCache>,
     mut images: ResMut<Assets<Image>>,
 ) {
     if *mode != ViewMode::Slice {
         return;
     }
+    let _scope = perf.scope(crate::perf::Phase::SliceRtsRaster);
     let center_x = state.center_xz[0];
     let center_z = state.center_xz[1];
     let half = (SLICE_FOOTPRINT_VOX as f32) * 0.5;
     let min_x = (center_x - half).floor() as i32;
     let min_z = (center_z - half).floor() as i32;
-    // Per-column LOD: columns within the streamer's transition radius
-    // sample at near_lod; everything beyond falls back to far_lod. Voxel
-    // size in slice mode is 1 m per voxel, so XZ voxel coords already line
-    // up with the meter-space the streamer expects. The LOD observer is
-    // the slice's own pan center (lifted to the active z-band so the LOD
-    // ring sits on the visible plane), so panning the slice always keeps
-    // the high-detail ring under the visible footprint instead of leaving
-    // it stuck where the FP camera last stood.
-    let lod_observer = DVec3::new(
-        center_x as f64,
-        state.z_band_top as f64,
-        center_z as f64,
+
+    // Under the harness, build + draw the table SYNCHRONOUSLY this frame,
+    // centered on the live pan center — byte-identical to the pre-change path,
+    // so golden captures stay deterministic. (The off-thread cache below would
+    // make the capture frame depend on a background thread's wall-clock.) The
+    // async cache path is interactive-only.
+    if harness.is_some() {
+        let lod_observer = DVec3::new(center_x as f64, state.z_band_top as f64, center_z as f64);
+        let table = build_slice_table_with_lod_fn(
+            runtime.query.as_ref(),
+            &fp_state.addr,
+            [min_x, min_z],
+            [SLICE_FOOTPRINT_VOX, SLICE_FOOTPRINT_VOX],
+            state.z_band_top,
+            Z_BAND_THICKNESS,
+            |[wx, wz]| {
+                let p = DVec3::new(wx as f64, lod_observer.y, wz as f64);
+                streamer.lod_for_meters(lod_observer, p)
+            },
+        );
+        draw_slice(
+            &table,
+            [center_x, center_z],
+            state.z_band_top,
+            &render_cfg,
+            &world_time,
+            &target,
+            &mut images,
+        );
+        return;
+    }
+
+    // Interactive: build the SliceTable off the render thread (the builder calls
+    // the host `WorldQuery::brick` = `block_on` for ~64×64 columns, which stalled
+    // the frame every frame). Rebuild only when the footprint (min corner +
+    // z-band) moves; otherwise redraw the cached table. The per-column LOD
+    // observer is the slice's own pan center, lifted to the active z-band.
+    cache.0.poll();
+    perf.set_snapshot_rebuilding(cache.0.is_rebuilding());
+    let key: SliceKey = (min_x, min_z, state.z_band_top);
+    if cache.0.needs_rebuild(&key) {
+        let query = runtime.query.clone();
+        let streamer = streamer.clone();
+        let addr = fp_state.addr;
+        let z_band_top = state.z_band_top;
+        let lod_observer = DVec3::new(center_x as f64, z_band_top as f64, center_z as f64);
+        cache.0.spawn(key, move || {
+            build_slice_table_with_lod_fn(
+                query.as_ref(),
+                &addr,
+                [min_x, min_z],
+                [SLICE_FOOTPRINT_VOX, SLICE_FOOTPRINT_VOX],
+                z_band_top,
+                Z_BAND_THICKNESS,
+                |[wx, wz]| {
+                    let p = DVec3::new(wx as f64, lod_observer.y, wz as f64);
+                    streamer.lod_for_meters(lod_observer, p)
+                },
+            )
+        });
+    }
+    // Nothing built yet (first frames after entering the view) — skip; the
+    // raster target keeps its prior contents until the first table lands.
+    let Some(table) = cache.0.current() else {
+        return;
+    };
+    // Frame the camera on the footprint the *current* table was built for (which
+    // may lag the live pan by one rebuild), so the camera and table stay aligned
+    // — the whole view steps forward when a rebuild lands rather than the camera
+    // sliding over a stale table.
+    let built = cache.0.built_for().copied().unwrap_or(key);
+    draw_slice(
+        table,
+        [built.0 as f32 + half, built.1 as f32 + half],
+        built.2,
+        &render_cfg,
+        &world_time,
+        &target,
+        &mut images,
     );
-    let table = build_slice_table_with_lod_fn(
-        runtime.query.as_ref(),
-        &fp_state.addr,
-        [min_x, min_z],
-        [SLICE_FOOTPRINT_VOX, SLICE_FOOTPRINT_VOX],
-        state.z_band_top,
-        Z_BAND_THICKNESS,
-        |[wx, wz]| {
-            let p = DVec3::new(wx as f64, lod_observer.y, wz as f64);
-            streamer.lod_for_meters(lod_observer, p)
-        },
-    );
+}
+
+/// Rasterize a [`SliceTable`] to the shared raster target. Shared by the harness
+/// path (synchronous build, live center) and the interactive path (cached build,
+/// `built_for` center) so both rasterize identically.
+fn draw_slice(
+    table: &SliceTable,
+    center_xz: [f32; 2],
+    z_band_top: i32,
+    render_cfg: &RenderConfig,
+    world_time: &WorldTime,
+    target: &RasterTarget,
+    images: &mut Assets<Image>,
+) {
+    let half = (SLICE_FOOTPRINT_VOX as f32) * 0.5;
     let cam = SliceCamera {
-        center_xz: [center_x, center_z],
-        z_band_top: state.z_band_top,
+        center_xz,
+        z_band_top,
         z_band_thickness: Z_BAND_THICKNESS,
         half_height_m: half,
         aspect: 1.0,
     };
-    // `shading` / `light_dir_xz_y` are overridden by the strategy; the
-    // rest of the config fills the fixed raster exactly.
+    // `shading` / `light_dir_xz_y` are overridden by the strategy; the rest of
+    // the config fills the fixed raster exactly.
     let base_cfg = SliceConfig {
         width: RASTER_W,
         height: RASTER_H,
@@ -200,17 +285,10 @@ fn slice_render(
         ..SliceConfig::default()
     };
     let palette = render_cfg.palette.palette();
-    // Sun direction FROM sun INTO scene — same value the FP view's
-    // directional light uses, so the slice's relief shading is consistent
-    // with the 3D scene.
+    // Sun direction FROM sun INTO scene — same value the FP view's directional
+    // light uses, so the slice's relief shading matches the 3D scene.
     let sun_dir = render_cfg.sun_curve.sun_state(world_time.0).direction;
-    let inputs = SliceRenderInputs {
-        table: &table,
-        cam: &cam,
-        palette: &palette,
-        base_cfg,
-        sun_dir,
-    };
+    let inputs = SliceRenderInputs { table, cam: &cam, palette: &palette, base_cfg, sun_dir };
     let fb = render_cfg.slice.render(&inputs);
-    copy_framebuffer_to_image(&mut images, &target, &fb);
+    copy_framebuffer_to_image(images, target, &fb);
 }

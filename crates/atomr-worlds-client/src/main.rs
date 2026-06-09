@@ -18,6 +18,7 @@ mod harness;
 mod host_backend;
 mod hud;
 mod modes;
+mod perf;
 #[cfg(feature = "physics")]
 mod physics;
 mod render;
@@ -39,7 +40,14 @@ use crate::world_runtime::{ActiveWorld, WorldRuntime};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Send logs to stderr so stdout stays clean for `HARNESS_SHOT` lines.
-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+    //
+    // Under `--features profiling` we layer the Tracy collector onto the same
+    // stderr `fmt` subscriber, so the crate's `info_span!` zones stream to the
+    // Tracy GUI while logs still go to stderr (HARNESS_SHOT stdout purity is
+    // preserved). We add Tracy directly rather than via `bevy/trace_tracy`
+    // because that feature is unbuildable on the pinned bevy 0.18.1 (see the
+    // `profiling` feature note in Cargo.toml).
+    init_tracing();
     let cli = Cli::parse();
 
     let runtime = Arc::new(
@@ -167,15 +175,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_plugins(modes::overview::OverviewPlugin)
         .add_plugins(hud::HudPlugin)
         .add_plugins(hud::FrameDiagPlugin)
+        // Frame-pacing profiler (in-app F3 overlay + spike logger). Inert under
+        // the harness: when not interactive, the overlay/toggle/logger systems
+        // are never added and every PerfScope is a no-op, so golden captures
+        // are byte-identical.
+        .add_plugins(perf::PerfPlugin { interactive: harness_bits.is_none() })
         .add_systems(Update, view_mode_input_system);
 
     // Client-side physics (Rec 2). Forced off under the harness so golden
     // captures are never perturbed by collision. The plugin is fully inert
-    // when `enabled` is false.
+    // when `enabled` is false. The `ATOMR_HARNESS_PHYSICS` escape hatch opts a
+    // harness run back into physics (e.g. to visually verify fracture / debris);
+    // unset — the default — the harness path is byte-identical to before.
     #[cfg(feature = "physics")]
     {
         let mut pcfg = physics::PhysicsConfig::default();
-        pcfg.enabled = harness_bits.is_none() && matches!(cli.physics, cli::PhysicsToggle::On);
+        let harness_physics = std::env::var_os("ATOMR_HARNESS_PHYSICS").is_some();
+        pcfg.enabled = (harness_bits.is_none() || harness_physics)
+            && matches!(cli.physics, cli::PhysicsToggle::On);
         match cli.collider {
             cli::ColliderArg::Greedy => {}
             cli::ColliderArg::PerVoxel => {
@@ -216,6 +233,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.run();
 
     Ok(())
+}
+
+/// Install the global tracing subscriber. Logs go to stderr in both modes (so
+/// stdout stays reserved for `HARNESS_SHOT` lines). Under `--features profiling`
+/// the Tracy collector is layered on so the crate's `info_span!` zones stream
+/// to the Tracy GUI.
+#[cfg(not(feature = "profiling"))]
+fn init_tracing() {
+    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+}
+
+#[cfg(feature = "profiling")]
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(tracing_tracy::TracyLayer::default())
+        .init();
 }
 
 /// Resolve the directory the [`AssetServer`] reads from. Bevy's

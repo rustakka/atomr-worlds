@@ -16,6 +16,8 @@
 //! - [`inertia`] — center of mass + inertia tensor from per-voxel density.
 //! - [`debris`] — a [`debris::DebrisBody`] extracted from a voxel island, with
 //!   its mass properties and rigid-body state.
+//! - [`fracture_analysis`] — the fully-baked, off-thread-able carve analysis
+//!   (flood-fill → islands → greedy boxes + mass) the client runs on a worker.
 //! - [`math`] — the small `f64` linear algebra the inertia solver needs.
 //!
 //! # Determinism boundary
@@ -32,11 +34,13 @@
 pub mod box_merge;
 pub mod debris;
 pub mod flood_fill;
+pub mod fracture_analysis;
 pub mod inertia;
 pub mod math;
 
 pub use box_merge::{greedy_boxes, Cuboid};
 pub use debris::DebrisBody;
 pub use flood_fill::{connected_components, Components};
+pub use fracture_analysis::{analyze_region, AnalyzedIsland, FractureAnalysis};
 pub use inertia::{mass_properties, MassProperties};
 pub use math::Mat3;

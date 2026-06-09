@@ -20,6 +20,21 @@ path = "src/main.rs"
 # runtime with `--physics off`.
 default = ["physics"]
 physics = ["dep:bevy_rapier3d", "dep:atomr-worlds-physics"]
+# Tracy flamegraph capture of the hot paths via the external Tracy GUI.
+#
+# NB: we deliberately do NOT go through `bevy/trace_tracy`. On the pinned bevy
+# 0.18.1, the `trace` feature fans out to every subcrate including
+# `bevy_anti_alias`, whose `^0.18.0` was never published to crates.io (only
+# 0.17.x exists) — so `bevy/trace*` is unbuildable here. Instead we add the
+# Tracy layer directly to our own `tracing_subscriber` (see `main.rs`), which
+# captures the crate's `info_span!` zones (the async brick pipeline, mesh/AO/DAG
+# bake, fracture analysis + writeback, brick spawn). Bevy's built-in per-system
+# spans are unavailable for that same upstream reason; the in-app F3 overlay's
+# per-phase breakdown covers that need. OFF by default → normal/harness builds
+# pull no Tracy code and every `info_span!` zone is a no-op.
+#
+# Run: launch the Tracy GUI, then `cargo run --release --features profiling`.
+profiling = ["dep:tracing-tracy"]
 
 [dependencies]
 atomr-worlds-core     = { workspace = true }
@@ -37,6 +52,10 @@ tokio   = { workspace = true }
 clap    = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
+# Tracy flamegraph layer, pulled only under the `profiling` feature. Layered
+# onto our own subscriber in `main.rs` (we can't use `bevy/trace_tracy` — see
+# the `profiling` feature comment above).
+tracing-tracy = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 image = { version = "0.24", default-features = false, features = ["png"] }

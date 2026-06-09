@@ -22,13 +22,22 @@ impl Plugin for PhysicsPlugin {
         app.add_plugins(RapierPhysicsPlugin::<NoUserData>::default());
         app.init_resource::<super::character::CharacterState>();
         app.init_resource::<super::character::CharacterIntent>();
+        // Construct the off-thread fracture scheduler once the tokio runtime
+        // exists (mirrors `init_brick_gen_workers`).
+        app.add_systems(Startup, super::fracture::init_fracture_workers);
         app.add_systems(
             Update,
             (
                 sync_rapier_gravity,
                 attach_brick_colliders,
                 detach_brick_colliders,
-                super::fracture::process_fracture_checks,
+                // Carve fracture is split: dispatch the analysis off-thread
+                // after this frame's edit emits its event, then apply finished
+                // analyses (debris + carve + brick refresh) on the main thread.
+                super::fracture::dispatch_fracture_checks
+                    .after(crate::modes::edit::fp_edit_voxels),
+                super::fracture::apply_fracture_results
+                    .after(super::fracture::dispatch_fracture_checks),
                 super::debris::settle_and_despawn_debris,
                 super::character::spawn_player,
             ),

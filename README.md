@@ -144,7 +144,9 @@ and the touched bricks refresh live and flicker-free in **both** render paths.
 | AVA Phase 0 | Bevy 0.13 → 0.18 engine upgrade | ✅ |
 | AVA Phase 1 | Physics palette + `atomr-worlds-physics` + fracture proto + HLC + `DagBrick` SVDAG | ✅ |
 | AVA Rec 1 | GPU DAG raymarcher (**now the default render path**) + off-thread build + cross-brick buffer dedup + occupancy-AABB proxy + CPU determinism golden + **first-person voxel editing** (single-voxel + sphere/cube brushes) | ✅ raymarch default; mesh via `--shading mesh` |
-| AVA Rec 2–4 | rigid-body physics · CRDT destruction sync · scheduler | 🟡 foundations landed |
+| AVA Rec 2 | rapier physics: static colliders + carve→flood-fill→debris + collidable FP character controller + true crouch | ✅ Phases A–C |
+| AVA Rec 3 | off-thread fracture scheduler — flood-fill + island bake on a worker, async brick refresh, so large carves don't stall the frame | ✅ |
+| AVA Rec 4 | actor-CRDT destruction sync | 🟡 `HlcTimestamp` landed; actor/proto wiring next |
 
 (AVA = *Advanced Voxel Architectures* — see the roadmap doc above.)
 
@@ -233,8 +235,13 @@ place:
 Aim with the FP camera; **left-click removes** the targeted voxel, **right-click
 places** the selected material against the hit face. Single voxels plus sphere /
 cube brushes (`Tab` cycles the tool, `[` / `]` size the brush, digit keys pick
-the material), with a crosshair, a selection highlight, and a tool/material HUD
-readout. Key pieces:
+the material), with a crosshair, a tool/material HUD readout, and a **selection
+highlight that matches the active tool + brush radius** — a unit cube for the
+Voxel tool, a sphere of radius `radius_voxels` for Sphere, a cube of half-edge
+`radius_voxels` for Cube — so the highlighted volume is exactly what an edit will
+affect. While the cursor is grabbed (editing), `Tab` and the number row belong to
+the editor; release the cursor (`Esc`) to use them as the global view switcher.
+Key pieces:
 
 - **World-space picker** — `atomr_worlds_voxel::world_ray_first_solid`, a pure
   Amanatides–Woo DDA over the unbounded 1 m/voxel grid (kept separate from the
@@ -513,8 +520,11 @@ Controls: `WASD` to move, mouse-look once the cursor is grabbed (`Esc` releases)
 creative flight** (collision still enforced — you won't clip through terrain):
 while flying, `Space` ascends, `Left Ctrl` descends, `Shift` flies faster;
 double-tap `Space` again to drop out. `1..=5` picks a view mode (`fp` / `tp` /
-`slice` / `rts` / `overview`), `Tab` cycles. Slice/RTS/overview have per-mode
-hotkeys — see [docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md).
+`slice` / `rts` / `overview`), `Tab` cycles. **While the cursor is grabbed in
+first-person, `Tab` and the number row drive the voxel editor instead (cycle
+brush / pick material); release the cursor (`Esc`) to switch views with them.**
+Slice/RTS/overview have per-mode hotkeys — see
+[docs/CLIENT_SERVER.md](docs/CLIENT_SERVER.md).
 
 ### Screenshot test harness
 

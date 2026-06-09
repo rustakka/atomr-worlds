@@ -60,9 +60,9 @@ subsystem** that never flows into `GetBrick` / the `Journal`. Fracture
 | **Phase 0** | Bevy 0.13 → 0.18 upgrade (4 majors; 0.15 skipped) | ✅ landed (PRs #6–#10) — see [PHASES.md](PHASES.md) "Phase 0 (Advanced Voxel Architectures)" |
 | **Phase 1** | Shared foundations | ✅ landed (PRs #1–#4) — see [PHYSICS.md](PHYSICS.md), PHASES.md "Phase 20/20.1/20.2" |
 | **Rec 1** | SVDAG + GPU raymarcher + voxel editing | ✅ finished — GPU DAG raymarcher is now the **default** render path (proxy-cube fragment raymarcher + off-thread build + cross-brick buffer dedup + occupancy-AABB proxy + CPU render golden); first-person **voxel editing** landed (single-voxel + sphere/cube brushes, host-authoritative, live refresh in both paths); mesh path stays via `--shading mesh` / `RenderPreset::Legacy` |
-| **Rec 2** | rapier physics + fracture | 🟢 Phase A landed (PHASES.md "Phase 20.3") — `bevy_rapier3d` client integration: static leaf-LOD terrain colliders + carve→flood-fill→falling debris. Char-controller / Tier-1 debris / off-thread fracture deferred |
+| **Rec 2** | rapier physics + fracture | 🟢 Phases A–C landed (PHASES.md "Phase 20.3 / Phase B PR #16 / Phase C PR #24") — `bevy_rapier3d` client integration: static leaf-LOD terrain colliders, carve→flood-fill→falling debris, collidable FP character controller, true crouch. Tier-1 raymarched debris / rounded narrow-phase deferred |
+| **Rec 3** | physics-island scheduler | 🟢 landed (PHASES.md "Phase 20.5") — the carve fracture pipeline (flood-fill + island bake) runs **off-thread**, and the per-brick refresh is dispatched through the async streaming pool, so large carves no longer stall the frame. Parallel rapier island solve unneeded at current debris counts |
 | **Rec 4** | Actor-CRDT destruction sync | 🟡 `HlcTimestamp` landed; actor/proto/CRDT wiring remains |
-| **Rec 3** | physics-island scheduler | ⬜ deferred — use Bevy `ComputeTaskPool`; micropool only if profiling warrants |
 
 ### Landed so far
 
@@ -117,20 +117,27 @@ subsystem** that never flows into `GetBrick` / the `Journal`. Fracture
   currently covers the LOD-0 near ring; coarse-tier edits self-heal on re-stream,
   and a harness-driven edit hook (for automated edit captures) is a small
   follow-up.
-- **Rec 2** — 🟢 Phase A landed (`bevy_rapier3d`, client-side only, behind the
+- **Rec 2** — 🟢 Phases A–C landed (`bevy_rapier3d`, client-side only, behind the
   client's `physics` feature; never touches the determinism path): static
   leaf-LOD voxel colliders from resident bricks (greedy box-merge → rapier
-  compound) + carve→flood-fill→falling `DebrisBody` debris that lands on the
-  terrain, rendered via the existing `MaterialPool`. Pluggable `ColliderStrategy`
+  compound) + carve→flood-fill→falling `DebrisBody` debris, a collidable
+  first-person character controller (`KinematicCharacterController`), and true
+  crouch (capsule resize + headroom probe). Pluggable `ColliderStrategy`
   (`--collider greedy|per-voxel`) mirrors the render strategy spine. Deferred to
-  later slices: a collidable first-person character controller (camera is still
-  free-fly), raymarched/Tier-1 debris + rounded narrow-phase (v2), and off-thread
-  flood-fill (the Rec 3 lever) for large brushes.
+  later slices: raymarched/Tier-1 debris + rounded narrow-phase (v2).
+- **Rec 3** — 🟢 landed: the carve fracture pipeline runs **off the render
+  thread** (PHASES.md "Phase 20.5"). The pure flood-fill + island bake
+  (`atomr-worlds-physics::fracture_analysis`) runs on a worker over a cheap
+  `Arc<Brick>` snapshot; the dominant per-brick refresh (`fetch_and_build`) is
+  dispatched through the async streaming pool and swapped in flicker-free
+  (make-before-break), so a large carve no longer stalls the frame. The doc's
+  "migrate Rayon → micropool" premise was moot (no Rayon); parallel rapier island
+  solving is unneeded at current debris counts.
 - **Rec 4** — wire `FractureRequest`/`FractureApplied` into `WorldRequest`/
   `WorldEvent` + the `WorldActor`; promote the write overlay to an
   HLC-timestamped LWW map; deterministic geometry (reliable channel) + debris
-  interpolation (unreliable channel) + per-cell CRDT merge.
-- **Rec 3** — parallel physics-island solve via Bevy `ComputeTaskPool::scope`.
+  interpolation (unreliable channel) + per-cell CRDT merge. **The next headline
+  recommendation.**
 
 ## Upstream feature requests (to `../atomr` / ecosystem) — only what's needed
 

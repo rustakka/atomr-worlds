@@ -171,16 +171,104 @@ impl BrickGenWorkers {
     pub fn contains(&self, key: &Key) -> bool {
         self.in_flight.contains(key)
     }
+}
 
-    /// Forget an in-flight key so the streamer is free to re-dispatch it.
-    /// Used by the large-brush edit refresh (`crate::modes::edit`), which
-    /// drops the affected `LoadedChunks` entries and lets the normal async
-    /// pipeline re-stream them; any stale in-flight fetch for the key would
-    /// otherwise block that re-dispatch. A dropped result for a forgotten
-    /// key is harmless — `drain` just removes it from `in_flight` again.
+/// Shared off-thread brick-refresh queue: an in-flight dedup set, a result
+/// channel, and a "dirtied-again" pending set. Used by both the edit
+/// ([`crate::modes::edit_workers::EditApplyWorkers`]) and fracture
+/// ([`crate::physics::fracture`]) write-back paths so the dedup + redispatch
+/// logic lives in one place.
+///
+/// # The dirtied-again problem
+///
+/// A refresh = re-fetch authoritative bytes + remesh, which takes longer than a
+/// frame. If a second write lands on a brick whose refresh is still in flight,
+/// naively deduping it (skip — already in flight) leaves the rendered mesh stuck
+/// at the *first* write: the in-flight refetch was issued before the second
+/// write, so its `BrickReady` reflects stale geometry, and nothing re-meshes the
+/// brick afterward. [`claim`](Self::claim) instead marks such a brick `pending`,
+/// and [`drain`](Self::drain) reports it for a re-refetch against the now-latest
+/// host state once the first refresh lands.
+pub struct BrickRefreshQueue {
+    in_flight: HashSet<Key>,
+    pending: HashSet<Key>,
+    tx: mpsc::Sender<BrickReady>,
+    rx: Mutex<mpsc::Receiver<BrickReady>>,
+}
+
+impl Default for BrickRefreshQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BrickRefreshQueue {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self { in_flight: HashSet::new(), pending: HashSet::new(), tx, rx: Mutex::new(rx) }
+    }
+
+    /// Claim `keys` for refresh. Returns the keys the caller should refetch
+    /// (those not already in flight); keys already in flight are marked
+    /// `pending` so they get re-refetched when their current refresh lands.
+    pub fn claim<I: IntoIterator<Item = Key>>(&mut self, keys: I) -> Vec<Key> {
+        let mut fresh = Vec::new();
+        for k in keys {
+            if self.in_flight.insert(k) {
+                fresh.push(k);
+            } else {
+                self.pending.insert(k);
+            }
+        }
+        fresh
+    }
+
+    /// A sender for the caller to hand finished `BrickReady`s back on.
+    pub fn sender(&self) -> mpsc::Sender<BrickReady> {
+        self.tx.clone()
+    }
+
+    /// Drain finished refreshes. Returns `(ready, redo)` — `redo` lists bricks
+    /// that were dirtied again while their refresh was in flight (kept claimed),
+    /// which the owner should re-refetch against the now-latest host state.
+    pub fn drain(&mut self) -> (Vec<BrickReady>, Vec<Key>) {
+        let mut out = Vec::new();
+        let mut redo = Vec::new();
+        let rx = self.rx.lock().expect("brick refresh rx poisoned");
+        while let Ok(ready) = rx.try_recv() {
+            let key = (ready.coord, ready.lod.depth);
+            self.in_flight.remove(&key);
+            if self.pending.remove(&key) {
+                // Dirtied again while meshing — keep it claimed and re-refetch.
+                self.in_flight.insert(key);
+                redo.push(key);
+            }
+            out.push(ready);
+        }
+        (out, redo)
+    }
+
+    /// Number of refreshes currently outstanding (profiler gauge).
     #[inline]
-    pub fn forget(&mut self, key: &Key) {
-        self.in_flight.remove(key);
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
+    }
+}
+
+/// Refetch + remesh each brick in `keys` off-thread, sending each finished
+/// [`BrickReady`] down `tx`. No write is issued — the host already holds the
+/// latest writes; this just rebuilds the mesh. Used to service the `redo` keys
+/// [`BrickRefreshQueue::drain`] reports.
+pub async fn refetch_bricks(
+    host: Arc<dyn WorldHost>,
+    ao: Arc<dyn AoStrategy>,
+    addr: Address,
+    keys: Vec<Key>,
+    tx: mpsc::Sender<BrickReady>,
+) {
+    for (coord, _) in keys {
+        let ready = fetch_and_build(host.clone(), ao.clone(), addr, coord, Lod::new(0)).await;
+        let _ = tx.send(ready);
     }
 }
 
@@ -199,6 +287,10 @@ impl BrickGenWorkers {
 /// The mesh + AO + DAG build runs on tokio's blocking pool so it never stalls
 /// the reactor; callers driving this from a synchronous context (the edit
 /// refresh) must `block_on` it from a thread that is *not* a runtime worker.
+#[cfg_attr(
+    feature = "profiling",
+    tracing::instrument(name = "fetch_and_build", skip_all, fields(depth = lod.depth))
+)]
 pub async fn fetch_and_build(
     host: Arc<dyn WorldHost>,
     ao: Arc<dyn AoStrategy>,
@@ -220,6 +312,8 @@ pub async fn fetch_and_build(
                 let b = b.clone();
                 let ao = ao.clone();
                 tokio::task::spawn_blocking(move || {
+                    #[cfg(feature = "profiling")]
+                    let _z = tracing::info_span!("brick_mesh_ao_dag").entered();
                     let mut by_mat = greedy_mesh_by_material(&b);
                     for sub in by_mat.values_mut() {
                         ao.bake(sub, &b);

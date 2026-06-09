@@ -225,7 +225,12 @@ Controls in-window:
 - `W A S D` move (Shift = sprint, Space / Ctrl = up/down).
 - Mouse-look in fp/tp once the cursor is grabbed; `Esc` releases it.
 - `1..=5` select view mode (fp / tp / slice / rts / overview).
-- `Tab` cycles forward through the modes.
+- `Tab` cycles forward through the modes. *(While the cursor is grabbed in
+  first-person, `Tab` and `1..=9` drive the voxel editor — cycle brush / pick
+  material — instead of switching views; press `Esc` to release the cursor and
+  use them as the view switcher.)*
+- FP editing: `Tab` cycle brush (voxel / sphere / cube), `[` / `]` brush radius,
+  `1..=9` pick material, left-click carve, right-click place.
 - Slice mode: `PgUp` / `PgDn` cycle the z-band.
 - RTS mode: `Q` / `E` rotate, `+` / `-` zoom.
 - Overview mode: `P` cycles projection; arrows pan; `+` / `-` zoom.

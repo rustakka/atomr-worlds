@@ -2230,3 +2230,84 @@ pipeline (~98–99% of pixels differ from Lambert, max channel delta ~100).
 Cross-brick AO and cross-brick shadows (the top-level acceleration structure / the
 named single-pass-compute lever); image-based / specular ambient (IBL); per-light
 clustered lighting (the tier uses only the first directional light, by design).
+
+## Phase 20.5 *(landed)* — Rec 3: off-thread fracture scheduler
+
+The carve → fracture → debris pipeline (`process_fracture_checks`) used to run
+**entirely on the render thread**: snapshot the resident voxels, flood-fill,
+extract islands, greedy-box + mass solve, then — the dominant cost — `block_on`
+a per-touched-brick `fetch_and_build` (re-fetch + greedy mesh + AO bake + DAG
+build, up to 27 bricks). A large carve stalled the frame for hundreds of ms.
+
+This phase moves the frame-critical work off the main thread — the named Rec 3
+"off-thread flood-fill" lever — by splitting the one system into **dispatch →
+worker → apply**, mirroring the streamer's `BrickGenWorkers` pattern (a
+`Resource` holding an in-flight set + an `mpsc` result channel drained each
+frame).
+
+**Pure analysis core** (`atomr-worlds-physics::fracture_analysis`, engine-
+agnostic): `analyze_region(dims, region_min, voxel_size, palette, is_solid,
+is_anchor, material_at) -> FractureAnalysis`. Runs `connected_components` (pure,
+unchanged) then for each unanchored island bakes the dense material grid,
+`greedy_boxes`, and `DebrisBody` mass — everything the spawn step needs, so the
+main thread does **zero** pure-CPU work. Deterministic (3 property tests).
+
+**Off-thread analysis** (`physics/fracture.rs`):
+- `dispatch_fracture_checks` (main) snapshots the resident, non-fading
+  `Arc<Brick>`s around the carve (cheap refcount bumps) and hands them to
+  `FractureWorkers::dispatch`, which runs `analyze_snapshot` on tokio's blocking
+  pool. The frame never blocks on the analysis.
+- `snapshot_sample` is the off-thread twin of `edit::sample_cell`; both go
+  through the shared `edit::brick_of` + new `edit::local_voxel` so they can't
+  drift.
+- `apply_fracture_results` (main) drains finished analyses and spawns the
+  falling bodies + journals the voxel removals through the host.
+
+**Off-thread brick refresh** (removes the dominant stall): the per-brick
+`fetch_and_build` is dispatched to a second async channel in `FractureWorkers`
+(keyed, deduped) instead of `block_on`. When a `BrickReady` lands a few frames
+later, `apply_fracture_results` swaps it in with the editor's existing
+**make-before-break** `spawn_edited_brick` — the old brick stays visible until
+the new one is ready, so the carved hole appears with **no gap or flicker**.
+Voxel writes complete (fast in-process overlay writes) *before* the refresh
+dispatch, so the off-thread re-fetch reads post-carve bytes.
+
+`spawn_island` now consumes the baked `AnalyzedIsland` (collider + render meshes
++ entity only); the greedy-box and mass recompute moved into the worker.
+
+**Determinism / safety invariants preserved:** physics stays derived/ephemeral
+(snapshots are read-only `Arc` clones; only journaled `WriteVoxel` mutates the
+world); `connected_components` is untouched and still pure (only *where* it runs
+changed); the refresh stays flicker-free; everything is gated on
+`PhysicsConfig.enabled`, so the harness / `--physics off` path is byte-identical.
+Stale snapshots are harmless (the worker owns its `Arc`s; apply re-checks
+`is_fading_out` before any refresh swap), and `in_flight` sets guard against
+double-dispatch.
+
+### Verification
+
+`cargo test --workspace` green (693 passed). New tests: 3 pure
+`analyze_region` property tests (`atomr-worlds-physics`); client
+`snapshot_sample`↔`sample_cell` parity, `snapshot_region` residency,
+`interior_blob_is_an_unanchored_island` (snapshot → analysis), and a
+`dispatch_then_drain_round_trips` worker round-trip on a real tokio runtime; the
+`debris.rs` spawn tests now bake an `AnalyzedIsland`.
+
+**Harness visual gate** (`harness/scenes/fracture_carve.toml`): new env hooks
+`ATOMR_HARNESS_PHYSICS=1` (run physics under the harness) and
+`ATOMR_HARNESS_EDIT=1` (scripted carving — closes the roadmap's deferred
+"harness-driven edit hook") let a scene fire a `mouse_button_press` carve and
+capture the result. Confirmed live (RTX 3060 Ti / Vulkan): baseline grass →
+carved hole with exposed sub-surface, swapped in flicker-free and stable across
+frames. In a **release** build the carve frame's `dump_frame_diag` is **3097µs**,
+flat against its neighbours (frames 35–50 all ~2.7–4.7 ms) — **no stall** (the
+old synchronous path would spike the carve frame to tens of ms doing the
+touched-brick mesh+AO+DAG inline). Both env hooks default off, so golden captures
+are unaffected.
+
+### Out of scope (deferred follow-ups)
+
+The host `WriteVoxel` loop stays a `block_on` (fast in-process overlay writes,
+not the bottleneck). Parallel **rapier** island solving (rayon `parallel`
+feature) is unneeded at current debris counts. Tier-1 raymarched debris + rounded
+narrow-phase (rapier 0.33+) remain a separate slice.

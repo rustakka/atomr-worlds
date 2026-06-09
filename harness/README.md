@@ -47,7 +47,42 @@ Each event entry has a `frame` (offset from end of warmup) and a `kind`:
 - `screenshot` — captures the window via `xwd` and writes a PNG.
 - `exit` — schedules `AppExit` once the last event frame + 5 has passed.
 
+- `mouse_button_press` / `mouse_button_release` — needs `button = "Left" |
+  "Right" | "Middle"`. Left-click carves / right-click places in FP (requires the
+  scripted-edit hook below).
+- `dump_frame_diag` / `dump_motion` — print the recent per-frame timing buffer /
+  the camera motion state to stderr (`FRAME_DIAG …` / motion lines), for perf and
+  movement checks.
+
 Unknown keys or kinds cause the scenario load to fail loudly at startup.
+
+## Physics + scripted-edit hooks (opt-in)
+
+The harness forces **physics off** and **editing inert** by default, so golden
+captures are never perturbed. Two environment variables opt a run back in (both
+unset → byte-identical to before):
+
+| env var | effect |
+| ------- | ------ |
+| `ATOMR_HARNESS_PHYSICS=1` | run client-side physics under the harness (needs `--physics on`) — colliders, the character controller, and fracture/debris all activate |
+| `ATOMR_HARNESS_EDIT=1` | enable **scripted carving/placement** — a scene's `mouse_button_press` fires a real edit (the cursor-grab gate is bypassed) |
+
+Together they make the carve → fracture → debris pipeline (Rec 2 / Rec 3)
+capturable. Example — `harness/scenes/fracture_carve.toml` aims at the terrain,
+left-clicks to carve, and screenshots the (flicker-free, off-thread-refreshed)
+hole:
+
+```sh
+ATOMR_HARNESS_PHYSICS=1 ATOMR_HARNESS_EDIT=1 \
+  ./target/debug/atomr-worlds-client.exe --physics on \
+    --harness harness/scenes/fracture_carve.toml --harness-out /tmp/shots/
+```
+
+`ATOMR_HARNESS_EDIT=1` also renders the **targeting highlight** (normally hidden
+under the harness), which matches the active tool + brush radius — a unit cube for
+the Voxel tool, a sphere of radius `radius_voxels` for Sphere/Cone, a cube of
+half-edge `radius_voxels` for Cube. `harness/scenes/edit_highlight.toml` cycles
+the tool (`Tab`) and grows the brush (`]` = `BracketRight`) to show each shape.
 
 ## Implementation notes
 

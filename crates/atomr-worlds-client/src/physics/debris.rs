@@ -6,27 +6,14 @@
 //! engine-agnostic [`DebrisBody`] (per-material densities); the collider and the
 //! render mesh both reuse the greedy box decomposition.
 
-use atomr_worlds_core::coord::{DVec3, IVec3 as VoxCoord};
 use atomr_worlds_core::default_physics_palette;
-use atomr_worlds_physics::box_merge::greedy_boxes;
-use atomr_worlds_physics::DebrisBody;
+use atomr_worlds_physics::AnalyzedIsland;
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 use super::collider_gen::compound_from_boxes;
 use super::config::PhysicsConfig;
 use crate::modes::fp::MaterialPool;
-
-/// A floating island extracted from the voxel grid, as a dense local material
-/// grid — the bridge between flood-fill output and a rapier body.
-pub(crate) struct Island {
-    /// World voxel coordinate of the local grid's `(0,0,0)` corner.
-    pub origin: VoxCoord,
-    /// Local grid extent in voxels `(nx, ny, nz)`.
-    pub dims: [u32; 3],
-    /// Material id per local cell (`0` = empty), `(x*ny*nz + y*nz + z)` order.
-    pub material: Vec<u16>,
-}
 
 /// Marker + lifetime bookkeeping on a debris rigid body.
 #[derive(Component)]
@@ -55,43 +42,33 @@ pub fn settle_and_despawn_debris(
     }
 }
 
-/// Spawn one debris rigid body from an [`Island`]. Returns the entity, or
-/// `None` if the island has no solid voxels.
+/// Spawn one debris rigid body from a baked [`AnalyzedIsland`]. Returns the
+/// entity, or `None` if the island has no solid voxels.
+///
+/// The island arrives **fully analyzed** (its greedy boxes and mass properties
+/// were precomputed off the main thread by
+/// [`atomr_worlds_physics::analyze_region`]); this function only does the
+/// unavoidable main-thread work — building the rapier collider, the render
+/// meshes, and the entity.
 pub(crate) fn spawn_island(
-    island: &Island,
+    island: &AnalyzedIsland,
     cfg: &PhysicsConfig,
     material_pool: &MaterialPool,
     meshes: &mut Assets<Mesh>,
     commands: &mut Commands,
 ) -> Option<Entity> {
-    let [nx, ny, nz] = island.dims;
-    let dims_i = [nx as i32, ny as i32, nz as i32];
+    let [_nx, ny, nz] = island.dims;
     let lin = |x: i32, y: i32, z: i32| (x * ny as i32 * nz as i32 + y * nz as i32 + z) as usize;
 
-    let boxes = greedy_boxes(dims_i, |x, y, z| island.material[lin(x, y, z)] != 0);
-    let collider = compound_from_boxes(&boxes, cfg.voxel_size_m)?;
+    let collider = compound_from_boxes(&island.boxes, cfg.voxel_size_m)?;
 
-    // Mass from per-material densities (exercises the inertia/debris core).
-    let palette = default_physics_palette();
-    let world_origin_m = DVec3::new(
-        island.origin.x as f64 * cfg.voxel_size_m as f64,
-        island.origin.y as f64 * cfg.voxel_size_m as f64,
-        island.origin.z as f64 * cfg.voxel_size_m as f64,
-    );
-    let body = DebrisBody::from_voxels(
-        island.origin,
-        island.dims,
-        island.material.clone(),
-        cfg.voxel_size_m as f64,
-        world_origin_m,
-        &palette,
-    );
     // Keep a floor so a degenerate single-voxel body still simulates.
-    let mass_kg = (body.mass.mass_kg as f32).max(1.0);
+    let mass_kg = (island.mass.mass_kg as f32).max(1.0);
 
-    // Friction / restitution from the dominant (first solid) material.
-    let dominant = island.material.iter().copied().find(|&m| m != 0).unwrap_or(1);
-    let props = palette.get(dominant);
+    // Friction / restitution from the precomputed dominant material.
+    let palette = default_physics_palette();
+    let props = palette.get(island.dominant_material);
+    let boxes = &island.boxes;
 
     // Render: one cuboid mesh per greedy box, colored from the existing
     // per-material `StandardMaterial` pool. Pre-build child bundles so the
@@ -148,9 +125,24 @@ pub(crate) fn spawn_island(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atomr_worlds_core::coord::{DVec3, IVec3 as VoxCoord};
+    use atomr_worlds_physics::box_merge::greedy_boxes;
+    use atomr_worlds_physics::DebrisBody;
     use bevy::ecs::world::CommandQueue;
 
-    fn spawn(world: &World, island: &Island) -> (CommandQueue, Option<Entity>) {
+    /// Bake an [`AnalyzedIsland`] from a raw material grid, mirroring what
+    /// `analyze_region` produces (greedy boxes + mass + dominant material).
+    fn analyzed(origin: VoxCoord, dims: [u32; 3], material: Vec<u16>) -> AnalyzedIsland {
+        let [nx, ny, nz] = [dims[0] as i32, dims[1] as i32, dims[2] as i32];
+        let lin = |x: i32, y: i32, z: i32| (x * ny * nz + y * nz + z) as usize;
+        let boxes = greedy_boxes([nx, ny, nz], |x, y, z| material[lin(x, y, z)] != 0);
+        let palette = atomr_worlds_core::default_physics_palette();
+        let body = DebrisBody::from_voxels(origin, dims, material.clone(), 1.0, DVec3::ZERO, &palette);
+        let dominant_material = material.iter().copied().find(|&m| m != 0).unwrap_or(1);
+        AnalyzedIsland { origin, dims, material, boxes, mass: body.mass, dominant_material }
+    }
+
+    fn spawn(world: &World, island: &AnalyzedIsland) -> (CommandQueue, Option<Entity>) {
         let cfg = PhysicsConfig::default();
         let pool = MaterialPool {
             handles: vec![Handle::default(), Handle::default()],
@@ -167,11 +159,7 @@ mod tests {
     #[test]
     fn empty_island_spawns_nothing() {
         let world = World::new();
-        let island = Island {
-            origin: VoxCoord::new(0, 0, 0),
-            dims: [2, 2, 2],
-            material: vec![0; 8],
-        };
+        let island = analyzed(VoxCoord::new(0, 0, 0), [2, 2, 2], vec![0; 8]);
         let (_q, ent) = spawn(&world, &island);
         assert!(ent.is_none());
     }
@@ -180,11 +168,7 @@ mod tests {
     fn spawns_dynamic_body_with_merged_child() {
         let mut world = World::new();
         // A 2×1×1 stone bar → greedy-merges to one box → one mesh child.
-        let island = Island {
-            origin: VoxCoord::new(0, 10, 0),
-            dims: [2, 1, 1],
-            material: vec![1, 1],
-        };
+        let island = analyzed(VoxCoord::new(0, 10, 0), [2, 1, 1], vec![1, 1]);
         let (mut queue, ent) = spawn(&world, &island);
         let ent = ent.expect("a solid island spawns a body");
         queue.apply(&mut world);

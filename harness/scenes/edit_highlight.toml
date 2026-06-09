@@ -1,0 +1,74 @@
+seed = "0xDEADBEEFCAFEF00D"
+mode = "fp"
+width = 1280
+height = 720
+warmup_frames = 200
+output_prefix = "edit_highlight"
+
+# Visual check that the targeting highlight matches the active tool + brush
+# radius. Needs the scripted-edit hook so the picker runs (sets `last_hit`) and
+# the highlight renders under the harness, and so `Tab` cycles the *tool*
+# (not the view mode):
+#   ATOMR_HARNESS_PHYSICS=1 ATOMR_HARNESS_EDIT=1 atomr-worlds-client \
+#     --physics on --harness harness/scenes/edit_highlight.toml --harness-out <dir>
+# No carve is issued — only Tab (cycle tool) + screenshots.
+
+# --- Aim moderately down so the pick lands a few metres ahead (the brush
+#     sphere/cube then sits in front of the camera, seen from outside) -------
+[[events]]
+frame = 0
+kind  = "key_press"
+key   = "ArrowDown"
+
+[[events]]
+frame = 18
+kind  = "key_release"
+key   = "ArrowDown"
+
+# --- Voxel tool (default): unit-cube highlight hugging one cell ----------
+[[events]]
+frame = 24
+kind  = "screenshot"
+note  = "Voxel tool — single-cell cube"
+
+# --- Sphere tool, radius 2 ----------------------------------------------
+[[events]]
+frame = 28
+kind  = "key_tap"
+key   = "Tab"
+
+[[events]]
+frame = 34
+kind  = "screenshot"
+note  = "Sphere tool, radius 2 — sphere highlight"
+
+# --- Cube tool, radius 2 ------------------------------------------------
+[[events]]
+frame = 38
+kind  = "key_tap"
+key   = "Tab"
+
+[[events]]
+frame = 44
+kind  = "screenshot"
+note  = "Cube tool, radius 2 — cube highlight (half-edge 2)"
+
+# --- Grow the brush to radius 4 to show it scales -----------------------
+[[events]]
+frame = 48
+kind  = "key_tap"
+key   = "BracketRight"
+
+[[events]]
+frame = 50
+kind  = "key_tap"
+key   = "BracketRight"
+
+[[events]]
+frame = 56
+kind  = "screenshot"
+note  = "Cube tool, radius 4 — larger cube highlight"
+
+[[events]]
+frame = 62
+kind  = "exit"

@@ -12,22 +12,37 @@ use atomr_worlds_core::coord::DVec3;
 use atomr_worlds_view::derived::surface_raster::build_surface_raster_with_lod_fn;
 use atomr_worlds_view::{
     render_mesh, scene::MaterialPalette, surface_raster_to_mesh, Camera, Projection, RenderConfig,
+    SurfaceRaster,
 };
 use bevy::prelude::*;
 
 use crate::modes::blit::{copy_framebuffer_to_image, RasterTarget, RASTER_H, RASTER_W};
 use crate::modes::fp::FpState;
+use crate::modes::raster_async::AsyncBuild;
 use crate::view_mode::ViewMode;
 use crate::world_runtime::WorldRuntime;
 use crate::world_stream::ChunkStreamer;
 
 const RTS_FOOTPRINT_VOX: u32 = 48;
 
+/// Footprint key for the off-thread [`SurfaceRaster`] rebuild: the view center
+/// quantized to whole voxels. Rotation / zoom don't affect the raster (only the
+/// camera), so they never trigger a rebuild — only a pan does.
+type RtsKey = (i32, i32);
+
+/// Caches the most-recent [`SurfaceRaster`], rebuilt off the render thread by
+/// [`rts_render`] when the pan center moves. See [`AsyncBuild`].
+#[derive(Resource, Default)]
+pub struct RtsRasterCache(pub AsyncBuild<SurfaceRaster, RtsKey>);
+
 pub struct RtsPlugin;
 
 impl Plugin for RtsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<RtsState>().add_systems(Update, rts_input).add_systems(Update, rts_render);
+        app.init_resource::<RtsState>()
+            .init_resource::<RtsRasterCache>()
+            .add_systems(Update, rts_input)
+            .add_systems(Update, rts_render);
     }
 }
 
@@ -66,6 +81,7 @@ fn rts_input(mode: Res<ViewMode>, keys: Res<ButtonInput<KeyCode>>, mut state: Re
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rts_render(
     mode: Res<ViewMode>,
     runtime: Res<WorldRuntime>,
@@ -73,47 +89,110 @@ fn rts_render(
     state: Res<RtsState>,
     streamer: Res<ChunkStreamer>,
     target: Res<RasterTarget>,
+    perf: Res<crate::perf::Perf>,
+    harness: Option<Res<crate::harness::HarnessActive>>,
+    mut cache: ResMut<RtsRasterCache>,
     mut images: ResMut<Assets<Image>>,
 ) {
     if *mode != ViewMode::Rts {
         return;
     }
+    let _scope = perf.scope(crate::perf::Phase::SliceRtsRaster);
     let cam = fp_state.walk.camera();
     let center_x = cam.eye[0] as f64;
     let center_z = cam.eye[2] as f64;
     let half = (RTS_FOOTPRINT_VOX as f64) * 0.5;
-    let origin = [center_x - half, center_z - half];
-    // Per-column LOD comes from the shared streamer. Columns inside the
-    // transition radius scan at `near_lod`; far columns drop to
-    // `far_lod`, matching the FP/TP ring streamer's tier boundary.
     let observer = fp_state.walk.observer.position;
-    let raster = build_surface_raster_with_lod_fn(
-        runtime.query.as_ref(),
-        &fp_state.addr,
-        origin,
-        [RTS_FOOTPRINT_VOX, RTS_FOOTPRINT_VOX],
-        1.0,
-        |[wx_m, wz_m]| {
-            let p = DVec3::new(wx_m, observer.y, wz_m);
-            streamer.lod_for_meters(observer, p)
-        },
-    );
+
+    // Under the harness, build + draw the raster SYNCHRONOUSLY this frame at the
+    // live center — byte-identical to the pre-change path, so golden captures
+    // stay deterministic. The off-thread cache path is interactive-only.
+    if harness.is_some() {
+        let origin = [center_x - half, center_z - half];
+        let raster = build_surface_raster_with_lod_fn(
+            runtime.query.as_ref(),
+            &fp_state.addr,
+            origin,
+            [RTS_FOOTPRINT_VOX, RTS_FOOTPRINT_VOX],
+            1.0,
+            |[wx_m, wz_m]| {
+                let p = DVec3::new(wx_m, observer.y, wz_m);
+                streamer.lod_for_meters(observer, p)
+            },
+        );
+        draw_rts(&raster, [center_x, center_z], &state, cam.eye[1], &target, &mut images);
+        return;
+    }
+
+    // Interactive: build the SurfaceRaster off the render thread — its builder
+    // calls the host `WorldQuery::brick` (a `block_on`) for ~48×48 columns, which
+    // stalled the frame every frame. Only a *pan* (center move) rebuilds it;
+    // rotation / zoom are camera-only and redraw the cached raster.
+    cache.0.poll();
+    perf.set_snapshot_rebuilding(cache.0.is_rebuilding());
+    let key: RtsKey = (center_x.round() as i32, center_z.round() as i32);
+    if cache.0.needs_rebuild(&key) {
+        let query = runtime.query.clone();
+        let streamer = streamer.clone();
+        let addr = fp_state.addr;
+        // Origin derived from the rounded key (not the live center) so the
+        // raster's true center is exactly `built_for()` — the camera frames there,
+        // keeping mesh and camera aligned to the voxel grid.
+        let origin = [key.0 as f64 - half, key.1 as f64 - half];
+        cache.0.spawn(key, move || {
+            build_surface_raster_with_lod_fn(
+                query.as_ref(),
+                &addr,
+                origin,
+                [RTS_FOOTPRINT_VOX, RTS_FOOTPRINT_VOX],
+                1.0,
+                |[wx_m, wz_m]| {
+                    let p = DVec3::new(wx_m, observer.y, wz_m);
+                    streamer.lod_for_meters(observer, p)
+                },
+            )
+        });
+    }
+    // Nothing built yet — keep the raster target's prior contents.
+    let Some(raster) = cache.0.current() else {
+        return;
+    };
+    // Frame the camera on the footprint the *current* raster was built for (it
+    // may lag the live pan by one rebuild), so the mesh and camera stay aligned.
+    let built = cache.0.built_for().copied().unwrap_or(key);
+    draw_rts(raster, [built.0 as f64, built.1 as f64], &state, cam.eye[1], &target, &mut images);
+}
+
+/// Mesh + top-down-ortho render a [`SurfaceRaster`] to the shared raster target.
+/// `center_xz` is the world center the raster covers (live under the harness,
+/// `built_for` interactively); rotation / zoom come live from [`RtsState`].
+/// Shared by the harness and interactive paths so both render identically.
+fn draw_rts(
+    raster: &SurfaceRaster,
+    center_xz: [f64; 2],
+    state: &RtsState,
+    eye_center_y: f32,
+    target: &RasterTarget,
+    images: &mut Assets<Image>,
+) {
     let palette = MaterialPalette::default();
-    let mesh = surface_raster_to_mesh(&raster, &palette);
-    // Top-down ortho. Eye sits well above the tallest possible surface so
-    // the entire mesh is in front of the camera; the orthographic
-    // projection makes eye altitude irrelevant for x/y framing.
-    let center_y_m = cam.eye[1];
+    let mesh = surface_raster_to_mesh(raster, &palette);
+    let center_x = center_xz[0] as f32;
+    let center_z = center_xz[1] as f32;
+    // Top-down ortho. Eye sits well above the tallest possible surface so the
+    // entire mesh is in front of the camera; the orthographic projection makes
+    // eye altitude irrelevant for x/y framing.
+    let center_y_m = eye_center_y;
     let eye_y_m = center_y_m + 512.0;
     let theta = state.rotation_deg.to_radians();
-    // Q/E rotate the up-vector around +Y so the world spins under the
-    // camera while still pointing the eye straight down.
+    // Q/E rotate the up-vector around +Y so the world spins under the camera
+    // while still pointing the eye straight down.
     let up = [theta.sin(), 0.0, theta.cos()];
     let half_height_m = state.scale_m_per_px * (RASTER_H as f32) * 0.5;
     let aspect = (RASTER_W as f32) / (RASTER_H as f32);
     let camera = Camera {
-        eye: [center_x as f32, eye_y_m, center_z as f32],
-        target: [center_x as f32, center_y_m, center_z as f32],
+        eye: [center_x, eye_y_m, center_z],
+        target: [center_x, center_y_m, center_z],
         up,
         fov_y_rad: std::f32::consts::FRAC_PI_4,
         aspect,
@@ -128,5 +207,5 @@ fn rts_render(
         ..Default::default()
     };
     let fb = render_mesh(&mesh, &camera, &cfg);
-    copy_framebuffer_to_image(&mut images, &target, &fb);
+    copy_framebuffer_to_image(images, target, &fb);
 }

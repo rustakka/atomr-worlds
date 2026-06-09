@@ -411,6 +411,29 @@ impl LoadedChunks {
         }
     }
 
+    /// Apply `f` to the resident decoded brick at `key`, cloning-on-write so any
+    /// in-flight readers (an off-thread edit/fracture refresh task, a fracture
+    /// snapshot that already cloned the `Arc<Brick>`) keep their old copy. No-op
+    /// if the chunk isn't resident, is fading out, or has no decoded brick.
+    ///
+    /// Used by the editor's *eager same-frame patch*: an edit is now applied to
+    /// the host off-thread, so the resident brick would still hold pre-edit
+    /// voxels when the same-frame fracture check snapshots it (and when the
+    /// picker re-samples). Patching the resident brick here keeps both correct
+    /// until the authoritative off-thread refresh swaps the brick in. Only the
+    /// brick *content* changes — keys / fade state / the `child_counts` index
+    /// are untouched, so the incremental coverage bookkeeping stays valid.
+    pub fn patch_resident<F: FnOnce(&mut Brick)>(&mut self, key: &(IVec3, u8), f: F) {
+        if let Some(chunk) = self.inner.get_mut(key) {
+            if chunk.is_fading_out {
+                return;
+            }
+            if let Some(arc) = chunk.brick.as_mut() {
+                f(std::sync::Arc::make_mut(arc));
+            }
+        }
+    }
+
     /// Read a chunk by key.
     #[inline]
     pub fn get(&self, key: &(IVec3, u8)) -> Option<&LoadedChunk> { self.inner.get(key) }

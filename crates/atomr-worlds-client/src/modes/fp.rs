@@ -73,7 +73,14 @@ impl Plugin for FpPlugin {
             .init_resource::<LadderHysteresis>()
             .init_resource::<crate::modes::edit::EditState>()
             .add_message::<crate::modes::edit::VoxelEditEvent>()
-            .add_systems(Startup, (setup_fp_scene, crate::modes::edit::setup_edit_highlight))
+            .add_systems(
+                Startup,
+                (
+                    setup_fp_scene,
+                    crate::modes::edit::setup_edit_highlight,
+                    crate::modes::edit_workers::init_edit_apply_workers,
+                ),
+            )
             .add_systems(
                 Update,
                 (
@@ -87,6 +94,9 @@ impl Plugin for FpPlugin {
                     // (so refreshed bricks are consistent within the frame).
                     crate::modes::edit::edit_select_tool_material,
                     crate::modes::edit::fp_edit_voxels,
+                    // Drain finished off-thread edit refreshes (make-before-break
+                    // swap) right after the edit that enqueued them.
+                    crate::modes::edit::apply_edit_refreshes,
                     crate::modes::edit::fp_edit_highlight,
                     fp_update_ladder,
                     fp_stream_bricks,
@@ -890,6 +900,19 @@ struct RaymarchSpawn<'w> {
 ///    [`BrickGenWorkers`] (capped at `MAX_IN_FLIGHT`).
 /// 6. Drain a per-frame budget of finished payloads into Bevy
 ///    entities via [`spawn_brick_entity`].
+/// Interactive-only cap on how many stale chunks are converted to fade-out per
+/// frame. A region transition can strand many chunks at once; processing all of
+/// them in one frame spikes the ECS command queue. The remainder are caught on
+/// the next frames (the hysteresis window tolerates the lag). Disabled under the
+/// harness so golden captures keep the original unbounded sweep.
+const STALE_SCAN_BUDGET: usize = 64;
+/// Interactive-only cap on mesh vertices uploaded to the GPU per frame. The
+/// count-based `spawn_budget` assumes roughly uniform brick cost, but a few
+/// dense bricks can carry an order of magnitude more geometry; `meshes.add()` is
+/// real upload work, so a count-only budget can still spike. Disabled under the
+/// harness (treated as unbounded) so the same bricks spawn in the same order.
+const VERT_UPLOAD_BUDGET: usize = 80_000;
+
 #[allow(clippy::too_many_arguments)]
 fn fp_stream_bricks(
     state: Res<FpState>,
@@ -904,11 +927,16 @@ fn fp_stream_bricks(
     mut workers: ResMut<BrickGenWorkers>,
     mut meshes: ResMut<Assets<BevyMesh>>,
     mut rm: RaymarchSpawn,
+    perf: Res<crate::perf::Perf>,
+    harness: Option<Res<crate::harness::HarnessActive>>,
     mut commands: Commands,
 ) {
     if !state.ready || pool.handles.is_empty() {
         return;
     }
+    // Profiler: time the planning/stale/dispatch work as `Streaming`; the
+    // drain + GPU-upload spawn loop is timed separately as `BrickSpawn` below.
+    let stream_scope = perf.scope(crate::perf::Phase::Streaming);
     let shading_mode = render_cfg.shading.mode();
 
     // Bump the streamer's frame counter once per tick so hysteresis
@@ -983,16 +1011,21 @@ fn fp_stream_bricks(
     // system still sees the brick as "loaded" and can keep the parent
     // hidden until the crossfade hands off.
     let hyst = streamer.hysteresis_ticks;
-    let stale_keys: Vec<(IVec3, u8)> = loaded
-        .iter()
-        .filter_map(|(k, v)| {
-            if frame.saturating_sub(v.last_seen_frame) >= hyst {
-                Some(*k)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let stale_iter = loaded.iter().filter_map(|(k, v)| {
+        if frame.saturating_sub(v.last_seen_frame) >= hyst {
+            Some(*k)
+        } else {
+            None
+        }
+    });
+    // Interactively cap the per-frame eviction so a region transition that
+    // strands many chunks doesn't spike; the rest are caught next frame. Under
+    // the harness keep the original unbounded sweep (byte-identical goldens).
+    let stale_keys: Vec<(IVec3, u8)> = if harness.is_none() {
+        stale_iter.take(STALE_SCAN_BUDGET).collect()
+    } else {
+        stale_iter.collect()
+    };
     for k in stale_keys {
         let (ent, from_scale) = match loaded.get(&k) {
             Some(chunk) => match chunk.entity {
@@ -1054,6 +1087,15 @@ fn fp_stream_bricks(
     }
     plan_cache.cursor = cursor;
 
+    // Profiler queue gauges (cheap atomic stores; read by the F3 overlay /
+    // spike logger). Taken after the dispatch loop so `brick_in_flight`
+    // reflects this frame's outstanding fetches.
+    perf.set_loaded_chunks(loaded.len());
+    perf.set_brick_in_flight(workers.in_flight_count());
+    // End the `Streaming` span; the spawn loop below is timed as `BrickSpawn`.
+    drop(stream_scope);
+    let _spawn_scope = perf.scope(crate::perf::Phase::BrickSpawn);
+
     // Drain completed brick fetches and convert them into Bevy entities.
     // The per-frame budget comes from `SpawnBudgetStrategy` (default:
     // motion-scaled; Quality preset: static) — at rest both return the
@@ -1061,8 +1103,19 @@ fn fp_stream_bricks(
     // Step 10 activates the sprint-time ramp.
     let budget = render_cfg.spawn_budget.budget_this_frame(&motion);
     let raymarch_tier = render_cfg.raymarch_tier;
-    let ready_batch = workers.drain(budget);
-    for ready in ready_batch {
+    // Drain + spawn up to `budget` bricks, but also cap the *vertex* upload per
+    // frame interactively. Draining one at a time (rather than `drain(budget)`)
+    // means an early vertex-cap break leaves the undrained bricks in the channel
+    // for next frame instead of discarding them. Under the harness the cap is
+    // disabled (vert_cap = MAX), so the same bricks spawn in the same order —
+    // the drain-1 loop visits the FIFO channel identically to `drain(budget)`.
+    let vert_cap = if harness.is_none() { VERT_UPLOAD_BUDGET } else { usize::MAX };
+    let mut verts_this_frame = 0usize;
+    for _ in 0..budget {
+        let Some(ready) = workers.drain(1).pop() else {
+            break;
+        };
+        let ready_verts: usize = ready.meshes.values().map(|m| m.vertices.len()).sum();
         spawn_brick_entity(
             ready,
             frame,
@@ -1079,6 +1132,10 @@ fn fp_stream_bricks(
             &mut commands,
             &mut loaded,
         );
+        verts_this_frame += ready_verts;
+        if verts_this_frame >= vert_cap {
+            break;
+        }
     }
 
     // Diagnostic (mesh quadrant counts). The original frame==60 terrain
@@ -1520,6 +1577,7 @@ fn fp_update_lod_visibility(
     render_cfg: Res<RenderConfig>,
     motion: Res<CameraMotionState>,
     streamer: Res<ChunkStreamer>,
+    perf: Res<crate::perf::Perf>,
     mut commands: Commands,
     mut q: Query<(
         Entity,
@@ -1536,6 +1594,7 @@ fn fp_update_lod_visibility(
     if streamer.frame % (stride as u64) != 0 {
         return;
     }
+    let _vis = perf.scope(crate::perf::Phase::LodVisibility);
     // The parent → live-child-count map is now maintained incrementally
     // inside `LoadedChunks` (decremented at fade-out begin, restored on
     // re-insert), so this pass is O(n_q) instead of the prior O(n_q +
