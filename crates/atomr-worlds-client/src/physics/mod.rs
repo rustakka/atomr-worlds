@@ -27,6 +27,7 @@ mod character;
 mod collider_gen;
 mod config;
 mod debris;
+mod debris_stream;
 mod defaults;
 mod fracture;
 mod plugin;

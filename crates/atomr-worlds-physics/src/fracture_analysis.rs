@@ -87,41 +87,17 @@ pub fn analyze_region(
     let mut cells_to_remove: Vec<IVec3> = Vec::new();
 
     for island_cells in comps.unanchored_islands() {
-        // Local-coordinate bounding box of the island.
-        let mut lo = [i32::MAX; 3];
-        let mut hi = [i32::MIN; 3];
+        // Bake the island's local dense material grid (shared with the host's
+        // fracture path so the two can't drift).
+        let (origin, idims, material) =
+            bake_island_grid(&island_cells, region_min, &material_at);
         for c in &island_cells {
-            for a in 0..3 {
-                lo[a] = lo[a].min(c[a]);
-                hi[a] = hi[a].max(c[a]);
-            }
-        }
-        let idims = [
-            (hi[0] - lo[0] + 1) as u32,
-            (hi[1] - lo[1] + 1) as u32,
-            (hi[2] - lo[2] + 1) as u32,
-        ];
-        let (iny, inz) = (idims[1], idims[2]);
-        let mut material = vec![0u16; (idims[0] * idims[1] * idims[2]) as usize];
-        for c in &island_cells {
-            let (lx, ly, lz) = (
-                (c[0] - lo[0]) as u32,
-                (c[1] - lo[1]) as u32,
-                (c[2] - lo[2]) as u32,
-            );
-            material[(lx * iny * inz + ly * inz + lz) as usize] = material_at(c[0], c[1], c[2]);
             cells_to_remove.push(IVec3::new(
                 region_min.x + c[0] as i64,
                 region_min.y + c[1] as i64,
                 region_min.z + c[2] as i64,
             ));
         }
-
-        let origin = IVec3::new(
-            region_min.x + lo[0] as i64,
-            region_min.y + lo[1] as i64,
-            region_min.z + lo[2] as i64,
-        );
 
         // Greedy boxes over the island's dense grid (same linear order as
         // `material`, so `box.min` indexes back into it for per-box color).
@@ -162,6 +138,54 @@ pub fn analyze_region(
         islands,
         cells_to_remove,
     }
+}
+
+/// Bake a list of island cells (in **local** region coordinates `0..dims`) into
+/// a dense body-local material grid.
+///
+/// Returns `(origin, dims, material)` where `origin` is the world voxel
+/// coordinate of the local `(0,0,0)` corner, `dims` is the island's local extent
+/// in voxels, and `material` is the linear material array (`0` = empty,
+/// `(x*ny*nz + y*nz + z)` order) — exactly the representation
+/// [`DebrisBody::from_voxels`] and the greedy-box / mass bake consume.
+///
+/// Shared by [`analyze_region`] and the host's authoritative fracture path so the
+/// two derive identical body grids. `material_at(x,y,z)` is queried in the same
+/// local frame as `cells`. `cells` must be non-empty.
+pub fn bake_island_grid(
+    cells: &[[i32; 3]],
+    region_min: IVec3,
+    material_at: impl Fn(i32, i32, i32) -> u16,
+) -> (IVec3, [u32; 3], Vec<u16>) {
+    let mut lo = [i32::MAX; 3];
+    let mut hi = [i32::MIN; 3];
+    for c in cells {
+        for a in 0..3 {
+            lo[a] = lo[a].min(c[a]);
+            hi[a] = hi[a].max(c[a]);
+        }
+    }
+    let idims = [
+        (hi[0] - lo[0] + 1) as u32,
+        (hi[1] - lo[1] + 1) as u32,
+        (hi[2] - lo[2] + 1) as u32,
+    ];
+    let (iny, inz) = (idims[1], idims[2]);
+    let mut material = vec![0u16; (idims[0] * idims[1] * idims[2]) as usize];
+    for c in cells {
+        let (lx, ly, lz) = (
+            (c[0] - lo[0]) as u32,
+            (c[1] - lo[1]) as u32,
+            (c[2] - lo[2]) as u32,
+        );
+        material[(lx * iny * inz + ly * inz + lz) as usize] = material_at(c[0], c[1], c[2]);
+    }
+    let origin = IVec3::new(
+        region_min.x + lo[0] as i64,
+        region_min.y + lo[1] as i64,
+        region_min.z + lo[2] as i64,
+    );
+    (origin, idims, material)
 }
 
 #[cfg(test)]

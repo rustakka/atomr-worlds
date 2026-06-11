@@ -15,31 +15,18 @@ use super::collider_gen::compound_from_boxes;
 use super::config::PhysicsConfig;
 use crate::modes::fp::MaterialPool;
 
-/// Marker + lifetime bookkeeping on a debris rigid body.
+/// Marker on a debris rigid body. The body's motion is host-authoritative —
+/// driven by the interpolated [`super::debris_stream`] stream — so this is now a
+/// pure marker; lifetime is managed by `retire_host_debris`, not by local age.
 #[derive(Component)]
-pub struct Debris {
-    /// Seconds since spawn.
-    pub age: f32,
-}
+pub struct Debris;
 
-/// Despawn debris once it has settled (rapier put it to sleep), fallen below a
-/// kill plane, or outlived its lifetime cap — keeps ephemeral bodies bounded.
-pub fn settle_and_despawn_debris(
-    time: Res<Time>,
-    mut q: Query<(Entity, &mut Debris, &Transform, Option<&Sleeping>)>,
-    mut commands: Commands,
-) {
-    const MAX_AGE_S: f32 = 30.0;
-    const KILL_Y: f32 = -512.0;
-    const MIN_SETTLE_S: f32 = 1.0;
-    for (e, mut d, tf, sleeping) in &mut q {
-        d.age += time.delta_secs();
-        let asleep = sleeping.map(|s| s.sleeping).unwrap_or(false);
-        let settled = asleep && d.age > MIN_SETTLE_S;
-        if settled || d.age > MAX_AGE_S || tf.translation.y < KILL_Y {
-            commands.entity(e).despawn();
-        }
-    }
+/// Links a client debris entity to its host debris id (`debris_id(anchor)`,
+/// shared with the host's `DebrisStateDelta.id` and `SpawnDebris.id`), so the
+/// interpolation + retirement systems can drive and reap it from the stream.
+#[derive(Component)]
+pub struct HostDebris {
+    pub id: u32,
 }
 
 /// Spawn one debris rigid body from a baked [`AnalyzedIsland`]. Returns the
@@ -52,6 +39,7 @@ pub fn settle_and_despawn_debris(
 /// meshes, and the entity.
 pub(crate) fn spawn_island(
     island: &AnalyzedIsland,
+    id: u32,
     cfg: &PhysicsConfig,
     material_pool: &MaterialPool,
     meshes: &mut Assets<Mesh>,
@@ -61,9 +49,6 @@ pub(crate) fn spawn_island(
     let lin = |x: i32, y: i32, z: i32| (x * ny as i32 * nz as i32 + y * nz as i32 + z) as usize;
 
     let collider = compound_from_boxes(&island.boxes, cfg.voxel_size_m)?;
-
-    // Keep a floor so a degenerate single-voxel body still simulates.
-    let mass_kg = (island.mass.mass_kg as f32).max(1.0);
 
     // Friction / restitution from the precomputed dominant material.
     let palette = default_physics_palette();
@@ -106,12 +91,16 @@ pub(crate) fn spawn_island(
         .spawn((
             Transform::from_translation(world_origin),
             Visibility::Visible,
-            RigidBody::Dynamic,
+            // Host-authoritative motion: the body is driven kinematically from
+            // the interpolated host stream (`super::debris_stream`), never
+            // simulated locally — so the player still collides with / stands on
+            // it, but the client never integrates it (no double-simulation).
+            RigidBody::KinematicPositionBased,
             collider,
-            AdditionalMassProperties::Mass(mass_kg),
             Friction::coefficient(props.friction),
             Restitution::coefficient(props.restitution),
-            Debris { age: 0.0 },
+            Debris,
+            HostDebris { id },
         ))
         .with_children(|p| {
             for c in children {
@@ -151,7 +140,7 @@ mod tests {
         let mut queue = CommandQueue::default();
         let ent = {
             let mut commands = Commands::new(&mut queue, world);
-            spawn_island(island, &cfg, &pool, &mut meshes, &mut commands)
+            spawn_island(island, 42, &cfg, &pool, &mut meshes, &mut commands)
         };
         (queue, ent)
     }
@@ -165,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn spawns_dynamic_body_with_merged_child() {
+    fn spawns_kinematic_host_driven_body_with_merged_child() {
         let mut world = World::new();
         // A 2×1×1 stone bar → greedy-merges to one box → one mesh child.
         let island = analyzed(VoxCoord::new(0, 10, 0), [2, 1, 1], vec![1, 1]);
@@ -175,7 +164,13 @@ mod tests {
 
         assert!(world.entities().contains(ent));
         assert!(world.get::<Debris>(ent).is_some());
-        assert!(matches!(world.get::<RigidBody>(ent), Some(RigidBody::Dynamic)));
+        // Host owns motion: the body is kinematic (not locally simulated), and
+        // is keyed to the host debris id for interpolation / retirement.
+        assert!(matches!(
+            world.get::<RigidBody>(ent),
+            Some(RigidBody::KinematicPositionBased)
+        ));
+        assert_eq!(world.get::<HostDebris>(ent).map(|h| h.id), Some(42));
         assert!(world.get::<Collider>(ent).is_some());
         let n_children = world.get::<Children>(ent).map(|c| c.iter().count()).unwrap_or(0);
         assert_eq!(n_children, 1, "a 2×1×1 bar greedy-merges to one render box");

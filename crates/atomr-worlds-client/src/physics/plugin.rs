@@ -22,9 +22,17 @@ impl Plugin for PhysicsPlugin {
         app.add_plugins(RapierPhysicsPlugin::<NoUserData>::default());
         app.init_resource::<super::character::CharacterState>();
         app.init_resource::<super::character::CharacterIntent>();
-        // Construct the off-thread fracture scheduler once the tokio runtime
-        // exists (mirrors `init_brick_gen_workers`).
-        app.add_systems(Startup, super::fracture::init_fracture_workers);
+        // Interpolation buffer for host-authoritative debris (Rec 4 Slice 2).
+        app.init_resource::<super::debris_stream::DebrisInterp>();
+        // Construct the off-thread fracture scheduler + open the host debris
+        // stream once the tokio runtime exists (mirrors `init_brick_gen_workers`).
+        app.add_systems(
+            Startup,
+            (
+                super::fracture::init_fracture_workers,
+                super::debris_stream::init_debris_subscription,
+            ),
+        );
         app.add_systems(
             Update,
             (
@@ -38,7 +46,16 @@ impl Plugin for PhysicsPlugin {
                     .after(crate::modes::edit::fp_edit_voxels),
                 super::fracture::apply_fracture_results
                     .after(super::fracture::dispatch_fracture_checks),
-                super::debris::settle_and_despawn_debris,
+                // Host-authoritative debris: drain the stream, interpolate the
+                // kinematic bodies (before rapier reads them), retire settled
+                // ones. Replaces the old local `settle_and_despawn_debris`.
+                super::debris_stream::pump_debris_states,
+                super::debris_stream::apply_debris_interpolation
+                    .after(super::debris_stream::pump_debris_states)
+                    .after(super::fracture::apply_fracture_results)
+                    .before(PhysicsSet::SyncBackend),
+                super::debris_stream::retire_host_debris
+                    .after(super::debris_stream::apply_debris_interpolation),
                 super::character::spawn_player,
             ),
         );

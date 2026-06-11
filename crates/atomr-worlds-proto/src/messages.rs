@@ -128,12 +128,22 @@ pub enum WorldEvent {
     /// plus the inclusive journal sequence range its voxel writes were recorded
     /// at, so late joiners can replay deterministically.
     FractureApplied(crate::fracture::FractureApplied),
+    /// Periodic host-authoritative debris rigid-body snapshots for one tick,
+    /// broadcast to subscribers whose region overlaps the active debris. The
+    /// host owns debris motion and integrates it deterministically; clients
+    /// interpolate these floats rather than replay them (so they are lossy and
+    /// carried, for now, on the reliable subscription channel — the unreliable
+    /// debris channel is a deferred upstream optimization). `deltas` is batched
+    /// so a whole tick's bodies arrive coherently.
+    DebrisStates { addr: Address, deltas: Vec<crate::fracture::DebrisStateDelta> },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fracture::{FractureApplied, FractureCommand, FractureRequest, Force, WriteRejected};
+    use crate::fracture::{
+        DebrisStateDelta, FractureApplied, FractureCommand, FractureRequest, Force, WriteRejected,
+    };
     use crate::wire::{decode, encode};
     use atomr_worlds_core::addr::WorldAddr;
 
@@ -186,5 +196,35 @@ mod tests {
             let back: WorldEvent = decode(&bytes).unwrap();
             assert_eq!(format!("{e:?}"), format!("{back:?}"));
         }
+    }
+
+    #[test]
+    fn debris_states_event_round_trips() {
+        let ev = WorldEvent::DebrisStates {
+            addr: root(),
+            deltas: vec![
+                DebrisStateDelta {
+                    id: 7,
+                    tick: 12,
+                    pos: [1.0, -2.5, 3.0],
+                    vel: [0.0, -9.81, 0.0],
+                    orient: [0.0, 0.0, 0.0, 1.0],
+                    ang_vel: [0.0, 0.0, 0.0],
+                    sleeping: false,
+                },
+                DebrisStateDelta {
+                    id: 9,
+                    tick: 12,
+                    pos: [4.0, 0.0, -1.0],
+                    vel: [0.0, 0.0, 0.0],
+                    orient: [0.0, 0.0, 0.0, 1.0],
+                    ang_vel: [0.0, 0.0, 0.0],
+                    sleeping: true,
+                },
+            ],
+        };
+        let bytes = encode(&ev).unwrap();
+        let back: WorldEvent = decode(&bytes).unwrap();
+        assert_eq!(format!("{ev:?}"), format!("{back:?}"));
     }
 }

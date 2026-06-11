@@ -282,11 +282,14 @@ pub fn apply_fracture_results(
     perf: Res<crate::perf::Perf>,
     mut loaded: ResMut<LoadedChunks>,
     mut workers: ResMut<FractureWorkers>,
+    mut interp: ResMut<super::debris_stream::DebrisInterp>,
+    time: Res<Time>,
     mut spawn: EditSpawn,
     mut commands: Commands,
 ) {
     let _scope = perf.scope(crate::perf::Phase::FractureApply);
     let frame = streamer.frame;
+    let now = time.elapsed_secs_f64();
     let shading_mode = render_cfg.shading.mode();
     let raymarch_tier = render_cfg.raymarch_tier;
 
@@ -335,11 +338,24 @@ pub fn apply_fracture_results(
             }
         }
 
-        // 1) Bake + spawn the falling rigid bodies (additive; no world mutation).
+        // 1) Spawn the host-driven debris bodies (additive; no world mutation).
+        //    The body is kinematic — the host owns its motion and we interpolate
+        //    its `DebrisStateDelta` stream onto the entity (`debris_stream`). The
+        //    `id` ties the spawned entity to that stream; `attach_entity` folds
+        //    in any deltas that arrived before this spawn.
         for cmd in &applied.commands {
-            if let FractureCommand::SpawnDebris { voxels, .. } = cmd {
+            if let FractureCommand::SpawnDebris { id, voxels, .. } = cmd {
                 if let Some(island) = bake_island(voxels, &materials, cfg.voxel_size_m) {
-                    spawn_island(&island, &cfg, &material_pool, &mut spawn.meshes, &mut commands);
+                    if let Some(ent) = spawn_island(
+                        &island,
+                        *id,
+                        &cfg,
+                        &material_pool,
+                        &mut spawn.meshes,
+                        &mut commands,
+                    ) {
+                        interp.attach_entity(*id, ent, now);
+                    }
                 }
             }
         }

@@ -33,6 +33,7 @@
 
 pub mod box_merge;
 pub mod debris;
+pub mod debris_sim;
 pub mod flood_fill;
 pub mod fracture_analysis;
 pub mod inertia;
@@ -40,7 +41,8 @@ pub mod math;
 
 pub use box_merge::{greedy_boxes, Cuboid};
 pub use debris::DebrisBody;
+pub use debris_sim::{step_all, step_body, SimParams, SimState, GRAVITY_MPS2};
 pub use flood_fill::{connected_components, Components};
-pub use fracture_analysis::{analyze_region, AnalyzedIsland, FractureAnalysis};
+pub use fracture_analysis::{analyze_region, bake_island_grid, AnalyzedIsland, FractureAnalysis};
 pub use inertia::{mass_properties, MassProperties};
 pub use math::Mat3;
