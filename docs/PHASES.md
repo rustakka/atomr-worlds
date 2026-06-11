@@ -2311,3 +2311,74 @@ The host `WriteVoxel` loop stays a `block_on` (fast in-process overlay writes,
 not the bottleneck). Parallel **rapier** island solving (rayon `parallel`
 feature) is unneeded at current debris counts. Tier-1 raymarched debris + rounded
 narrow-phase (rapier 0.33+) remain a separate slice.
+
+## Phase 20.6 *(landed)* — Rec 4 Slice 1: HLC-LWW overlay + host-authoritative fracture
+
+The headline Rec 4 ("actor-CRDT destruction sync") begins here: the voxel-edit
+overlay becomes a per-cell **last-writer-wins CRDT**, and fracture moves from a
+client decision (Phase 20.5) to a **host-authoritative** one journaled + broadcast
+through the actor. `GetBrick` stays byte-deterministic and the physics-off path
+byte-identical.
+
+**LWW substrate** (`atomr-worlds-core::lww`): a generic `LwwMap<K, V>` keyed by
+`LwwStamp { ts: HlcTimestamp, writer: WriterId }` (derived lexicographic `Ord` =
+the LWW rule). `put` keeps the per-key max stamp; deletes are **retained
+tombstones** (an `EMPTY` value, not an absence) so an older out-of-order write
+can't resurrect a carve and carves survive recovery — fixing the old
+remove-on-empty gap. Merge is a fold of `put` ⇒ commutative/associative/
+idempotent (6 unit tests incl. convergence-under-reorder).
+
+**Host** (`atomr-worlds-host`): `WorldActor.overlay` is now `LwwMap<IVec3, Voxel>`;
+new fields `writer_id = splitmix64(seed) | 1` (non-zero), `last_hlc`, and an
+injectable `Clock` (`Wall` in prod; `Manual` for deterministic journals/tests).
+`WriteVoxel`/`apply_region` stamp via a strictly-monotonic `next_stamp()` (so a
+single sequential writer is byte-identical to the old overwrite). New
+`WriteVoxelStamped`/`WriteRegionStamped` `recv()` into the host clock but key LWW
+on the *client* stamp; a loss replies `WorldEvent::WriteRejected`. `ensure_brick`
+applies EMPTY tombstones at LOD 0 (carve) and still skips them at coarse LOD.
+
+**Persistence v1→v2** (`atomr-worlds-persist`): `VoxelWriteEvent` gains `stamp`;
+`WorldSnapshot.writes` is `HashMap<IVec3, LwwCell>`. Decode is manifest-dispatched
+(`...voxel-write.v1`/`.v2`) with a leading version byte on snapshots; legacy v1
+entries get `legacy_stamp(seq) = (wall_ns = 0, counter = seq, WriterId::LEGACY)` —
+a reserved below-all-real-time band so any live write wins by construction.
+`apply_event_to_overlay` is an LWW `put` (order-independent replay). No
+`serde(default)` (bincode 2).
+
+**Fracture protocol** (`proto` + host): appended `WorldRequest::Fracture` /
+`WorldEvent::FractureApplied`. `handle_fracture` runs an optional fixed-point
+yield gate (zero force = carve-triggered → always evaluate), reads a bounded
+region (R = 8) around `impact_pos` from the authoritative bricks, runs the
+**integer** `connected_components` (reused from `atomr-worlds-physics` — host now
+depends on it; stays pure, no rapier/Bevy), and for each `unanchored_island`
+journals the voxels→EMPTY through the LWW overlay and emits `SetVoxel` +
+`SpawnDebris` commands, returning `FractureApplied` (reply + region fan-out).
+Float debris motion never touches the host.
+
+**Client re-route** (`atomr-worlds-client::physics::fracture`, rewritten): on a
+carve, send a `FractureRequest`; consume the `FractureApplied` reply → bake each
+`SpawnDebris` island via `analyze_region` (anchor = false) using materials
+recovered from `SetVoxel.before`, `spawn_island` it, and refresh the carved bricks
+through the existing make-before-break queue. The local decision (Phase 20.5's
+`analyze_snapshot`/`dispatch_carve_writeback`) is retired — the host is the
+authority. Still gated on the `physics` feature + `PhysicsConfig.enabled`.
+
+### Verification
+
+`core::lww` 6 + `persist` 10 (v1→v2 migration, tombstone, out-of-order
+convergence, carve-survives-recovery) + `proto` round-trips; **host 43 existing
+goldens byte-identical** + 6 new e2e (`lww_e2e`: stamped LWW + `WriteRejected` +
+carve-survives-restart + manual-clock byte-identical; `fracture_e2e`: detached
+island carved + commands + determinism + below-yield no-op); non-client workspace
+594; client 118 (incl. `bake_island`). `cargo tree -p atomr-worlds-host -i
+bevy_rapier3d` empty (physics dep pure); client compiles `--no-default-features`;
+the `fracture_carve` harness (physics+edit hooks) runs clean — the carve mutates
+the world host-side with no frame stall.
+
+### Out of scope (deferred Rec 4 slices — each needs upstream `../atomr`)
+
+Continuous `DebrisStateDelta` interpolation on an unreliable channel; a UDP
+transport alongside TCP in `atomr-remote`; cross-node delta-CRDT gossip for the
+`LwwMap` across cluster nodes (`atomr-cluster`). The `FractureRequest` region is a
+fixed host radius (off-actor-thread analysis for very large fractures is a later
+optimization, consistent with `ensure_brick` running synchronously today).

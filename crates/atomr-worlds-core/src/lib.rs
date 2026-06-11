@@ -14,6 +14,7 @@ pub mod hierarchy;
 pub mod hlc;
 pub mod interaction;
 pub mod lod;
+pub mod lww;
 pub mod material_physics;
 pub mod seed;
 pub mod shape;
@@ -31,6 +32,7 @@ pub use hierarchy::{Galaxy, Generator, Sector, System, Universe, World};
 pub use hlc::HlcTimestamp;
 pub use interaction::{AffectedSet, InteractionUnit, ToolKind};
 pub use lod::{Lod, MetricScale, MetricScaleRegistry};
+pub use lww::{LwwMap, LwwStamp, PutOutcome, WriterId};
 pub use material_physics::{
     default_palette as default_physics_palette, MaterialPhysicsPalette, MaterialPhysicsProps,
 };

@@ -81,10 +81,13 @@ impl WorldExtractor {
             WorldRequest::GetVoxel { addr, .. } => *addr,
             WorldRequest::GetBrick { addr, .. } => *addr,
             WorldRequest::WriteVoxel { addr, .. } => *addr,
+            WorldRequest::WriteVoxelStamped { addr, .. } => *addr,
+            WorldRequest::WriteRegionStamped { addr, .. } => *addr,
             WorldRequest::Subscribe { addr, .. } => *addr,
             WorldRequest::SubscribeMetric { addr, .. } => *addr,
             WorldRequest::WriteRegion { addr, .. } => *addr,
             WorldRequest::TraversePortal { addr, .. } => *addr,
+            WorldRequest::Fracture(req) => req.addr,
             WorldRequest::GetVehicleFrame { addr } => Address::Vehicle(*addr),
             WorldRequest::SetVehicleFrame { addr, .. } => Address::Vehicle(*addr),
             // Unsubscribe / observer ticks route via the envelope's `from`.

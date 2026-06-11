@@ -3,7 +3,9 @@ use atomr_worlds_core::coord::{DVec3, IVec3};
 use atomr_worlds_core::dim::DimensionId;
 use atomr_worlds_core::interaction::InteractionUnit;
 use atomr_worlds_core::lod::Lod;
+use atomr_worlds_core::lww::WriterId;
 use atomr_worlds_core::vehicle::{AffineFrame, ContainingFrame, VehicleAddr};
+use atomr_worlds_core::HlcTimestamp;
 use atomr_worlds_voxel::Voxel;
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +60,33 @@ pub enum WorldRequest {
     /// Traverse a registered portal from `addr`. The host returns a
     /// `PortalArrival` containing the destination address.
     TraversePortal { addr: Address, portal_id: u64 },
+    /// HLC-stamped single-voxel write. Like [`WorldRequest::WriteVoxel`] but the
+    /// caller supplies the [`HlcTimestamp`]/[`WriterId`], so the host resolves
+    /// it under last-writer-wins (replying [`WorldEvent::WriteRejected`] if the
+    /// write lost). Lets an optimistic client reconcile concurrent edits.
+    WriteVoxelStamped {
+        addr: Address,
+        pos: IVec3,
+        voxel: Voxel,
+        ts: HlcTimestamp,
+        writer: WriterId,
+    },
+    /// HLC-stamped brush write — the [`WorldRequest::WriteRegion`] analogue of
+    /// [`WorldRequest::WriteVoxelStamped`]. Cells that lose the LWW merge are
+    /// silently skipped (a brush is best-effort; no per-voxel rejection).
+    WriteRegionStamped {
+        addr: Address,
+        center: DVec3,
+        unit: InteractionUnit,
+        voxel: Voxel,
+        ts: HlcTimestamp,
+        writer: WriterId,
+    },
+    /// Ask the authoritative actor to evaluate a structural fracture at the
+    /// impact point. The actor runs the integer connectivity decision, journals
+    /// the island removal, and replies with a [`WorldEvent::FractureApplied`]
+    /// command sequence (also fanned out to region subscribers).
+    Fracture(crate::fracture::FractureRequest),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,4 +121,70 @@ pub enum WorldEvent {
     },
     /// Result of a [`WorldRequest::TraversePortal`].
     PortalArrival { dest: Address, transform: [[f32; 4]; 4] },
+    /// A stamped write lost a concurrent last-writer-wins merge — the writer
+    /// should roll its optimistic preview back to `current`.
+    WriteRejected(crate::fracture::WriteRejected),
+    /// Authoritative fracture result: an ordered, replayable command sequence
+    /// plus the inclusive journal sequence range its voxel writes were recorded
+    /// at, so late joiners can replay deterministically.
+    FractureApplied(crate::fracture::FractureApplied),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fracture::{FractureApplied, FractureCommand, FractureRequest, Force, WriteRejected};
+    use crate::wire::{decode, encode};
+    use atomr_worlds_core::addr::WorldAddr;
+
+    fn root() -> Address {
+        Address::World(WorldAddr::ROOT)
+    }
+
+    #[test]
+    fn stamped_and_fracture_requests_round_trip() {
+        let reqs = [
+            WorldRequest::WriteVoxelStamped {
+                addr: root(),
+                pos: IVec3::new(1, 2, 3),
+                voxel: Voxel::new(7),
+                ts: HlcTimestamp::new(42, 3),
+                writer: WriterId(9),
+            },
+            WorldRequest::Fracture(FractureRequest {
+                addr: root(),
+                impact_pos: IVec3::new(4, 5, 6),
+                force: Force::from_milli_n(IVec3::new(0, -8000, 0)),
+                material_id: 2,
+            }),
+        ];
+        for r in reqs {
+            let bytes = encode(&r).unwrap();
+            let back: WorldRequest = decode(&bytes).unwrap();
+            assert_eq!(format!("{r:?}"), format!("{back:?}"));
+        }
+    }
+
+    #[test]
+    fn write_rejected_and_fracture_applied_round_trip() {
+        let rej = WorldEvent::WriteRejected(WriteRejected {
+            addr: root(),
+            pos: IVec3::new(1, 0, 0),
+            current: Voxel::new(5),
+        });
+        let applied = WorldEvent::FractureApplied(FractureApplied {
+            addr: root(),
+            commands: vec![FractureCommand::SetVoxel {
+                pos: IVec3::new(1, 0, 0),
+                before: Voxel::new(5),
+                after: Voxel::EMPTY,
+            }],
+            seq_range: (10, 11),
+        });
+        for e in [rej, applied] {
+            let bytes = encode(&e).unwrap();
+            let back: WorldEvent = decode(&bytes).unwrap();
+            assert_eq!(format!("{e:?}"), format!("{back:?}"));
+        }
+    }
 }

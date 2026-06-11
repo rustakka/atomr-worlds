@@ -16,15 +16,23 @@ use atomr_worlds_core::addr::{Address, Level, WorldAddr};
 use atomr_worlds_core::coord::{DVec3, IVec3};
 use atomr_worlds_core::interaction::InteractionUnit;
 use atomr_worlds_core::lod::{Lod, MetricScale};
+use atomr_worlds_core::lww::{LwwMap, LwwStamp, WriterId};
 use atomr_worlds_core::shape::WorldShape;
 use atomr_worlds_core::vehicle::{AffineFrame, ParentAddr, VehicleAddr};
+use atomr_worlds_core::HlcTimestamp;
 use atomr_worlds_generate::{
     default_registry, AuthoredRegionStore, BrickGenContext, DefaultMacroGenerator,
     GeneratorRegistry, MacroGenerator, MacroStateCache, Resolved, WorldGen, WorldMacroState,
 };
-use atomr_worlds_persist::{VoxelWriteEvent, WorldPersistence, WorldSnapshot};
-use atomr_worlds_proto::{Envelope, WorldEvent, WorldRequest, AABB};
+use atomr_worlds_persist::{LwwCell, VoxelWriteEvent, WorldPersistence, WorldSnapshot};
+use atomr_worlds_physics::connected_components;
+use atomr_worlds_proto::{
+    Envelope, Force, FractureApplied, FractureCommand, FractureRequest, WorldEvent, WorldRequest,
+    WriteRejected, AABB,
+};
 use atomr_worlds_voxel::{Brick, Voxel, BRICK_EDGE};
+
+use crate::clock::Clock;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::HostError;
@@ -69,6 +77,10 @@ pub struct LocalHostConfig {
     /// Optional persistence backend. When set, voxel writes journal here and
     /// the actor recovers state on spawn.
     pub persistence: Option<Arc<WorldPersistence>>,
+    /// Wall-clock source the actor reads when stamping a write's HLC. Defaults
+    /// to [`Clock::Wall`]; determinism tests and the screenshot harness inject
+    /// [`Clock::manual`](crate::clock::Clock::manual) for reproducible journals.
+    pub clock: crate::clock::Clock,
 }
 
 impl LocalHostConfig {
@@ -95,6 +107,7 @@ impl Default for LocalHostConfig {
             subscriber_capacity: 256,
             request_timeout: Duration::from_secs(10),
             persistence: None,
+            clock: crate::clock::Clock::default(),
         }
     }
 }
@@ -215,17 +228,20 @@ impl LocalHost {
             (None, _) => None,
         };
 
-        // Recover overlay before spawning so the actor starts coherent.
-        let (writes, last_seq) = if let Some(p) = &self.config.persistence {
+        // Recover overlay before spawning so the actor starts coherent. Seed
+        // the actor's HLC above all persisted history so it never regresses.
+        let (overlay, last_seq, last_hlc) = if let Some(p) = &self.config.persistence {
             let r = p.recover(addr).await.map_err(|e| HostError::Sys(format!("{e}")))?;
-            (r.writes, r.last_seq)
+            let ts = r.max_ts();
+            (r.overlay, r.last_seq, ts)
         } else {
-            (HashMap::new(), 0)
+            (LwwMap::new(), 0, HlcTimestamp::ZERO)
         };
 
         let name = format!("entity-{:x}-{}", seed, map.len());
         let persistence = self.config.persistence.clone();
         let authored_regions = self.config.authored_regions.clone();
+        let clock = self.config.clock.clone();
         let initial_frame = match addr {
             Address::Vehicle(v) => Some(AffineFrame::at_origin(v.parent)),
             Address::World(_) => None,
@@ -238,8 +254,10 @@ impl LocalHost {
                         addr,
                         seed,
                         resolved.clone(),
-                        writes.clone(),
+                        overlay.clone(),
                         last_seq,
+                        last_hlc,
+                        clock.clone(),
                         persistence.clone(),
                         initial_frame,
                         shape,
@@ -295,10 +313,13 @@ fn env_target_addr(env: &Envelope<WorldRequest>) -> Address {
         WorldRequest::GetVoxel { addr, .. }
         | WorldRequest::GetBrick { addr, .. }
         | WorldRequest::WriteVoxel { addr, .. }
+        | WorldRequest::WriteVoxelStamped { addr, .. }
+        | WorldRequest::WriteRegionStamped { addr, .. }
         | WorldRequest::Subscribe { addr, .. }
         | WorldRequest::SubscribeMetric { addr, .. }
         | WorldRequest::WriteRegion { addr, .. }
         | WorldRequest::TraversePortal { addr, .. } => *addr,
+        WorldRequest::Fracture(req) => req.addr,
         WorldRequest::GetVehicleFrame { addr } | WorldRequest::SetVehicleFrame { addr, .. } => {
             Address::Vehicle(*addr)
         }
@@ -370,9 +391,19 @@ pub(crate) struct WorldActor {
     /// fit, which was the original "stair-step" terrain bug at the
     /// streaming horizon. Write paths use `Lod::new(0)`.
     cache: HashMap<(IVec3, u8), Brick>,
-    /// Voxel-position → user-written voxel. Mirrors what's in the journal so
-    /// brick cache misses can be repopulated correctly post-recovery.
-    overlay: HashMap<IVec3, Voxel>,
+    /// Voxel-position → last-writer-wins voxel cell. Mirrors the journal so
+    /// brick cache misses repopulate correctly post-recovery. Each cell carries
+    /// its HLC stamp, so concurrent/out-of-order writes converge and an `EMPTY`
+    /// (carve) is a retained tombstone rather than an absence.
+    overlay: LwwMap<IVec3, Voxel>,
+    /// This actor's stable writer id (non-zero), used to break HLC ties in the
+    /// LWW order. Derived deterministically from the world seed.
+    writer_id: WriterId,
+    /// Most recent HLC this actor stamped or received — its logical clock.
+    last_hlc: HlcTimestamp,
+    /// Wall-clock source for HLC stamping (real time, or a deterministic
+    /// counter under test/harness).
+    clock: Clock,
     subscribers: HashMap<u64, Subscriber>,
     frame_subscribers: HashMap<u64, FrameSubscriber>,
     persistence: Option<Arc<WorldPersistence>>,
@@ -389,14 +420,20 @@ impl WorldActor {
         addr: Address,
         seed: u64,
         resolved: Resolved,
-        overlay: HashMap<IVec3, Voxel>,
+        overlay: LwwMap<IVec3, Voxel>,
         last_seq: u64,
+        last_hlc: HlcTimestamp,
+        clock: Clock,
         persistence: Option<Arc<WorldPersistence>>,
         frame: Option<AffineFrame>,
         shape: WorldShape,
         macro_state: Option<Arc<WorldMacroState>>,
         authored_regions: Arc<std::sync::Mutex<AuthoredRegionStore>>,
     ) -> Self {
+        // Deterministic, stable, non-zero writer id so a local write always
+        // beats a migrated legacy entry (`WriterId::LEGACY == 0`) at the same
+        // timestamp, and two distinct worlds don't share an id.
+        let writer_id = WriterId(atomr_worlds_core::seed::splitmix64(seed) | 1);
         Self {
             addr,
             seed,
@@ -406,6 +443,9 @@ impl WorldActor {
             authored_regions,
             cache: HashMap::new(),
             overlay,
+            writer_id,
+            last_hlc,
+            clock,
             subscribers: HashMap::new(),
             frame_subscribers: HashMap::new(),
             persistence,
@@ -414,6 +454,54 @@ impl WorldActor {
             frame,
             frame_tick: 0,
         }
+    }
+
+    /// Stamp the next locally-originated write: tick the HLC off the injected
+    /// clock and pair it with this actor's writer id. Strictly monotonic, so a
+    /// sequential single writer always wins LWW (i.e. byte-identical to the old
+    /// unconditional overwrite).
+    fn next_stamp(&mut self) -> LwwStamp {
+        self.last_hlc = HlcTimestamp::tick(self.last_hlc, self.clock.now_ns());
+        LwwStamp::new(self.last_hlc, self.writer_id)
+    }
+
+    /// Apply a stamped single-voxel write under last-writer-wins. Returns
+    /// `Ok(None)` when applied (journalled + overlaid + fanned out), or
+    /// `Ok(Some(current))` when the write lost to a greater-or-equal stamp (the
+    /// caller replies [`WorldEvent::WriteRejected`]). Preserves the
+    /// append-before-mutate-cache ordering of the original write path.
+    async fn apply_stamped_write(
+        &mut self,
+        addr: Address,
+        pos: IVec3,
+        voxel: Voxel,
+        stamp: LwwStamp,
+    ) -> Result<Option<Voxel>, HostError> {
+        // Non-committing LWW peek: bail before journalling if we'd lose.
+        if let Some(cur) = self.overlay.get_entry(&pos).map(|(s, v)| (s, *v)) {
+            if cur.0 >= stamp {
+                return Ok(Some(cur.1));
+            }
+        }
+        let (bc, lc) = Self::brick_of_voxel(pos);
+        let before = self.ensure_brick(bc, Lod::new(0)).get(lc);
+        if let Some(p) = &self.persistence {
+            let ev = VoxelWriteEvent { addr, pos, before, after: voxel, stamp };
+            p.append(addr, &ev, self.next_seq)
+                .await
+                .map_err(|e| HostError::Sys(format!("{e}")))?;
+            self.next_seq += 1;
+            self.writes_since_snapshot += 1;
+        }
+        self.overlay.put(pos, voxel, stamp);
+        {
+            let b = self.ensure_brick(bc, Lod::new(0));
+            b.set(lc, voxel);
+        }
+        self.invalidate_coarse_caches_for(pos);
+        self.fan_out_delta(addr, pos, before, voxel);
+        self.maybe_save_snapshot().await?;
+        Ok(None)
     }
 
     /// True if any voxel of the given brick could lie inside the shape.
@@ -511,7 +599,7 @@ impl WorldActor {
                 brick_coord.y * edge_world,
                 brick_coord.z * edge_world,
             );
-            for (pos, voxel) in &self.overlay {
+            for (pos, _stamp, voxel) in self.overlay.iter() {
                 if pos.x < origin.x
                     || pos.x >= origin.x + edge_world
                     || pos.y < origin.y
@@ -521,6 +609,9 @@ impl WorldActor {
                 {
                     continue;
                 }
+                // At LOD 0 an `EMPTY` tombstone carves the procedural cell (the
+                // carve-durability fix); at coarse LODs a single hole shouldn't
+                // blank the whole downsampled cell, so skip it there.
                 if lod.depth > 0 && *voxel == Voxel::EMPTY {
                     continue;
                 }
@@ -593,32 +684,33 @@ impl WorldActor {
                 Ok(Envelope::new(corr, from, WorldEvent::BrickSnapshot { addr, brick, lod, payload }))
             }
             WorldRequest::WriteVoxel { addr, pos, voxel } => {
-                let (bc, lc) = Self::brick_of_voxel(pos);
-                let before = self.ensure_brick(bc, Lod::new(0)).get(lc);
-                if let Some(p) = &self.persistence {
-                    let ev = VoxelWriteEvent { addr, pos, before, after: voxel };
-                    p.append(addr, &ev, self.next_seq)
-                        .await
-                        .map_err(|e| HostError::Sys(format!("{e}")))?;
-                    self.next_seq += 1;
-                    self.writes_since_snapshot += 1;
+                // Host-authoritative write: stamp with a fresh, strictly
+                // monotonic HLC tick — so this write always wins LWW (a single
+                // sequential writer is byte-identical to the old overwrite).
+                let stamp = self.next_stamp();
+                match self.apply_stamped_write(addr, pos, voxel, stamp).await? {
+                    None => Ok(Envelope::new(corr, from, WorldEvent::Ack { addr })),
+                    Some(current) => Ok(Envelope::new(
+                        corr,
+                        from,
+                        WorldEvent::WriteRejected(WriteRejected { addr, pos, current }),
+                    )),
                 }
-                {
-                    let b = self.ensure_brick(bc, Lod::new(0));
-                    b.set(lc, voxel);
+            }
+            WorldRequest::WriteVoxelStamped { addr, pos, voxel, ts, writer } => {
+                // Client-stamped write: advance the actor's clock past the
+                // remote stamp (so later local writes dominate), but key the
+                // LWW merge on the *client's* stamp.
+                self.last_hlc = HlcTimestamp::recv(self.last_hlc, ts, self.clock.now_ns());
+                let stamp = LwwStamp::new(ts, writer);
+                match self.apply_stamped_write(addr, pos, voxel, stamp).await? {
+                    None => Ok(Envelope::new(corr, from, WorldEvent::Ack { addr })),
+                    Some(current) => Ok(Envelope::new(
+                        corr,
+                        from,
+                        WorldEvent::WriteRejected(WriteRejected { addr, pos, current }),
+                    )),
                 }
-                if voxel == Voxel::EMPTY {
-                    self.overlay.remove(&pos);
-                } else {
-                    self.overlay.insert(pos, voxel);
-                }
-                // Phase 17.1 follow-up: drop any cached coarse-LOD bricks
-                // that contained `pos` so the next coarse fetch picks up
-                // the new overlay (re-stamped via `ensure_brick`).
-                self.invalidate_coarse_caches_for(pos);
-                self.fan_out_delta(addr, pos, before, voxel);
-                self.maybe_save_snapshot().await?;
-                Ok(Envelope::new(corr, from, WorldEvent::Ack { addr }))
             }
             WorldRequest::Subscribe { .. } => {
                 Err(HostError::NotYetImplemented("use WorldHost::subscribe for Subscribe envelopes"))
@@ -643,11 +735,26 @@ impl WorldActor {
                 Ok(Envelope::new(corr, from, WorldEvent::Ack { addr: Address::Vehicle(addr) }))
             }
             WorldRequest::WriteRegion { addr, center, unit, voxel } => {
-                let bricks_modified = self.apply_region(addr, center, unit, voxel).await?;
+                let stamp = self.next_stamp();
+                let bricks_modified =
+                    self.apply_region(addr, center, unit, voxel, stamp).await?;
                 // Fan out an aggregated RegionDelta to subscribers whose region
                 // overlaps any of the touched bricks.
                 self.fan_out_region_delta(addr, center, unit, voxel, &bricks_modified);
                 Ok(Envelope::new(corr, from, WorldEvent::Ack { addr }))
+            }
+            WorldRequest::WriteRegionStamped { addr, center, unit, voxel, ts, writer } => {
+                self.last_hlc = HlcTimestamp::recv(self.last_hlc, ts, self.clock.now_ns());
+                let stamp = LwwStamp::new(ts, writer);
+                let bricks_modified =
+                    self.apply_region(addr, center, unit, voxel, stamp).await?;
+                self.fan_out_region_delta(addr, center, unit, voxel, &bricks_modified);
+                Ok(Envelope::new(corr, from, WorldEvent::Ack { addr }))
+            }
+            WorldRequest::Fracture(req) => {
+                let applied = self.handle_fracture(req).await?;
+                self.fan_out_fracture_applied(&applied);
+                Ok(Envelope::new(corr, from, WorldEvent::FractureApplied(applied)))
             }
             WorldRequest::SubscribeMetric { .. } => {
                 Err(HostError::NotYetImplemented("use WorldHost::subscribe for SubscribeMetric envelopes"))
@@ -697,6 +804,7 @@ impl WorldActor {
         center: DVec3,
         unit: InteractionUnit,
         voxel: Voxel,
+        stamp: LwwStamp,
     ) -> Result<Vec<IVec3>, HostError> {
         let scale = self.brush_scale();
         let edge = BRICK_EDGE as i64;
@@ -725,15 +833,20 @@ impl WorldActor {
                         let voxel_world_z = (origin_z + z) as f64 * mpv + mpv * 0.5;
                         let wp = DVec3::new(voxel_world_x, voxel_world_y, voxel_world_z);
                         if unit.contains(center, wp) {
+                            let pos = IVec3::new(origin_x + x, origin_y + y, origin_z + z);
+                            // LWW gate: skip cells already held by a
+                            // greater-or-equal stamp (only possible for a
+                            // client-stamped brush; a fresh host stamp always
+                            // wins). Brush rejections are silent — best-effort.
+                            if self.overlay.stamp(&pos).is_some_and(|cur| cur >= stamp) {
+                                continue;
+                            }
                             let b = self.cache.get_mut(&(bc, 0u8)).unwrap();
                             let before = b.get(local);
                             if b.set(local, voxel) {
-                                let pos = IVec3::new(origin_x + x, origin_y + y, origin_z + z);
-                                if voxel == Voxel::EMPTY {
-                                    self.overlay.remove(&pos);
-                                } else {
-                                    self.overlay.insert(pos, voxel);
-                                }
+                                // Retain `EMPTY` as a tombstone (carve durability
+                                // + LWW correctness), unlike the old remove.
+                                self.overlay.put(pos, voxel, stamp);
                                 journaled.push((pos, before));
                                 // Phase 17.1 follow-up: invalidate coarse-LOD
                                 // entries containing `pos` so they regenerate
@@ -748,10 +861,12 @@ impl WorldActor {
             if before_count != after_count || !journaled.is_empty() {
                 touched.push(bc);
             }
-            // Journal each per-voxel change for replay correctness.
+            // Journal each per-voxel change for replay correctness. Every cell
+            // of one brush shares the brush's stamp (distinct positions ⇒ no
+            // tie), so the batch resolves atomically under LWW.
             if let Some(p) = &self.persistence {
                 for (pos, before) in journaled {
-                    let ev = VoxelWriteEvent { addr, pos, before, after: voxel };
+                    let ev = VoxelWriteEvent { addr, pos, before, after: voxel, stamp };
                     p.append(addr, &ev, self.next_seq)
                         .await
                         .map_err(|e| HostError::Sys(format!("{e}")))?;
@@ -762,6 +877,145 @@ impl WorldActor {
         }
         self.maybe_save_snapshot().await?;
         Ok(touched)
+    }
+
+    /// Authoritatively evaluate a structural fracture: run the integer
+    /// connectivity decision over the impact region against the *authoritative*
+    /// bricks, journal the removal of any detached island through the LWW
+    /// overlay, and return the deterministic command sequence. Float debris
+    /// motion stays the client's job — the host only decides geometry.
+    async fn handle_fracture(
+        &mut self,
+        req: FractureRequest,
+    ) -> Result<FractureApplied, HostError> {
+        /// Half-extent (voxels) of the analysis region around the impact.
+        const R: i64 = 8;
+        let addr = req.addr;
+        let first_seq = self.next_seq;
+        let empty = FractureApplied {
+            addr,
+            commands: Vec::new(),
+            seq_range: (first_seq, first_seq.saturating_sub(1)),
+        };
+
+        // Yield gate: a *non-zero* impact force below the material's yield does
+        // not fracture; a zero force (carve-triggered) always evaluates
+        // connectivity. The comparison is integer ⇒ deterministic.
+        if req.force != Force::ZERO {
+            let yield_pa = atomr_worlds_core::default_physics_palette()
+                .get(req.material_id)
+                .yield_strength_pa;
+            if !force_meets_yield(req.force, yield_pa) {
+                return Ok(empty);
+            }
+        }
+
+        // Bounded region around the impact, read from authoritative bricks.
+        let min = IVec3::new(req.impact_pos.x - R, req.impact_pos.y - R, req.impact_pos.z - R);
+        let span = (2 * R + 1) as i32;
+        let dims: [i32; 3] = [span, span, span];
+        let (nx, ny, nz) = (span as i64, span as i64, span as i64);
+        let lin = |x: i64, y: i64, z: i64| (x * ny * nz + y * nz + z) as usize;
+        let mut grid = vec![Voxel::EMPTY; (nx * ny * nz) as usize];
+        for x in 0..nx {
+            for y in 0..ny {
+                for z in 0..nz {
+                    let wp = IVec3::new(min.x + x, min.y + y, min.z + z);
+                    let (bc, lc) = Self::brick_of_voxel(wp);
+                    grid[lin(x, y, z)] = self.ensure_brick(bc, Lod::new(0)).get(lc);
+                }
+            }
+        }
+
+        // Connectivity: solid = non-empty; anchor = solid on the region shell
+        // *except* the top (+Y) face — so ceiling-hung structure can fall while
+        // ground/side-rooted structure holds. Pure integer ⇒ deterministic.
+        let idx = |x: i32, y: i32, z: i32| (x as i64 * ny * nz + y as i64 * nz + z as i64) as usize;
+        let islands = {
+            let solid = |x: i32, y: i32, z: i32| grid[idx(x, y, z)] != Voxel::EMPTY;
+            let is_anchor = |x: i32, y: i32, z: i32| {
+                grid[idx(x, y, z)] != Voxel::EMPTY
+                    && (x == 0 || x == dims[0] - 1 || z == 0 || z == dims[2] - 1 || y == 0)
+            };
+            connected_components(dims, solid, is_anchor).unanchored_islands()
+        };
+        if islands.is_empty() {
+            return Ok(empty);
+        }
+
+        // One HLC tick stamps the whole fracture (distinct positions ⇒ no tie).
+        let stamp = self.next_stamp();
+        let persistence = self.persistence.clone();
+        let mut commands = Vec::new();
+        for island in &islands {
+            let mut voxels = Vec::with_capacity(island.len());
+            let mut anchor = IVec3::new(i64::MAX, i64::MAX, i64::MAX);
+            for &[lx, ly, lz] in island {
+                let wp = IVec3::new(min.x + lx as i64, min.y + ly as i64, min.z + lz as i64);
+                let before = grid[lin(lx as i64, ly as i64, lz as i64)];
+                if let Some(p) = &persistence {
+                    let ev = VoxelWriteEvent { addr, pos: wp, before, after: Voxel::EMPTY, stamp };
+                    p.append(addr, &ev, self.next_seq)
+                        .await
+                        .map_err(|e| HostError::Sys(format!("{e}")))?;
+                    self.next_seq += 1;
+                    self.writes_since_snapshot += 1;
+                }
+                self.overlay.put(wp, Voxel::EMPTY, stamp);
+                let (bc, lc) = Self::brick_of_voxel(wp);
+                self.ensure_brick(bc, Lod::new(0)).set(lc, Voxel::EMPTY);
+                self.invalidate_coarse_caches_for(wp);
+                commands.push(FractureCommand::SetVoxel { pos: wp, before, after: Voxel::EMPTY });
+                voxels.push(wp);
+                anchor = IVec3::new(anchor.x.min(wp.x), anchor.y.min(wp.y), anchor.z.min(wp.z));
+            }
+            commands.push(FractureCommand::SpawnDebris { id: debris_id(anchor), voxels, anchor });
+        }
+        self.maybe_save_snapshot().await?;
+        let last_seq = self.next_seq.saturating_sub(1);
+        Ok(FractureApplied { addr, commands, seq_range: (first_seq, last_seq) })
+    }
+
+    /// Fan an authoritative [`FractureApplied`] out to subscribers whose region
+    /// overlaps any touched brick — mirrors [`Self::fan_out_region_delta`].
+    fn fan_out_fracture_applied(&mut self, applied: &FractureApplied) {
+        let edge = BRICK_EDGE as i64;
+        let mut bricks: Vec<IVec3> = Vec::new();
+        for cmd in &applied.commands {
+            if let FractureCommand::SetVoxel { pos, .. } = cmd {
+                let (bc, _) = Self::brick_of_voxel(*pos);
+                if !bricks.contains(&bc) {
+                    bricks.push(bc);
+                }
+            }
+        }
+        if bricks.is_empty() {
+            return;
+        }
+        let addr = applied.addr;
+        let mut dead = Vec::new();
+        for (sub_id, sub) in &self.subscribers {
+            let overlaps = bricks.iter().any(|bc| {
+                let lo = IVec3::new(bc.x * edge, bc.y * edge, bc.z * edge);
+                let hi = IVec3::new(lo.x + edge, lo.y + edge, lo.z + edge);
+                sub.region.min.x < hi.x
+                    && sub.region.max.x > lo.x
+                    && sub.region.min.y < hi.y
+                    && sub.region.max.y > lo.y
+                    && sub.region.min.z < hi.z
+                    && sub.region.max.z > lo.z
+            });
+            if !overlaps {
+                continue;
+            }
+            let env = Envelope::new(0, addr, WorldEvent::FractureApplied(applied.clone()));
+            if sub.sink.try_send(env).is_err() {
+                dead.push(*sub_id);
+            }
+        }
+        for sub_id in dead {
+            self.subscribers.remove(&sub_id);
+        }
     }
 
     fn fan_out_region_delta(
@@ -817,7 +1071,15 @@ impl WorldActor {
         if every == 0 || self.writes_since_snapshot < every {
             return Ok(());
         }
-        let snap = WorldSnapshot { writes: self.overlay.clone() };
+        // Snapshot the full CRDT state — stamps and tombstones included — so
+        // last-writer-wins convergence survives log truncation.
+        let writes = self
+            .overlay
+            .entries()
+            .iter()
+            .map(|(pos, (stamp, voxel))| (*pos, LwwCell { stamp: *stamp, voxel: *voxel }))
+            .collect();
+        let snap = WorldSnapshot { writes };
         let seq = self.next_seq.saturating_sub(1);
         p.save_snapshot(self.addr, &snap, seq)
             .await
@@ -1046,6 +1308,30 @@ impl WorldActor {
             self.frame_subscribers.remove(&sub_id);
         }
     }
+}
+
+/// Deterministic debris id from an island's anchor. The host assigns it and
+/// broadcasts the same `FractureApplied` to every client, so this only needs to
+/// be stable and reasonably distinct per island location.
+fn debris_id(anchor: IVec3) -> u32 {
+    use atomr_worlds_core::seed::splitmix64;
+    let mut h = splitmix64(anchor.x as u64);
+    h = splitmix64(h ^ (anchor.y as u64).rotate_left(21));
+    h = splitmix64(h ^ (anchor.z as u64).rotate_left(42));
+    h as u32
+}
+
+/// Whether a fixed-point impact `force` meets a material's yield. The force
+/// magnitude is integer (milli-newtons); the threshold is derived once from the
+/// pascal yield (a deterministic `f64`→`i128`), and the comparison is integer —
+/// so the fracture *decision* replays byte-identically. (Simplified: yield is
+/// treated as a milli-newton threshold over a unit voxel face.)
+fn force_meets_yield(force: Force, yield_pa: f32) -> bool {
+    let mag_sq: i128 = (force.milli_n.x as i128).pow(2)
+        + (force.milli_n.y as i128).pow(2)
+        + (force.milli_n.z as i128).pow(2);
+    let threshold_mn = (yield_pa as f64 * Force::SCALE) as i128;
+    mag_sq >= threshold_mn * threshold_mn
 }
 
 // Suppress unused-import lint for symbols that exist primarily for downstream

@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod clock;
 pub mod cluster;
 pub mod error;
 pub mod extractor;
@@ -21,6 +22,7 @@ pub mod policy;
 pub mod shape;
 pub mod world_query_impl;
 
+pub use clock::Clock;
 pub use cluster::{ClusterHost, ClusterHostConfig, ClusterSubs, PendingReplies};
 pub use error::HostError;
 pub use extractor::WorldExtractor;
@@ -35,6 +37,6 @@ pub use atomr_worlds_generate::{
 };
 
 pub use atomr_worlds_persist::{
-    persistence_id_for, InMemoryJournal, InMemorySnapshotStore, RecoveredState, VoxelWriteEvent,
-    WorldPersistence, WorldSnapshot,
+    persistence_id_for, InMemoryJournal, InMemorySnapshotStore, LwwCell, RecoveredState,
+    VoxelWriteEvent, WorldPersistence, WorldSnapshot,
 };

@@ -1,28 +1,27 @@
-//! Carve → flood-fill → debris orchestration, scheduled off the main thread.
+//! Carve → host fracture decision → debris orchestration.
 //!
-//! Listens for [`VoxelEditEvent`]s, and for *carves* runs the deterministic
-//! structural flood-fill over the affected region. Any voxel island that no
-//! longer reaches an anchor becomes a falling rigid body.
+//! Listens for [`VoxelEditEvent`]s and, for *carves*, asks the **host** to
+//! evaluate the structural fracture authoritatively. The host runs the
+//! deterministic connectivity decision, journals the removal of any detached
+//! island, and replies with a [`FractureApplied`] command sequence (also fanned
+//! out to other subscribers — this is the multiplayer-sync seam, Rec 4). The
+//! client then does the unavoidable, *ephemeral* work: bake each detached island
+//! into a falling rigid body and refresh the bricks the host carved.
 //!
-//! # Why this is split across two systems
+//! # Why the host decides
 //!
-//! The analysis — read the resident voxels, flood-fill, extract islands, greedy
-//! box-merge, mass solve — is pure CPU that grows with the carved volume. Doing
-//! it inline on the render thread stalled the frame on big carves. So it is
-//! moved to a worker (the Rec 3 "off-thread flood-fill" scheduler lever):
+//! Connectivity is integer and deterministic, so it must agree across every
+//! peer; making the host authoritative means all clients see the *same*
+//! destruction (and the removal is journaled exactly once). Float debris motion
+//! stays client-side — the host never simulates bodies.
 //!
-//! 1. [`dispatch_fracture_checks`] (main thread) snapshots the resident bricks
-//!    around the carve — cheap `Arc<Brick>` refcount bumps — and hands them to
-//!    [`FractureWorkers::dispatch`], which runs [`analyze_snapshot`] on tokio's
-//!    blocking pool. The frame never blocks on the analysis.
+//! # Off the render thread
+//!
+//! 1. [`dispatch_fracture_checks`] (main thread) sends a `FractureRequest` to the
+//!    host on a tokio task; the frame never blocks on the round-trip.
 //! 2. [`apply_fracture_results`] (main thread) drains finished
-//!    [`FractureResult`]s each frame and does the unavoidable ECS work: spawn
-//!    the debris bodies, journal-remove the island voxels through the host, and
-//!    refresh the touched bricks.
-//!
-//! The flood-fill, mass, and box-merge live in the engine-agnostic
-//! [`atomr_worlds_physics`] core ([`analyze_region`]); this file is the ECS glue
-//! plus the snapshot sampler and the worker scheduler.
+//!    [`FractureApplied`]s and does the ECS work: bake + spawn the debris bodies
+//!    and refresh the carved bricks (make-before-break, no flicker).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc, Mutex};
@@ -30,67 +29,54 @@ use std::sync::{mpsc, Arc, Mutex};
 use atomr_worlds_core::addr::Address;
 use atomr_worlds_core::coord::IVec3 as VoxCoord;
 use atomr_worlds_core::default_physics_palette;
-use atomr_worlds_core::lod::Lod;
 use atomr_worlds_host::WorldHost;
-use atomr_worlds_physics::{analyze_region, FractureAnalysis};
-use atomr_worlds_proto::{Envelope, WorldRequest};
-use atomr_worlds_voxel::brick::Brick;
-use atomr_worlds_voxel::voxel::Voxel;
+use atomr_worlds_physics::{analyze_region, AnalyzedIsland};
+use atomr_worlds_proto::{
+    Envelope, Force, FractureApplied, FractureCommand, FractureRequest, WorldEvent, WorldRequest,
+};
 use atomr_worlds_voxel::BRICK_EDGE;
 use bevy::prelude::*;
 use tokio::runtime::Handle;
 
 use super::config::PhysicsConfig;
 use super::debris::spawn_island;
-use crate::brick_gen::{fetch_and_build, refetch_bricks, BrickReady, BrickRefreshQueue};
+use crate::brick_gen::{refetch_bricks, BrickReady, BrickRefreshQueue};
 use crate::modes::edit::{self, EditSpawn, VoxelEditEvent};
 use crate::modes::fp::{spawn_edited_brick, MaterialPool};
 use crate::render::{AoStrategy, RenderConfig};
 use crate::world_runtime::WorldRuntime;
 use crate::world_stream::{ChunkStreamer, LoadedChunks};
 
-/// Voxels of skirt added around the affected-brick AABB before flood-fill, so a
-/// small island poking just outside the carved brick is still captured.
+/// Voxels of skirt added around the affected-brick AABB when locating the carve
+/// centre, so the host's region is centred on the disturbed volume.
 const REGION_SKIRT: i64 = 2;
-/// Hard cap on the analyzed region volume (voxels). A brush spanning more than
+/// Hard cap on the affected-region volume (voxels). A brush spanning more than
 /// this skips fracture analysis to keep the edit off the critical path; the
 /// terrain still updates normally. (~ (3 bricks)³.)
 const MAX_REGION_VOXELS: i64 = 48 * 48 * 48;
-/// Cap on concurrently-analyzing carves. Carves are user-paced, so this is a
-/// generous safety bound, not a throughput limit; an over-cap carve simply
-/// doesn't fracture (the terrain edit still applies through the editor).
+/// Cap on concurrently-outstanding fracture requests. Carves are user-paced, so
+/// this is a generous safety bound, not a throughput limit; an over-cap carve
+/// simply doesn't fracture (the terrain edit still applies through the editor).
 const MAX_IN_FLIGHT_FRACTURES: usize = 8;
 
-/// Monotonic id distinguishing in-flight analysis jobs.
-type CarveId = u64;
-
-/// A finished off-thread analysis, ready to apply on the main thread.
-#[derive(Debug)]
-struct FractureResult {
-    id: CarveId,
-    /// World address the carve targeted — removals are journaled against it.
-    addr: Address,
-    analysis: FractureAnalysis,
-}
-
-/// Bevy resource owning the dispatcher half of the off-thread fracture
-/// pipeline: the in-flight set + the result channel. Mirrors
+/// Bevy resource owning the client half of the host-authoritative fracture
+/// pipeline: the outstanding-request counter, the [`FractureApplied`] reply
+/// channel, and the brick-refresh pipeline. Mirrors
 /// [`crate::brick_gen::BrickGenWorkers`].
 #[derive(Resource)]
 pub struct FractureWorkers {
     handle: Handle,
-    in_flight: HashSet<CarveId>,
-    next_id: CarveId,
-    results_tx: mpsc::Sender<FractureResult>,
-    /// Receiver behind a `Mutex` so the resource is `Sync` while the main
-    /// thread drains it with `try_recv`. Uncontended in practice.
-    results_rx: Mutex<mpsc::Receiver<FractureResult>>,
+    in_flight: usize,
+    applied_tx: mpsc::Sender<FractureApplied>,
+    /// Receiver behind a `Mutex` so the resource is `Sync` while the main thread
+    /// drains it with `try_recv`. Uncontended in practice.
+    applied_rx: Mutex<mpsc::Receiver<FractureApplied>>,
     /// Async brick-refresh pipeline: the heavy `fetch_and_build` (mesh + AO +
     /// DAG) for a carved brick runs off-thread; the finished [`BrickReady`] is
     /// swapped in flicker-free on the main thread. The dedup + dirtied-again
     /// logic lives in the shared [`BrickRefreshQueue`].
     refresh: BrickRefreshQueue,
-    /// Host / AO / addr captured at the last write-back, so `drain_refresh` can
+    /// Host / AO / addr captured at the last refresh, so `drain_refresh` can
     /// re-refetch dirtied-again bricks (a second carve landed mid-refresh)
     /// without new system params. Constant for the single active world.
     refetch_ctx: Option<(Arc<dyn WorldHost>, Arc<dyn AoStrategy>, Address)>,
@@ -101,61 +87,66 @@ impl FractureWorkers {
         let (tx, rx) = mpsc::channel();
         Self {
             handle,
-            in_flight: HashSet::new(),
-            next_id: 0,
-            results_tx: tx,
-            results_rx: Mutex::new(rx),
+            in_flight: 0,
+            applied_tx: tx,
+            applied_rx: Mutex::new(rx),
             refresh: BrickRefreshQueue::new(),
             refetch_ctx: None,
         }
     }
 
-    /// Whether the in-flight cap has been reached.
     #[inline]
     fn is_saturated(&self) -> bool {
-        self.in_flight.len() >= MAX_IN_FLIGHT_FRACTURES
+        self.in_flight >= MAX_IN_FLIGHT_FRACTURES
     }
 
-    /// Number of analyses currently outstanding (diagnostics / tests).
+    /// Number of fracture requests currently outstanding (diagnostics / tests).
     #[inline]
     #[allow(dead_code)]
     pub fn in_flight_count(&self) -> usize {
-        self.in_flight.len()
+        self.in_flight
     }
 
-    /// Spawn an off-thread analysis of one carved region over `snapshot`.
-    /// Returns `false` if saturated (the carve simply won't fracture). The
-    /// snapshot is *moved* into the task, so its `Arc<Brick>`s stay alive for
-    /// the analysis regardless of later eviction.
-    pub fn dispatch(
+    /// Ask the host to evaluate a fracture at `impact_pos`. Returns `false` if
+    /// saturated (the carve simply won't fracture). The host's `FractureApplied`
+    /// reply — the authoritative command sequence — is sent back over the reply
+    /// channel for [`Self::drain_applied`]. Even a host error resolves to an
+    /// empty reply so the in-flight count never leaks.
+    pub fn dispatch_fracture(
         &mut self,
+        host: Arc<dyn WorldHost>,
         addr: Address,
-        region_min: VoxCoord,
-        dims: [u32; 3],
-        voxel_size_m: f32,
-        snapshot: HashMap<VoxCoord, Arc<Brick>>,
+        impact_pos: VoxCoord,
     ) -> bool {
         if self.is_saturated() {
             return false;
         }
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        self.in_flight.insert(id);
-        let tx = self.results_tx.clone();
-        self.handle.spawn_blocking(move || {
-            let analysis = analyze_snapshot(region_min, dims, voxel_size_m, &snapshot);
-            let _ = tx.send(FractureResult { id, addr, analysis });
+        self.in_flight += 1;
+        let tx = self.applied_tx.clone();
+        self.handle.spawn(async move {
+            // Zero force ⇒ carve-triggered: the host always evaluates
+            // connectivity (the player already chose to carve).
+            let req = FractureRequest { addr, impact_pos, force: Force::ZERO, material_id: 0 };
+            let env = Envelope::new(0, addr, WorldRequest::Fracture(req));
+            let applied = match host.request(env).await {
+                Ok(reply) => match reply.body {
+                    WorldEvent::FractureApplied(a) => a,
+                    _ => FractureApplied { addr, commands: Vec::new(), seq_range: (0, 0) },
+                },
+                Err(_) => FractureApplied { addr, commands: Vec::new(), seq_range: (0, 0) },
+            };
+            let _ = tx.send(applied);
         });
         true
     }
 
-    /// Drain every finished analysis. Removes drained ids from `in_flight`.
-    fn drain(&mut self) -> Vec<FractureResult> {
+    /// Drain every finished fracture reply, decrementing the in-flight count.
+    fn drain_applied(&mut self) -> Vec<FractureApplied> {
         let mut out = Vec::new();
-        let rx = self.results_rx.lock().expect("fracture results_rx poisoned");
-        while let Ok(r) = rx.try_recv() {
-            self.in_flight.remove(&r.id);
-            out.push(r);
+        let rx = self.applied_rx.lock().expect("fracture applied_rx poisoned");
+        while let Ok(a) = rx.try_recv() {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            out.push(a);
         }
         out
     }
@@ -174,45 +165,27 @@ impl FractureWorkers {
         out
     }
 
-    /// Off-thread carve write-back: journal-remove the island `cells` and then
-    /// refetch + remesh the touched `bricks`, sending each finished
-    /// [`BrickReady`] back for a make-before-break swap (drained by
-    /// [`Self::drain_refresh`]).
-    ///
-    /// This replaces the old per-cell `block_on(WriteVoxel)` loop that ran on
-    /// the **render thread** — a 100-cell island stalled the frame for 100+
-    /// serial host round-trips. Now a single tokio task does all the work off
-    /// the main thread. Correctness: the task awaits **every** write before any
-    /// refetch, and the host actor's single FIFO mailbox makes "write completed"
-    /// a happens-before edge, so each refetched brick is guaranteed to read
-    /// post-carve bytes (never a stale pre-carve snapshot). `bricks` is deduped
-    /// via the shared queue; a brick whose refresh is already in flight is marked
-    /// pending and re-refetched on drain (so an overlapping carve isn't lost).
-    fn dispatch_carve_writeback(
+    /// Refresh the bricks the host carved: refetch + remesh each touched brick
+    /// off-thread, sending the finished [`BrickReady`] back for a
+    /// make-before-break swap (drained by [`Self::drain_refresh`]). The host has
+    /// already journaled the removal, so the refetch reads post-carve bytes.
+    fn dispatch_brick_refresh(
         &mut self,
         host: Arc<dyn WorldHost>,
         ao: Arc<dyn AoStrategy>,
         addr: Address,
-        cells: Vec<VoxCoord>,
         bricks: Vec<(VoxCoord, u8)>,
     ) {
+        if bricks.is_empty() {
+            return;
+        }
         self.refetch_ctx = Some((host.clone(), ao.clone(), addr));
         let fresh = self.refresh.claim(bricks);
+        if fresh.is_empty() {
+            return;
+        }
         let tx = self.refresh.sender();
-        self.handle.spawn(async move {
-            for w in &cells {
-                let env = Envelope::new(
-                    0,
-                    addr,
-                    WorldRequest::WriteVoxel { addr, pos: *w, voxel: Voxel::EMPTY },
-                );
-                let _ = host.request(env).await;
-            }
-            for (coord, _) in fresh {
-                let ready = fetch_and_build(host.clone(), ao.clone(), addr, coord, Lod::new(0)).await;
-                let _ = tx.send(ready);
-            }
-        });
+        self.handle.spawn(refetch_bricks(host, ao, addr, fresh, tx));
     }
 
     /// Number of brick refreshes currently outstanding (profiler gauge).
@@ -222,104 +195,55 @@ impl FractureWorkers {
     }
 }
 
-/// Read the resident LOD-0 voxel at world cell `c` from a snapshot, or `EMPTY`
-/// when its brick isn't in the snapshot. The off-thread twin of
-/// [`crate::modes::edit::sample_cell`]; both go through
-/// [`crate::modes::edit::brick_of`] + [`crate::modes::edit::local_voxel`] so the
-/// two samplers can't drift.
-#[inline]
-fn snapshot_sample(snapshot: &HashMap<VoxCoord, Arc<Brick>>, c: VoxCoord) -> Voxel {
-    match snapshot.get(&edit::brick_of(c)) {
-        Some(b) => edit::local_voxel(b, c),
-        None => Voxel::EMPTY,
+/// Bake one detached island into an [`AnalyzedIsland`] (greedy boxes + mass +
+/// dominant material) from its world voxel set and the per-cell materials
+/// recovered from the host's `SetVoxel` commands. Reuses the engine-agnostic
+/// [`analyze_region`] with an always-false anchor predicate, so the whole set
+/// resolves to exactly one unanchored island.
+fn bake_island(
+    voxels: &[VoxCoord],
+    materials: &HashMap<VoxCoord, u16>,
+    voxel_size_m: f32,
+) -> Option<AnalyzedIsland> {
+    if voxels.is_empty() {
+        return None;
     }
-}
-
-/// Clone the resident, non-fading LOD-0 bricks overlapping `[region_min,
-/// region_min + dims)` into a snapshot map (cheap `Arc` refcount bumps). Bricks
-/// that aren't resident are omitted; the sampler reads them as `EMPTY`, exactly
-/// as the inline path treated not-yet-streamed space.
-fn snapshot_region(
-    region_min: VoxCoord,
-    dims: [u32; 3],
-    loaded: &LoadedChunks,
-) -> HashMap<VoxCoord, Arc<Brick>> {
-    let bmin = edit::brick_of(region_min);
-    let bmax = edit::brick_of(VoxCoord::new(
-        region_min.x + dims[0] as i64 - 1,
-        region_min.y + dims[1] as i64 - 1,
-        region_min.z + dims[2] as i64 - 1,
-    ));
-    let mut snap = HashMap::new();
-    for bx in bmin.x..=bmax.x {
-        for by in bmin.y..=bmax.y {
-            for bz in bmin.z..=bmax.z {
-                let bc = VoxCoord::new(bx, by, bz);
-                if let Some(chunk) = loaded.get(&(bc, 0)) {
-                    if chunk.is_fading_out {
-                        continue;
-                    }
-                    if let Some(b) = &chunk.brick {
-                        snap.insert(bc, b.clone());
-                    }
-                }
-            }
+    let mut lo = [i64::MAX; 3];
+    let mut hi = [i64::MIN; 3];
+    for v in voxels {
+        let c = [v.x, v.y, v.z];
+        for a in 0..3 {
+            lo[a] = lo[a].min(c[a]);
+            hi[a] = hi[a].max(c[a]);
         }
     }
-    snap
-}
-
-/// Run the flood-fill + island bake over a snapshot. Wires the engine-agnostic
-/// [`analyze_region`] to the snapshot sampler. Pure; shared by the worker and
-/// the unit tests.
-fn analyze_snapshot(
-    region_min: VoxCoord,
-    dims: [u32; 3],
-    voxel_size_m: f32,
-    snapshot: &HashMap<VoxCoord, Arc<Brick>>,
-) -> FractureAnalysis {
-    #[cfg(feature = "profiling")]
-    let _z = tracing::info_span!(
-        "fracture_analyze",
-        vol = dims[0] as u64 * dims[1] as u64 * dims[2] as u64
-    )
-    .entered();
-    let [nx, ny, nz] = [dims[0] as i32, dims[1] as i32, dims[2] as i32];
-    let palette = default_physics_palette();
+    let region_min = VoxCoord::new(lo[0], lo[1], lo[2]);
+    let dims = [(hi[0] - lo[0] + 1) as i32, (hi[1] - lo[1] + 1) as i32, (hi[2] - lo[2] + 1) as i32];
+    let set: HashSet<VoxCoord> = voxels.iter().copied().collect();
     let world = |x: i32, y: i32, z: i32| {
-        VoxCoord::new(
-            region_min.x + x as i64,
-            region_min.y + y as i64,
-            region_min.z + z as i64,
-        )
+        VoxCoord::new(region_min.x + x as i64, region_min.y + y as i64, region_min.z + z as i64)
     };
-    let is_solid = |x: i32, y: i32, z: i32| snapshot_sample(snapshot, world(x, y, z)).0 != 0;
-    // Anchor: a solid cell on the region's outer shell *except* the top face.
-    // Anything reaching the sides / bottom is treated as still attached to the
-    // surrounding world; a piece only reachable upward (an overhang whose
-    // support was carved) is unanchored and falls.
-    let is_anchor = |x: i32, y: i32, z: i32| {
-        snapshot_sample(snapshot, world(x, y, z)).0 != 0
-            && (x == 0 || x == nx - 1 || z == 0 || z == nz - 1 || y == 0)
-    };
-    let material_at = |x: i32, y: i32, z: i32| snapshot_sample(snapshot, world(x, y, z)).0;
-    analyze_region(
-        [nx, ny, nz],
+    let palette = default_physics_palette();
+    let is_solid = |x: i32, y: i32, z: i32| set.contains(&world(x, y, z));
+    let is_anchor = |_: i32, _: i32, _: i32| false;
+    let material_at = |x: i32, y: i32, z: i32| materials.get(&world(x, y, z)).copied().unwrap_or(0);
+    let analysis = analyze_region(
+        dims,
         region_min,
         voxel_size_m as f64,
         &palette,
         is_solid,
         is_anchor,
         material_at,
-    )
+    );
+    analysis.islands.into_iter().next()
 }
 
-/// Main-thread: for each carve this frame, snapshot the affected region and
-/// dispatch its analysis to a worker. Never blocks on the analysis.
+/// Main-thread: for each carve this frame, ask the host to evaluate the
+/// structural fracture. Never blocks on the round-trip.
 pub fn dispatch_fracture_checks(
     mut edits: MessageReader<VoxelEditEvent>,
-    cfg: Res<PhysicsConfig>,
-    loaded: Res<LoadedChunks>,
+    runtime: Res<WorldRuntime>,
     perf: Res<crate::perf::Perf>,
     mut workers: ResMut<FractureWorkers>,
 ) {
@@ -333,17 +257,21 @@ pub fn dispatch_fracture_checks(
         if vol > MAX_REGION_VOXELS {
             continue;
         }
-        let snapshot = snapshot_region(region_min, dims, &loaded);
-        if snapshot.is_empty() {
-            continue;
-        }
-        workers.dispatch(job.addr, region_min, dims, cfg.voxel_size_m, snapshot);
+        // Impact at the disturbed region's centre; the host evaluates a bounded
+        // neighbourhood around it.
+        let impact_pos = VoxCoord::new(
+            region_min.x + dims[0] as i64 / 2,
+            region_min.y + dims[1] as i64 / 2,
+            region_min.z + dims[2] as i64 / 2,
+        );
+        workers.dispatch_fracture(runtime.host.clone(), job.addr, impact_pos);
     }
 }
 
-/// Main-thread: drain finished analyses and apply them — spawn falling bodies,
-/// journal-remove the island voxels, and refresh the touched bricks (reusing
-/// the editor's make-before-break swap, so no flicker).
+/// Main-thread: drain finished fracture replies and apply them — bake + spawn
+/// the falling bodies and refresh the bricks the host carved (reusing the
+/// editor's make-before-break swap, so no flicker). The host already journaled
+/// the removal, so the client only reads it back.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_fracture_results(
     cfg: Res<PhysicsConfig>,
@@ -389,42 +317,37 @@ pub fn apply_fracture_results(
         );
     }
 
-    for result in workers.drain() {
-        let FractureResult { addr, analysis, .. } = result;
-
-        // 1) Spawn the falling rigid bodies (additive; no world mutation).
-        for island in &analysis.islands {
-            spawn_island(island, &cfg, &material_pool, &mut spawn.meshes, &mut commands);
-        }
-
-        if analysis.cells_to_remove.is_empty() {
+    for applied in workers.drain_applied() {
+        if applied.commands.is_empty() {
             continue;
         }
-
-        // 2+3) Journal-remove the island voxels AND refresh the touched bricks
-        //      entirely off the render thread (see `dispatch_carve_writeback`).
-        //      Previously this was a per-cell `block_on(WriteVoxel)` loop on the
-        //      main thread — a 100-cell island stalled the frame for 100+ serial
-        //      host round-trips. The single off-thread task awaits every write
-        //      before any refetch, so the refetch reads post-carve bytes; the
-        //      finished bricks are swapped in make-before-break by step 0 on a
-        //      later frame. Resident, non-fading bricks only; others self-heal
-        //      on re-stream.
-        let mut set: HashSet<(VoxCoord, u8)> = HashSet::new();
-        for w in &analysis.cells_to_remove {
-            let key = (edit::brick_of(*w), 0u8);
-            if loaded.get(&key).map(|c| !c.is_fading_out).unwrap_or(false) {
-                set.insert(key);
+        // Recover per-cell materials from the authoritative carves, and the set
+        // of bricks the host touched.
+        let mut materials: HashMap<VoxCoord, u16> = HashMap::new();
+        let mut touched: HashSet<(VoxCoord, u8)> = HashSet::new();
+        for cmd in &applied.commands {
+            if let FractureCommand::SetVoxel { pos, before, .. } = cmd {
+                materials.insert(*pos, before.0);
+                let key = (edit::brick_of(*pos), 0u8);
+                if loaded.get(&key).map(|c| !c.is_fading_out).unwrap_or(false) {
+                    touched.insert(key);
+                }
             }
         }
-        let bricks: Vec<(VoxCoord, u8)> = set.into_iter().collect();
-        workers.dispatch_carve_writeback(
-            runtime.host.clone(),
-            render_cfg.ao.clone(),
-            addr,
-            analysis.cells_to_remove,
-            bricks,
-        );
+
+        // 1) Bake + spawn the falling rigid bodies (additive; no world mutation).
+        for cmd in &applied.commands {
+            if let FractureCommand::SpawnDebris { voxels, .. } = cmd {
+                if let Some(island) = bake_island(voxels, &materials, cfg.voxel_size_m) {
+                    spawn_island(&island, &cfg, &material_pool, &mut spawn.meshes, &mut commands);
+                }
+            }
+        }
+
+        // 2) Refresh the bricks the host carved so the holes appear (flicker-free
+        //    on a later frame via step 0).
+        let bricks: Vec<(VoxCoord, u8)> = touched.into_iter().collect();
+        workers.dispatch_brick_refresh(runtime.host.clone(), render_cfg.ao.clone(), applied.addr, bricks);
     }
 
     // Profiler queue gauges.
@@ -465,34 +388,7 @@ fn region_for_bricks(bricks: &[VoxCoord]) -> Option<(VoxCoord, [u32; 3])> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modes::edit::sample_cell;
-    use crate::world_stream::{LoadedChunk, LoadedChunks};
-
-    fn brick_with(cells: &[(VoxCoord, u16)]) -> Arc<Brick> {
-        let mut b = Brick::new();
-        for (c, m) in cells {
-            b.set(*c, Voxel::new(*m));
-        }
-        Arc::new(b)
-    }
-
-    fn loaded_with(coord: VoxCoord, brick: Arc<Brick>) -> LoadedChunks {
-        let mut loaded = LoadedChunks::default();
-        loaded.insert(
-            LoadedChunk::key(coord, Lod::new(0)),
-            LoadedChunk {
-                coord,
-                lod: Lod::new(0),
-                entity: None,
-                last_seen_frame: 0,
-                is_fading_out: false,
-                dag_digest: None,
-                dag_tier: None,
-                brick: Some(brick),
-            },
-        );
-        loaded
-    }
+    use atomr_worlds_voxel::voxel::Voxel;
 
     #[test]
     fn region_covers_one_brick_plus_skirt() {
@@ -517,95 +413,35 @@ mod tests {
         assert!(region_for_bricks(&[]).is_none());
     }
 
-    /// The off-thread snapshot sampler agrees with the on-thread `sample_cell`
-    /// for both resident and absent cells.
+    /// `bake_island` reconstructs one unanchored island (greedy-merged, with
+    /// mass) from a host `SpawnDebris` voxel set + recovered materials.
     #[test]
-    fn snapshot_sample_matches_sample_cell() {
-        let coord = VoxCoord::new(0, 0, 0);
-        let brick = brick_with(&[(VoxCoord::new(5, 5, 5), 1), (VoxCoord::new(6, 5, 5), 2)]);
-        let loaded = loaded_with(coord, brick);
-        let snapshot = snapshot_region(VoxCoord::new(0, 0, 0), [16, 16, 16], &loaded);
-
-        for c in [
-            VoxCoord::new(5, 5, 5),  // solid
-            VoxCoord::new(6, 5, 5),  // solid (other material)
-            VoxCoord::new(0, 0, 0),  // empty, resident brick
-            VoxCoord::new(99, 0, 0), // absent brick → EMPTY
-        ] {
-            assert_eq!(
-                snapshot_sample(&snapshot, c).0,
-                sample_cell(&loaded, c).0,
-                "mismatch at {c:?}"
-            );
-        }
-    }
-
-    /// `snapshot_region` clones exactly the resident bricks overlapping the
-    /// region and omits the rest.
-    #[test]
-    fn snapshot_region_collects_resident_bricks() {
-        let coord = VoxCoord::new(0, 0, 0);
-        let loaded = loaded_with(coord, brick_with(&[(VoxCoord::new(1, 1, 1), 1)]));
-        // Region inside brick (0,0,0) only.
-        let snap = snapshot_region(VoxCoord::new(0, 0, 0), [4, 4, 4], &loaded);
-        assert_eq!(snap.len(), 1);
-        assert!(snap.contains_key(&VoxCoord::new(0, 0, 0)));
-    }
-
-    /// An interior solid blob with no path to the region shell is detected as a
-    /// floating island, with its cells flagged for removal in world space.
-    #[test]
-    fn interior_blob_is_an_unanchored_island() {
-        let coord = VoxCoord::new(0, 0, 0);
-        // 2×1×1 blob at world (5,5,5)-(6,5,5), well inside brick 0.
-        let loaded = loaded_with(
-            coord,
-            brick_with(&[(VoxCoord::new(5, 5, 5), 1), (VoxCoord::new(6, 5, 5), 1)]),
-        );
-        let (region_min, dims) = region_for_bricks(&[coord]).unwrap();
-        let snapshot = snapshot_region(region_min, dims, &loaded);
-
-        let analysis = analyze_snapshot(region_min, dims, 1.0, &snapshot);
-        assert_eq!(analysis.islands.len(), 1);
-        let island = &analysis.islands[0];
+    fn bake_island_rebuilds_a_body_from_commands() {
+        // A 2×1×1 stone bar at world (5,5,5)-(6,5,5).
+        let voxels = vec![VoxCoord::new(5, 5, 5), VoxCoord::new(6, 5, 5)];
+        let mut materials = HashMap::new();
+        materials.insert(VoxCoord::new(5, 5, 5), 1u16);
+        materials.insert(VoxCoord::new(6, 5, 5), 1u16);
+        let island = bake_island(&voxels, &materials, 1.0).expect("one island");
         assert_eq!(island.origin, VoxCoord::new(5, 5, 5));
         assert_eq!(island.dims, [2, 1, 1]);
-        assert_eq!(island.boxes.len(), 1);
+        assert_eq!(island.boxes.len(), 1, "the bar greedy-merges to one box");
+        assert_eq!(island.dominant_material, 1);
         assert!(island.mass.mass_kg > 0.0);
-        assert_eq!(
-            analysis.cells_to_remove,
-            vec![VoxCoord::new(5, 5, 5), VoxCoord::new(6, 5, 5)]
-        );
     }
 
-    /// `FractureWorkers` round-trips a dispatched analysis back through `drain`.
     #[test]
-    fn dispatch_then_drain_round_trips() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut workers = FractureWorkers::new(rt.handle().clone());
+    fn bake_island_empty_set_is_none() {
+        assert!(bake_island(&[], &HashMap::new(), 1.0).is_none());
+    }
 
-        let coord = VoxCoord::new(0, 0, 0);
-        let loaded = loaded_with(
-            coord,
-            brick_with(&[(VoxCoord::new(5, 5, 5), 1), (VoxCoord::new(6, 5, 5), 1)]),
-        );
-        let (region_min, dims) = region_for_bricks(&[coord]).unwrap();
-        let snapshot = snapshot_region(region_min, dims, &loaded);
-
-        assert!(workers.dispatch(Address::default(), region_min, dims, 1.0, snapshot));
-        assert_eq!(workers.in_flight_count(), 1);
-
-        // Poll for the worker to finish (blocking-pool task).
-        let mut results = Vec::new();
-        for _ in 0..400 {
-            results = workers.drain();
-            if !results.is_empty() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert_eq!(results.len(), 1, "analysis result must come back");
-        assert_eq!(results[0].analysis.islands.len(), 1);
-        assert_eq!(workers.in_flight_count(), 0, "drain clears in_flight");
+    /// Materials recovered from `SetVoxel.before` drive the baked island, even
+    /// though the world voxels are already `EMPTY` after the carve.
+    #[test]
+    fn materials_come_from_before_not_current() {
+        let pos = VoxCoord::new(0, 0, 0);
+        let cmd = FractureCommand::SetVoxel { pos, before: Voxel::new(7), after: Voxel::EMPTY };
+        let FractureCommand::SetVoxel { before, .. } = cmd else { unreachable!() };
+        assert_eq!(before.0, 7);
     }
 }
