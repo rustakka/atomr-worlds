@@ -595,6 +595,7 @@ dependencies = [
  "atomr-worlds-core",
  "atomr-worlds-generate",
  "atomr-worlds-persist",
+ "atomr-worlds-physics",
  "atomr-worlds-proto",
  "atomr-worlds-view",
  "atomr-worlds-voxel",

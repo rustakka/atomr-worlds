@@ -62,7 +62,7 @@ subsystem** that never flows into `GetBrick` / the `Journal`. Fracture
 | **Rec 1** | SVDAG + GPU raymarcher + voxel editing | ✅ finished — GPU DAG raymarcher is now the **default** render path (proxy-cube fragment raymarcher + off-thread build + cross-brick buffer dedup + occupancy-AABB proxy + CPU render golden); first-person **voxel editing** landed (single-voxel + sphere/cube brushes, host-authoritative, live refresh in both paths); mesh path stays via `--shading mesh` / `RenderPreset::Legacy` |
 | **Rec 2** | rapier physics + fracture | 🟢 Phases A–C landed (PHASES.md "Phase 20.3 / Phase B PR #16 / Phase C PR #24") — `bevy_rapier3d` client integration: static leaf-LOD terrain colliders, carve→flood-fill→falling debris, collidable FP character controller, true crouch. Tier-1 raymarched debris / rounded narrow-phase deferred |
 | **Rec 3** | physics-island scheduler | 🟢 landed (PHASES.md "Phase 20.5") — the carve fracture pipeline (flood-fill + island bake) runs **off-thread**, and the per-brick refresh is dispatched through the async streaming pool, so large carves no longer stall the frame. Parallel rapier island solve unneeded at current debris counts |
-| **Rec 4** | Actor-CRDT destruction sync | 🟡 `HlcTimestamp` landed; actor/proto/CRDT wiring remains |
+| **Rec 4** | Actor-CRDT destruction sync | 🟢 Slice 1 landed — HLC-timestamped LWW voxel-edit overlay (per-cell CRDT merge + tombstones, versioned `v1→v2` journal/snapshot migration, injectable clock, client-stamped writes + `WriteRejected`) **and** host-authoritative fracture protocol (`FractureRequest`/`FractureApplied` wired through `WorldActor`: integer connectivity decision reusing `connected_components`, journaled island removal, broadcast; client re-routed to consume it). Deferred: `DebrisStateDelta` interpolation, an unreliable/UDP debris channel, and cross-node CRDT gossip (all need upstream `../atomr`) |
 
 ### Landed so far
 
@@ -133,11 +133,22 @@ subsystem** that never flows into `GetBrick` / the `Journal`. Fracture
   (make-before-break), so a large carve no longer stalls the frame. The doc's
   "migrate Rayon → micropool" premise was moot (no Rayon); parallel rapier island
   solving is unneeded at current debris counts.
-- **Rec 4** — wire `FractureRequest`/`FractureApplied` into `WorldRequest`/
-  `WorldEvent` + the `WorldActor`; promote the write overlay to an
-  HLC-timestamped LWW map; deterministic geometry (reliable channel) + debris
-  interpolation (unreliable channel) + per-cell CRDT merge. **The next headline
-  recommendation.**
+- **Rec 4** — 🟢 Slice 1 landed. The write overlay is now an **HLC-timestamped
+  LWW CRDT map** (`atomr-worlds-core::lww::LwwMap`): per-cell last-writer-wins
+  keyed by `(HlcTimestamp, WriterId)`, with retained tombstones (which also
+  fixed a latent carve-durability gap), `v1→v2` versioned journal/snapshot
+  migration, an injectable deterministic clock (`atomr-worlds-host::Clock`), and
+  client-stamped `WriteVoxelStamped`/`WriteRegionStamped` + `WriteRejected`
+  reconciliation. Fracture is now **host-authoritative**: `WorldRequest::Fracture`
+  → integer connectivity decision (reusing `atomr-worlds-physics::connected_components`
+  over the authoritative bricks) → journaled island removal through the LWW
+  overlay → `WorldEvent::FractureApplied` reply + region fan-out; the client
+  re-routes its carve through the host and bakes debris from the returned
+  commands (float motion stays client-side). `GetBrick` stays byte-deterministic
+  (single-writer goldens unchanged) and the physics-off/harness path is
+  byte-identical. **Deferred to later slices** (each needs upstream `../atomr`):
+  continuous `DebrisStateDelta` interpolation, an unreliable/UDP debris channel,
+  and cross-node delta-CRDT gossip.
 
 ## Upstream feature requests (to `../atomr` / ecosystem) — only what's needed
 
