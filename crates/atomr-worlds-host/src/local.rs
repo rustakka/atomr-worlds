@@ -6,11 +6,12 @@
 //! write replay across restarts. Worlds and vehicles share the same actor
 //! type; the actor branches on its `Address` variant.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use atomr::core::actor::scheduler::SchedulerHandle;
 use atomr::prelude::*;
 use atomr_worlds_core::addr::{Address, Level, WorldAddr};
 use atomr_worlds_core::coord::{DVec3, IVec3};
@@ -25,10 +26,11 @@ use atomr_worlds_generate::{
     GeneratorRegistry, MacroGenerator, MacroStateCache, Resolved, WorldGen, WorldMacroState,
 };
 use atomr_worlds_persist::{LwwCell, VoxelWriteEvent, WorldPersistence, WorldSnapshot};
-use atomr_worlds_physics::connected_components;
+use atomr_worlds_physics::debris_sim::{step_body, SimParams, SimState};
+use atomr_worlds_physics::{bake_island_grid, connected_components, DebrisBody};
 use atomr_worlds_proto::{
-    Envelope, Force, FractureApplied, FractureCommand, FractureRequest, WorldEvent, WorldRequest,
-    WriteRejected, AABB,
+    DebrisStateDelta, Envelope, Force, FractureApplied, FractureCommand, FractureRequest,
+    WorldEvent, WorldRequest, WriteRejected, AABB,
 };
 use atomr_worlds_voxel::{Brick, Voxel, BRICK_EDGE};
 
@@ -81,6 +83,13 @@ pub struct LocalHostConfig {
     /// to [`Clock::Wall`]; determinism tests and the screenshot harness inject
     /// [`Clock::manual`](crate::clock::Clock::manual) for reproducible journals.
     pub clock: crate::clock::Clock,
+    /// Whether the actor runs the host-authoritative debris simulation (Rec 4
+    /// Slice 2): on fracture it builds rigid bodies, steps them on a periodic
+    /// self-tick, and fans `WorldEvent::DebrisStates` out to subscribers.
+    /// Defaults to `true`. Debris is derived/ephemeral and never feeds
+    /// `GetBrick`, so this never affects determinism goldens — but golden
+    /// harnesses can set it `false` to skip the registry + timer entirely.
+    pub debris_sim_enabled: bool,
 }
 
 impl LocalHostConfig {
@@ -108,6 +117,7 @@ impl Default for LocalHostConfig {
             request_timeout: Duration::from_secs(10),
             persistence: None,
             clock: crate::clock::Clock::default(),
+            debris_sim_enabled: true,
         }
     }
 }
@@ -242,6 +252,7 @@ impl LocalHost {
         let persistence = self.config.persistence.clone();
         let authored_regions = self.config.authored_regions.clone();
         let clock = self.config.clock.clone();
+        let debris_sim_enabled = self.config.debris_sim_enabled;
         let initial_frame = match addr {
             Address::Vehicle(v) => Some(AffineFrame::at_origin(v.parent)),
             Address::World(_) => None,
@@ -263,6 +274,7 @@ impl LocalHost {
                         shape,
                         macro_state.clone(),
                         authored_regions.clone(),
+                        debris_sim_enabled,
                     )
                 }),
                 &name,
@@ -341,6 +353,9 @@ pub(crate) enum WorldMsg {
         sink: mpsc::Sender<Envelope<WorldEvent>>,
         ready: oneshot::Sender<Result<(), HostError>>,
     },
+    /// Self-scheduled debris simulation tick (Rec 4 Slice 2). Crate-private and
+    /// never serialized — adding it doesn't touch the wire protocol.
+    Tick,
 }
 
 struct Subscriber {
@@ -412,7 +427,47 @@ pub(crate) struct WorldActor {
     /// Present only when `addr` is a vehicle.
     frame: Option<AffineFrame>,
     frame_tick: u64,
+    // ── Host-authoritative debris (Rec 4 Slice 2) ──────────────────────────
+    /// Whether this actor runs the debris simulation at all (config-gated).
+    debris_sim_enabled: bool,
+    /// Active debris bodies keyed by their stable id (`debris_id(anchor)`,
+    /// shared with the `FractureCommand::SpawnDebris` id the client baked from).
+    debris: HashMap<u32, DebrisEntry>,
+    /// Monotonic debris tick counter; stamps each `DebrisStateDelta`.
+    debris_tick: u64,
+    /// Whether a self-tick is currently armed (so we don't double-arm).
+    debris_ticking: bool,
+    /// Set by `handle_fracture` when it adds debris; `Actor::handle` arms the
+    /// tick afterward (it has the `Context` the scheduler needs).
+    want_arm: bool,
+    /// Integrator tunables (shared across this actor's bodies).
+    sim_params: SimParams,
+    /// Handle to the pending self-tick timer, cancelled on `post_stop`.
+    sim_handle: Option<SchedulerHandle>,
 }
+
+/// One active debris body plus its integrator + retirement bookkeeping.
+struct DebrisEntry {
+    body: DebrisBody,
+    state: SimState,
+    /// Consecutive ticks the body has been asleep — retired past the grace.
+    retire_ticks: u32,
+}
+
+/// Debris simulation cadence (≈30 Hz). One source for both the timer `Duration`
+/// and the integrator `dt`, so they stay locked.
+const DEBRIS_TICK_MS: u64 = 33;
+const DEBRIS_TICK_S: f64 = 1.0 / 30.0;
+/// Voxel edge for debris bodies: the render/index grid is 1 m/voxel (the same
+/// integer grid `WriteVoxel`/fracture positions use — distinct from the host
+/// brush `mpv`), so debris poses stream in metres that equal voxel coordinates.
+const DEBRIS_VOXEL_SIZE_M: f64 = 1.0;
+/// Ticks a sleeping body lingers before retirement (~2 s at 30 Hz).
+const RETIRE_GRACE_TICKS: u32 = 60;
+/// World-metre floor below which debris is retired (fell out of the world).
+const MIN_DEBRIS_Y: f64 = -512.0;
+/// Voxel padding around each body when snapshotting terrain solidity.
+const DEBRIS_SOLIDITY_PAD: i64 = 4;
 
 impl WorldActor {
     #[allow(clippy::too_many_arguments)]
@@ -429,6 +484,7 @@ impl WorldActor {
         shape: WorldShape,
         macro_state: Option<Arc<WorldMacroState>>,
         authored_regions: Arc<std::sync::Mutex<AuthoredRegionStore>>,
+        debris_sim_enabled: bool,
     ) -> Self {
         // Deterministic, stable, non-zero writer id so a local write always
         // beats a migrated legacy entry (`WriterId::LEGACY == 0`) at the same
@@ -453,6 +509,13 @@ impl WorldActor {
             writes_since_snapshot: 0,
             frame,
             frame_tick: 0,
+            debris_sim_enabled,
+            debris: HashMap::new(),
+            debris_tick: 0,
+            debris_ticking: false,
+            want_arm: false,
+            sim_params: SimParams::default(),
+            sim_handle: None,
         }
     }
 
@@ -969,9 +1032,42 @@ impl WorldActor {
                 voxels.push(wp);
                 anchor = IVec3::new(anchor.x.min(wp.x), anchor.y.min(wp.y), anchor.z.min(wp.z));
             }
-            commands.push(FractureCommand::SpawnDebris { id: debris_id(anchor), voxels, anchor });
+            // Host-authoritative debris: build a rigid body for this island so
+            // the actor's self-tick integrates and broadcasts its motion. The
+            // body grid is baked from the *pre-carve* materials still held in
+            // `grid` (the overlay/brick edits above don't touch `grid`), reusing
+            // the same `bake_island_grid` the client's render path
+            // (`analyze_region`) uses — so geometry and physics agree. The id is
+            // shared with the `SpawnDebris` command the client bakes from.
+            let id = debris_id(anchor);
+            if self.debris_sim_enabled {
+                let (b_origin, b_dims, b_material) = bake_island_grid(island, min, |x, y, z| {
+                    grid[lin(x as i64, y as i64, z as i64)].0
+                });
+                let vs = DEBRIS_VOXEL_SIZE_M;
+                let world_origin_m =
+                    DVec3::new(b_origin.x as f64 * vs, b_origin.y as f64 * vs, b_origin.z as f64 * vs);
+                let palette = atomr_worlds_core::default_physics_palette();
+                let mut body =
+                    DebrisBody::from_voxels(b_origin, b_dims, b_material, vs, world_origin_m, &palette);
+                // Seed velocity from the deterministic fixed-point impact force;
+                // a zero-force carve starts at rest and simply falls under
+                // gravity. `step_body` clamps to `max_speed` on the first tick.
+                let f = req.force.to_newtons();
+                let inv_m = if body.mass.mass_kg > 0.0 { 1.0 / body.mass.mass_kg } else { 0.0 };
+                body.linear_velocity =
+                    DVec3::new(f[0] as f64 * inv_m, f[1] as f64 * inv_m, f[2] as f64 * inv_m);
+                self.debris
+                    .insert(id, DebrisEntry { body, state: SimState::default(), retire_ticks: 0 });
+            }
+            commands.push(FractureCommand::SpawnDebris { id, voxels, anchor });
         }
         self.maybe_save_snapshot().await?;
+        // Arm the self-tick if we added bodies and aren't already ticking
+        // (`Actor::handle` does the arming — it holds the `Context`).
+        if self.debris_sim_enabled && !self.debris.is_empty() && !self.debris_ticking {
+            self.want_arm = true;
+        }
         let last_seq = self.next_seq.saturating_sub(1);
         Ok(FractureApplied { addr, commands, seq_range: (first_seq, last_seq) })
     }
@@ -1009,6 +1105,165 @@ impl WorldActor {
                 continue;
             }
             let env = Envelope::new(0, addr, WorldEvent::FractureApplied(applied.clone()));
+            if sub.sink.try_send(env).is_err() {
+                dead.push(*sub_id);
+            }
+        }
+        for sub_id in dead {
+            self.subscribers.remove(&sub_id);
+        }
+    }
+
+    // ── Host-authoritative debris (Rec 4 Slice 2) ─────────────────────────
+
+    /// Arm (or re-arm) the periodic debris self-tick. The scheduled closure runs
+    /// detached and can't touch `&mut self`, so it only `tell`s the actor a
+    /// `WorldMsg::Tick`; the mailbox-delivered handler does the stepping and
+    /// re-arms. Called from `Actor::handle`, which holds the `Context`.
+    fn arm_tick(&mut self, ctx: &Context<WorldActor>) {
+        let Some(sched) = ctx.system_handle().scheduler() else {
+            // No scheduler (system torn down) — go idle rather than spin.
+            self.debris_ticking = false;
+            return;
+        };
+        let me = ctx.self_ref().clone();
+        let handle = sched.schedule_once(
+            Duration::from_millis(DEBRIS_TICK_MS),
+            Box::pin(async move {
+                me.tell(WorldMsg::Tick);
+            }),
+        );
+        self.sim_handle = Some(handle);
+        self.debris_ticking = true;
+    }
+
+    /// Step every active debris body one tick, retire settled / out-of-bounds
+    /// bodies, and return the `DebrisStateDelta`s to broadcast. Free of any
+    /// scheduler/`Context` concern. Terrain is read into an owned snapshot first
+    /// so the `ensure_brick` `&mut self` borrow is released before the bodies
+    /// are stepped.
+    fn step_debris(&mut self) -> Vec<DebrisStateDelta> {
+        self.debris_tick = self.debris_tick.wrapping_add(1);
+        if self.debris.is_empty() {
+            return Vec::new();
+        }
+        let solidity = self.snapshot_debris_solidity();
+        let is_solid = |p: IVec3| solidity.contains(&p);
+
+        let params = self.sim_params;
+        let tick = self.debris_tick;
+        let mut deltas = Vec::new();
+        let mut retire: Vec<u32> = Vec::new();
+        for (id, entry) in self.debris.iter_mut() {
+            let was_sleeping = entry.state.sleeping;
+            step_body(&mut entry.body, &mut entry.state, &params, DEBRIS_TICK_S, &is_solid);
+            if entry.state.sleeping {
+                entry.retire_ticks = entry.retire_ticks.saturating_add(1);
+            }
+            let out_of_bounds = entry.body.position.y < MIN_DEBRIS_Y;
+            let retiring = out_of_bounds || entry.retire_ticks >= RETIRE_GRACE_TICKS;
+            // Emit a delta for active bodies, the sleep transition (so clients
+            // latch the settled pose), and the terminal retiring frame.
+            if !entry.state.sleeping || !was_sleeping || retiring {
+                deltas.push(sample_debris_delta(*id, tick, entry));
+            }
+            if retiring {
+                retire.push(*id);
+            }
+        }
+        for id in retire {
+            self.debris.remove(&id);
+        }
+        deltas
+    }
+
+    /// Read terrain solidity (world voxels) in a padded neighborhood around each
+    /// active body into an owned set, so the integrator's `is_solid` closure
+    /// doesn't borrow `self`. Per-body ranges keep the scan bounded even when
+    /// bodies drift far apart.
+    fn snapshot_debris_solidity(&mut self) -> HashSet<IVec3> {
+        let mut ranges: Vec<(IVec3, IVec3)> = Vec::new();
+        for entry in self.debris.values() {
+            if entry.state.sleeping {
+                continue;
+            }
+            let b = &entry.body;
+            let vs = b.voxel_size_m;
+            let corner = b.position - b.mass.com;
+            let cx = (corner.x / vs).floor() as i64;
+            let cy = (corner.y / vs).floor() as i64;
+            let cz = (corner.z / vs).floor() as i64;
+            let lo = IVec3::new(
+                cx - DEBRIS_SOLIDITY_PAD,
+                cy - DEBRIS_SOLIDITY_PAD,
+                cz - DEBRIS_SOLIDITY_PAD,
+            );
+            let hi = IVec3::new(
+                cx + b.dims[0] as i64 + DEBRIS_SOLIDITY_PAD,
+                cy + b.dims[1] as i64 + DEBRIS_SOLIDITY_PAD,
+                cz + b.dims[2] as i64 + DEBRIS_SOLIDITY_PAD,
+            );
+            ranges.push((lo, hi));
+        }
+        let mut set = HashSet::new();
+        for (lo, hi) in ranges {
+            for vx in lo.x..=hi.x {
+                for vy in lo.y..=hi.y {
+                    for vz in lo.z..=hi.z {
+                        let p = IVec3::new(vx, vy, vz);
+                        if set.contains(&p) {
+                            continue;
+                        }
+                        let (bc, lc) = Self::brick_of_voxel(p);
+                        if !self.ensure_brick(bc, Lod::new(0)).get(lc).is_empty() {
+                            set.insert(p);
+                        }
+                    }
+                }
+            }
+        }
+        set
+    }
+
+    /// Fan a batch of `DebrisStateDelta`s to subscribers whose region overlaps
+    /// any active body — mirrors [`Self::fan_out_fracture_applied`].
+    fn fan_out_debris_states(&mut self, deltas: Vec<DebrisStateDelta>) {
+        if deltas.is_empty() {
+            return;
+        }
+        let edge = BRICK_EDGE as i64;
+        // Bricks the debris currently occupy (approx by the streamed corner; a
+        // debris body is small, so one brick per body is a fine overlap key).
+        let mut bricks: Vec<IVec3> = Vec::new();
+        for d in &deltas {
+            let p = IVec3::new(
+                d.pos[0].floor() as i64,
+                d.pos[1].floor() as i64,
+                d.pos[2].floor() as i64,
+            );
+            let (bc, _) = Self::brick_of_voxel(p);
+            if !bricks.contains(&bc) {
+                bricks.push(bc);
+            }
+        }
+        let addr = self.addr;
+        let mut dead = Vec::new();
+        for (sub_id, sub) in &self.subscribers {
+            let overlaps = bricks.iter().any(|bc| {
+                let lo = IVec3::new(bc.x * edge, bc.y * edge, bc.z * edge);
+                let hi = IVec3::new(lo.x + edge, lo.y + edge, lo.z + edge);
+                sub.region.min.x < hi.x
+                    && sub.region.max.x > lo.x
+                    && sub.region.min.y < hi.y
+                    && sub.region.max.y > lo.y
+                    && sub.region.min.z < hi.z
+                    && sub.region.max.z > lo.z
+            });
+            if !overlaps {
+                continue;
+            }
+            let env =
+                Envelope::new(0, addr, WorldEvent::DebrisStates { addr, deltas: deltas.clone() });
             if sub.sink.try_send(env).is_err() {
                 dead.push(*sub_id);
             }
@@ -1310,6 +1565,39 @@ impl WorldActor {
     }
 }
 
+/// Sample a debris body into a wire delta. Slice 1 streams the body's local
+/// `(0,0,0)` corner in world metres (`position - com`, with identity
+/// orientation), which matches the client's render frame
+/// (`island.origin * voxel_size_m`) so the client drives the entity transform
+/// directly. (COM + orientation is the rotation-era representation — a
+/// follow-up once the integrator tumbles.)
+fn sample_debris_delta(id: u32, tick: u64, entry: &DebrisEntry) -> DebrisStateDelta {
+    let b = &entry.body;
+    let corner = b.position - b.mass.com;
+    DebrisStateDelta {
+        id,
+        tick,
+        pos: [corner.x as f32, corner.y as f32, corner.z as f32],
+        vel: [
+            b.linear_velocity.x as f32,
+            b.linear_velocity.y as f32,
+            b.linear_velocity.z as f32,
+        ],
+        orient: [
+            b.orientation.x as f32,
+            b.orientation.y as f32,
+            b.orientation.z as f32,
+            b.orientation.w as f32,
+        ],
+        ang_vel: [
+            b.angular_velocity.x as f32,
+            b.angular_velocity.y as f32,
+            b.angular_velocity.z as f32,
+        ],
+        sleeping: entry.state.sleeping,
+    }
+}
+
 /// Deterministic debris id from an island's anchor. The host assigns it and
 /// broadcasts the same `FractureApplied` to every client, so this only needs to
 /// be stable and reasonably distinct per island location.
@@ -1342,16 +1630,41 @@ fn _unused_addr_imports(_: WorldAddr, _: Level, _: ParentAddr) {}
 #[async_trait]
 impl Actor for WorldActor {
     type Msg = WorldMsg;
-    async fn handle(&mut self, _ctx: &mut Context<Self>, msg: WorldMsg) {
+    async fn handle(&mut self, ctx: &mut Context<Self>, msg: WorldMsg) {
         match msg {
             WorldMsg::Request { env, reply } => {
                 let result = self.handle_request(env).await;
                 let _ = reply.send(result);
+                // A fracture may have queued debris; arm the self-tick now that
+                // we hold the `Context` (the scheduler needs it).
+                if self.want_arm {
+                    self.want_arm = false;
+                    if !self.debris_ticking {
+                        self.arm_tick(ctx);
+                    }
+                }
             }
             WorldMsg::SubscribeBegin { env, sink, ready } => {
                 let result = self.handle_subscribe_begin(env, sink);
                 let _ = ready.send(result);
             }
+            WorldMsg::Tick => {
+                let deltas = self.step_debris();
+                self.fan_out_debris_states(deltas);
+                // Re-arm while debris remains; otherwise go idle (no timer load).
+                if !self.debris.is_empty() {
+                    self.arm_tick(ctx);
+                } else {
+                    self.debris_ticking = false;
+                }
+            }
+        }
+    }
+
+    async fn post_stop(&mut self, _ctx: &mut Context<Self>) {
+        // Cancel any pending self-tick so it doesn't fire into a dead mailbox.
+        if let Some(h) = self.sim_handle.take() {
+            h.cancel();
         }
     }
 }

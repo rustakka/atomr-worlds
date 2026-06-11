@@ -64,10 +64,13 @@ pub enum Phase {
     SliceRtsRaster,
     /// The overlay's own update — self-measured to prove it is cheap.
     HudOverlay,
+    /// `pump_debris_states` + `apply_debris_interpolation`: drain host debris
+    /// snapshots and interpolate the kinematic bodies.
+    DebrisStream,
 }
 
 impl Phase {
-    pub const N: usize = 9;
+    pub const N: usize = 10;
     pub const ALL: [Phase; Self::N] = [
         Phase::EditApply,
         Phase::EditRefresh,
@@ -78,6 +81,7 @@ impl Phase {
         Phase::FractureApply,
         Phase::SliceRtsRaster,
         Phase::HudOverlay,
+        Phase::DebrisStream,
     ];
 
     /// Short token used in the overlay and the `PERF_SPIKE` log line.
@@ -92,6 +96,7 @@ impl Phase {
             Phase::FractureApply => "fracA",
             Phase::SliceRtsRaster => "raster",
             Phase::HudOverlay => "hud",
+            Phase::DebrisStream => "debrisS",
         }
     }
 }
