@@ -384,8 +384,9 @@ ground level but does not scale up or down. Planned:
 ### Additional generation styles
 
 `BrickGenerator` is a single-method trait that already powers the
-default `TerrainGenerator` and the placeholder `EmptyPlanetoid`,
-`AsteroidBelt`, and `GasGiant` strategies. Each receives a
+default `TerrainGenerator`, the `IceShellGenerator` cryo archetype,
+and the placeholder `EmptyPlanetoid`, `AsteroidBelt`, and `GasGiant`
+strategies. Each receives a
 `BrickGenContext { world_seed, brick_coord, lod, shape, macro_state,
 scale }` and returns a `Brick`. The roadmap adds:
 
@@ -398,7 +399,13 @@ scale }` and returns a `Brick`. The roadmap adds:
 - **Planetary archetypes** — alien-rock, ice-shell, water-world,
   desert. The macro-state path (Phase 13c) already produces the
   geologic / climate / biome surface grid; archetype generators
-  read it and emit bricks accordingly.
+  read it and emit bricks accordingly. **First archetype landed:**
+  the frozen `ice_shell` ("cryo") world — a SNOW/ICE shell over a
+  buried WATER ocean and a STONE core (sparse GLOW_ROCK cryo-vents),
+  registered as the `ICE_SHELL` strategy and selectable live with
+  `--world-gen ice`. Slice 1 derives the surface from self-contained
+  FBM (uniform across the sphere); reading macro elevation / biomes
+  to vary crust thickness and ocean extent is the next step.
 - **Authored region overlays** — the Phase-13d/13e `AuthoredRegion`
   store (`LiteralRegion`, `HeightmapRegion`, `VoxFileRegion`) is the
   manual-stipulation API. Expanding the loaders to glTF, USD, and

@@ -3,22 +3,25 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use atomr_worlds_host::{LocalHost, LocalHostConfig, WorldHost};
+use atomr_worlds_host::{
+    ForcePolicy, GenerationPolicy, LocalHost, LocalHostConfig, WorldHost, ICE_SHELL,
+};
 use atomr_worlds_remote::{RemoteHost, RemoteHostConfig};
 
-use crate::cli::{Backend, Cli};
+use crate::cli::{Backend, Cli, WorldGenArg};
 
 /// Build the chosen backend. Lives on a tokio runtime that must outlive
 /// the returned `Arc<dyn WorldHost>`.
 pub async fn build_backend(cli: &Cli) -> Result<Arc<dyn WorldHost>, String> {
     match cli.backend {
         Backend::Local => {
-            let host = LocalHost::new(LocalHostConfig {
-                root_seed: cli.seed,
-                ..LocalHostConfig::default()
-            })
-            .await
-            .map_err(|e| format!("LocalHost: {e}"))?;
+            let mut config = LocalHostConfig { root_seed: cli.seed, ..LocalHostConfig::default() };
+            // Force a planetary archetype across the whole world when asked.
+            // `--world-gen default` leaves the host's seeded selector in place.
+            if cli.world_gen == WorldGenArg::Ice {
+                config.policy = Arc::new(ForcePolicy(GenerationPolicy::Custom(ICE_SHELL)));
+            }
+            let host = LocalHost::new(config).await.map_err(|e| format!("LocalHost: {e}"))?;
             Ok(Arc::new(host))
         }
         Backend::Remote => {

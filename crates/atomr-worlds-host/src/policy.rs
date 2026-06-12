@@ -39,6 +39,18 @@ impl PolicyResolver for DefaultPolicy {
     fn resolve(&self, _addr: &Address) -> GenerationPolicy { GenerationPolicy::Seeded }
 }
 
+/// Returns the same [`GenerationPolicy`] for **every** address. Handy for
+/// forcing one generation strategy across a whole world tree (e.g. a CLI
+/// `--world-gen ice` that selects [`Custom`](GenerationPolicy::Custom)), or for
+/// blanket-`Empty` test fixtures, without enumerating addresses in a
+/// [`PrefixPolicy`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ForcePolicy(pub GenerationPolicy);
+
+impl PolicyResolver for ForcePolicy {
+    fn resolve(&self, _addr: &Address) -> GenerationPolicy { self.0 }
+}
+
 /// Hierarchical lookup: most-specific match wins, walking
 /// world → system → sector → galaxy → universe. Vehicles fall back to their
 /// parent world's policy unless an explicit vehicle key is set.
@@ -132,6 +144,16 @@ mod tests {
         let p = DefaultPolicy;
         let a = Address::World(world(1, 1, 1, 1));
         assert_eq!(p.resolve(&a), GenerationPolicy::Seeded);
+    }
+
+    #[test]
+    fn force_policy_returns_same_for_every_address() {
+        let forced = GenerationPolicy::Custom(0xABCD_1234);
+        let p = ForcePolicy(forced);
+        assert_eq!(p.resolve(&Address::World(world(1, 1, 1, 1))), forced);
+        assert_eq!(p.resolve(&Address::World(world(9, 8, 7, 6))), forced);
+        // Default is Seeded so `ForcePolicy::default()` is a no-op forcing.
+        assert_eq!(ForcePolicy::default().0, GenerationPolicy::Seeded);
     }
 
     #[test]

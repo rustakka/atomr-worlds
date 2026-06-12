@@ -12,4 +12,5 @@
 pub mod asteroid_belt;
 pub mod empty_planetoid;
 pub mod gas_giant;
+pub mod ice_shell;
 pub mod terrain;
