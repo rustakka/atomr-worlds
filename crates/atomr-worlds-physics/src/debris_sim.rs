@@ -24,10 +24,13 @@
 //! [`crate::flood_fill::connected_components`] and [`crate::analyze_region`]
 //! take their predicates — so this module never depends on host/brick types.
 //!
-//! Angular motion is **not** integrated in slice 1 (the orientation stays
-//! identity); the proto carries the quaternion regardless, so adding tumbling
-//! later is a non-breaking follow-up once `core::Quat` gains the multiply /
-//! normalize ops.
+//! Angular motion **is** now integrated: orientation advances from the body's
+//! `angular_velocity` each tick ([`Quat::integrate`]), with the spin seeded at
+//! fracture time from the off-center impulse (see the host's `handle_fracture`).
+//! There is no per-tick angular damping — the existing sleep machinery
+//! (`angular_sleep_eps`) terminates spin when the body settles. *Contact-induced*
+//! torque (a corner strike imparting tumble) is still deferred: `resolve_terrain`
+//! treats the body as an axis-aligned box and adjusts linear velocity only.
 
 use atomr_worlds_core::{DVec3, IVec3};
 
@@ -117,7 +120,11 @@ pub fn step_body(
         body.linear_velocity = scale(body.linear_velocity, params.max_speed / speed);
     }
     body.position = body.position + scale(body.linear_velocity, dt);
-    // (Slice 1: orientation is not integrated — see module docs.)
+    // Angular: advance orientation from the (constant-between-contacts) world-
+    // frame angular velocity. Seeded at fracture; no torque accumulates here.
+    if body.angular_velocity != DVec3::ZERO {
+        body.orientation = body.orientation.integrate(body.angular_velocity, dt);
+    }
 
     resolve_terrain(body, params, &is_solid);
 
@@ -339,5 +346,90 @@ mod tests {
         for (i, (b, _)) in bodies.iter().enumerate() {
             assert!(b.position.y < y0[i]);
         }
+    }
+
+    fn quat_norm(q: atomr_worlds_core::Quat) -> f64 {
+        (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w).sqrt()
+    }
+
+    #[test]
+    fn orientation_advances_under_angular_velocity() {
+        let params = SimParams::default();
+        let mut body = unit_stone(0.0);
+        body.angular_velocity = DVec3::new(0.0, 2.0, 0.0);
+        let mut state = SimState::default();
+        for _ in 0..30 {
+            step_body(&mut body, &mut state, &params, DT, |_| false); // free fall
+        }
+        // Spun about Y → orientation has left identity (w dropped below 1).
+        assert!(body.orientation.w.abs() < 0.999, "orient={:?}", body.orientation);
+    }
+
+    #[test]
+    fn zero_angular_velocity_keeps_identity() {
+        let params = SimParams::default();
+        let mut body = unit_stone(0.0); // angular_velocity defaults to ZERO
+        let mut state = SimState::default();
+        for _ in 0..60 {
+            step_body(&mut body, &mut state, &params, DT, |_| false);
+        }
+        assert_eq!(body.orientation, atomr_worlds_core::Quat::IDENTITY);
+    }
+
+    #[test]
+    fn orientation_stays_unit_while_spinning() {
+        let params = SimParams::default();
+        let mut body = unit_stone(0.0);
+        body.angular_velocity = DVec3::new(1.0, -2.0, 0.5);
+        let mut state = SimState::default();
+        for _ in 0..600 {
+            step_body(&mut body, &mut state, &params, DT, |_| false);
+        }
+        assert!((quat_norm(body.orientation) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fast_spin_keeps_a_resting_body_awake() {
+        // Linear motion settles but angular speed stays above the sleep eps →
+        // the body must not sleep (and orientation keeps advancing).
+        let params = SimParams::default();
+        let mut body = unit_stone(3.0);
+        body.angular_velocity = DVec3::new(0.0, 5.0, 0.0); // ≫ angular_sleep_eps
+        let mut state = SimState::default();
+        for _ in 0..400 {
+            step_body(&mut body, &mut state, &params, DT, floor);
+        }
+        assert!((body.position.y - 0.5).abs() < 0.05, "should rest linearly");
+        assert!(!state.sleeping, "spinning body must stay awake");
+        assert!(body.orientation.w.abs() < 0.999, "should have rotated");
+    }
+
+    #[test]
+    fn slow_spin_still_lets_a_body_sleep() {
+        // Angular speed below `angular_sleep_eps` must not block sleep.
+        let params = SimParams::default();
+        let mut body = unit_stone(3.0);
+        body.angular_velocity = DVec3::new(0.0, params.angular_sleep_eps * 0.5, 0.0);
+        let mut state = SimState::default();
+        for _ in 0..400 {
+            step_body(&mut body, &mut state, &params, DT, floor);
+        }
+        assert!(state.sleeping, "sub-eps spin should still sleep");
+        assert_eq!(body.angular_velocity, DVec3::ZERO, "sleep zeroes spin");
+    }
+
+    #[test]
+    fn deterministic_orientation_on_one_machine() {
+        let params = SimParams::default();
+        let run = || {
+            let mut body = unit_stone(4.0);
+            body.angular_velocity = DVec3::new(0.3, 1.1, -0.7);
+            let mut state = SimState::default();
+            for _ in 0..200 {
+                step_body(&mut body, &mut state, &params, DT, floor);
+            }
+            body.orientation
+        };
+        assert_eq!(run(), run());
     }
 }
