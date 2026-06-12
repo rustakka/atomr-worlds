@@ -40,6 +40,15 @@ pub enum RaymarchTier {
     Pbr,
 }
 
+/// World-generation archetype. `default` keeps the host's seeded selector
+/// (Earth-like terrain); `ice` forces the frozen "cryo" archetype — a SNOW/ICE
+/// shell over a buried WATER ocean and a STONE core — across the whole world.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum WorldGenArg {
+    Default,
+    Ice,
+}
+
 /// Client-side physics master switch (Rec 2). `on` (default) enables rapier
 /// terrain colliders + flood-fill fracture debris; `off` keeps the world inert.
 #[cfg(feature = "physics")]
@@ -109,6 +118,11 @@ pub struct Cli {
     /// Raymarch shading tier (only used with `--shading raymarch`).
     #[arg(long, value_enum, default_value_t = RaymarchTier::Lambert)]
     pub raymarch_tier: RaymarchTier,
+
+    /// World-generation archetype (local backend only). `default` is seeded
+    /// terrain; `ice` forces the frozen cryo archetype for the whole world.
+    #[arg(long, value_enum, default_value_t = WorldGenArg::Default)]
+    pub world_gen: WorldGenArg,
 
     /// Client-side physics (Rec 2): rapier terrain colliders + flood-fill
     /// fracture debris. On by default; forced off in harness mode.

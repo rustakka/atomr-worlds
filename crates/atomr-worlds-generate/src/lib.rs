@@ -54,8 +54,9 @@ pub use pipeline::{
 pub use registry::{
     default_registry, strategy_id, BuiltinSelector, GenerationPolicy, GeneratorRegistry,
     GeneratorRegistryBuilder, ResolveError, Resolved, StrategyId, StrategySelector, ASTEROID_BELT,
-    EMPTY_PLANETOID, GAS_GIANT, TERRAIN, TERRAIN_LAYERED,
+    EMPTY_PLANETOID, GAS_GIANT, ICE_SHELL, TERRAIN, TERRAIN_LAYERED,
 };
+pub use strategies::ice_shell::{IceShellConfig, IceShellGenerator};
 pub use material_selection::{
     DynMaterialStrategy, LayeredWithFeatures, LegacyBanded, MaterialContext,
     MaterialSelectionStrategy,

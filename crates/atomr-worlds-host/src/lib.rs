@@ -28,12 +28,12 @@ pub use error::HostError;
 pub use extractor::WorldExtractor;
 pub use host::WorldHost;
 pub use local::{LocalHost, LocalHostConfig};
-pub use policy::{DefaultPolicy, GenerationPolicy, PolicyResolver, PrefixPolicy};
+pub use policy::{DefaultPolicy, ForcePolicy, GenerationPolicy, PolicyResolver, PrefixPolicy};
 pub use shape::{DefaultShape, PrefixShape, ShapeResolver};
 pub use world_query_impl::LocalHostQuery;
 
 pub use atomr_worlds_generate::{
-    region_id, AuthoredRegion, AuthoredRegionStore, LiteralRegion, RegionAabb, RegionId,
+    region_id, AuthoredRegion, AuthoredRegionStore, LiteralRegion, RegionAabb, RegionId, ICE_SHELL,
 };
 
 pub use atomr_worlds_persist::{
