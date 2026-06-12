@@ -165,6 +165,53 @@ impl Quat {
     pub const fn new(x: f64, y: f64, z: f64, w: f64) -> Self {
         Self { x, y, z, w }
     }
+
+    /// Re-normalize to a unit quaternion. Returns [`Self::IDENTITY`] for a
+    /// degenerate (near-zero norm) quaternion rather than producing `NaN`s.
+    #[inline]
+    pub fn normalize(self) -> Quat {
+        let n2 = self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w;
+        if n2 <= 1e-30 {
+            return Quat::IDENTITY;
+        }
+        let inv = 1.0 / n2.sqrt();
+        Quat { x: self.x * inv, y: self.y * inv, z: self.z * inv, w: self.w * inv }
+    }
+
+    /// Advance this orientation by a world-frame angular velocity `w` (rad/s)
+    /// over `dt` seconds, first-order and re-normalized to stay unit.
+    ///
+    /// Uses the quaternion derivative `q̇ = ½ ω_q ⊗ q` with `ω_q = (w, 0)` a
+    /// pure quaternion, integrated explicitly: `q' = normalize(q + ½ dt ω_q ⊗ q)`.
+    /// `self` is taken to map body→world, consistent with [`Self::mul`].
+    #[inline]
+    pub fn integrate(self, w: DVec3, dt: f64) -> Quat {
+        let omega = Quat { x: w.x, y: w.y, z: w.z, w: 0.0 };
+        let dq = omega * self;
+        let h = 0.5 * dt;
+        Quat {
+            x: self.x + dq.x * h,
+            y: self.y + dq.y * h,
+            z: self.z + dq.z * h,
+            w: self.w + dq.w * h,
+        }
+        .normalize()
+    }
+}
+
+impl core::ops::Mul for Quat {
+    type Output = Quat;
+    /// Hamilton product `self ⊗ rhs` (composition of rotations, `self` applied
+    /// after `rhs` when both map body→world).
+    #[inline]
+    fn mul(self, r: Quat) -> Quat {
+        Quat {
+            w: self.w * r.w - self.x * r.x - self.y * r.y - self.z * r.z,
+            x: self.w * r.x + self.x * r.w + self.y * r.z - self.z * r.y,
+            y: self.w * r.y - self.x * r.z + self.y * r.w + self.z * r.x,
+            z: self.w * r.z + self.x * r.y - self.y * r.x + self.z * r.w,
+        }
+    }
 }
 
 impl Default for Quat {
@@ -204,5 +251,80 @@ mod tests {
         let v: IVec3 = g.into();
         let back: GalaxyCoord = v.into();
         assert_eq!(g, back);
+    }
+
+    fn quat_approx_eq(a: Quat, b: Quat, eps: f64) -> bool {
+        // Quaternions q and -q represent the same rotation; accept either sign.
+        let same = (a.x - b.x).abs() < eps
+            && (a.y - b.y).abs() < eps
+            && (a.z - b.z).abs() < eps
+            && (a.w - b.w).abs() < eps;
+        let neg = (a.x + b.x).abs() < eps
+            && (a.y + b.y).abs() < eps
+            && (a.z + b.z).abs() < eps
+            && (a.w + b.w).abs() < eps;
+        same || neg
+    }
+
+    fn quat_norm(q: Quat) -> f64 {
+        (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w).sqrt()
+    }
+
+    #[test]
+    fn quat_mul_identity_is_noop() {
+        let q = Quat::new(0.1, 0.2, 0.3, 0.9).normalize();
+        assert!(quat_approx_eq(q * Quat::IDENTITY, q, 1e-12));
+        assert!(quat_approx_eq(Quat::IDENTITY * q, q, 1e-12));
+    }
+
+    #[test]
+    fn quat_mul_is_associative() {
+        let a = Quat::new(0.1, -0.2, 0.3, 0.9).normalize();
+        let b = Quat::new(-0.4, 0.1, 0.2, 0.8).normalize();
+        let c = Quat::new(0.2, 0.3, -0.1, 0.7).normalize();
+        assert!(quat_approx_eq((a * b) * c, a * (b * c), 1e-12));
+    }
+
+    #[test]
+    fn quat_normalize_makes_unit() {
+        let q = Quat::new(1.0, 2.0, 3.0, 4.0).normalize();
+        assert!((quat_norm(q) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn quat_normalize_zero_is_identity() {
+        assert_eq!(Quat::new(0.0, 0.0, 0.0, 0.0).normalize(), Quat::IDENTITY);
+    }
+
+    #[test]
+    fn quat_integrate_zero_omega_is_noop() {
+        let q = Quat::new(0.1, 0.2, 0.3, 0.9).normalize();
+        assert!(quat_approx_eq(q.integrate(DVec3::ZERO, 1.0 / 30.0), q, 1e-12));
+    }
+
+    #[test]
+    fn quat_integrate_stays_unit_over_many_steps() {
+        // Spin about Y at 3 rad/s for 10k steps; the per-step re-normalize must
+        // keep it on the unit sphere despite first-order drift.
+        let mut q = Quat::IDENTITY;
+        let w = DVec3::new(0.0, 3.0, 0.0);
+        for _ in 0..10_000 {
+            q = q.integrate(w, 1.0 / 240.0);
+        }
+        assert!((quat_norm(q) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quat_integrate_quarter_turn_about_y() {
+        // Integrate ω = π/2 rad/s about Y for 1 s in small steps → a 90°
+        // rotation, whose scalar part is cos(π/4) ≈ 0.70710678.
+        let mut q = Quat::IDENTITY;
+        let w = DVec3::new(0.0, std::f64::consts::FRAC_PI_2, 0.0);
+        let dt = 1.0 / 4096.0;
+        for _ in 0..4096 {
+            q = q.integrate(w, dt);
+        }
+        let expected = Quat::new(0.0, (std::f64::consts::PI / 4.0).sin(), 0.0, (std::f64::consts::PI / 4.0).cos());
+        assert!(quat_approx_eq(q, expected, 1e-4), "got {q:?}");
     }
 }

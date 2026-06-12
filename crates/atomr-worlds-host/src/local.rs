@@ -1054,9 +1054,23 @@ impl WorldActor {
                 // a zero-force carve starts at rest and simply falls under
                 // gravity. `step_body` clamps to `max_speed` on the first tick.
                 let f = req.force.to_newtons();
+                let j = DVec3::new(f[0] as f64, f[1] as f64, f[2] as f64); // impulse (N·s)
                 let inv_m = if body.mass.mass_kg > 0.0 { 1.0 / body.mass.mass_kg } else { 0.0 };
-                body.linear_velocity =
-                    DVec3::new(f[0] as f64 * inv_m, f[1] as f64 * inv_m, f[2] as f64 * inv_m);
+                body.linear_velocity = DVec3::new(j.x * inv_m, j.y * inv_m, j.z * inv_m);
+                // Seed spin from the *off-center* impulse: the impact applies `j`
+                // at `impact_pos` rather than at the COM, so it imparts angular
+                // momentum `L = r × J` (r = arm from COM). `ω = I⁻¹ L`. At spawn
+                // `orientation == IDENTITY`, so body frame == world frame and the
+                // body-frame `inertia_inv` applies directly. A zero-force carve
+                // (`j == 0`) yields zero spin → the island just falls.
+                let impact_world_m = DVec3::new(
+                    (req.impact_pos.x as f64 + 0.5) * vs,
+                    (req.impact_pos.y as f64 + 0.5) * vs,
+                    (req.impact_pos.z as f64 + 0.5) * vs,
+                );
+                let r = impact_world_m - body.position;
+                let l = atomr_worlds_physics::math::cross(r, j);
+                body.angular_velocity = body.mass.inertia_inv.mul_vec(l);
                 self.debris
                     .insert(id, DebrisEntry { body, state: SimState::default(), retire_ticks: 0 });
             }

@@ -77,7 +77,18 @@ async fn place_floor(host: &LocalHost, addr: Address) {
 }
 
 async fn fracture(host: &LocalHost, addr: Address) -> atomr_worlds_proto::FractureApplied {
-    let req = FractureRequest { addr, impact_pos: BASE, force: Force::ZERO, material_id: 0 };
+    fracture_with(host, addr, BASE, Force::ZERO).await
+}
+
+/// Fracture at an explicit impact point with an explicit force, so a test can
+/// drive an *off-center* impulse (the source of seeded spin).
+async fn fracture_with(
+    host: &LocalHost,
+    addr: Address,
+    impact_pos: IVec3,
+    force: Force,
+) -> atomr_worlds_proto::FractureApplied {
+    let req = FractureRequest { addr, impact_pos, force, material_id: 0 };
     let resp = host.request(Envelope::new(2, addr, WorldRequest::Fracture(req))).await.unwrap();
     let WorldEvent::FractureApplied(applied) = resp.body else { panic!("variant") };
     applied
@@ -205,5 +216,78 @@ async fn debris_lands_sleeps_and_stops_streaming() {
     let y = saw_sleeping_at_y.expect("debris should land on host terrain and sleep");
     assert!(y > 380.0, "debris should rest on the floor (y≈393), not fall away: y={y}");
     assert!(stopped, "host should stop streaming a settled/retired body");
+    host.shutdown().await.unwrap();
+}
+
+fn ang_speed(d: &DebrisStateDelta) -> f32 {
+    (d.ang_vel[0] * d.ang_vel[0] + d.ang_vel[1] * d.ang_vel[1] + d.ang_vel[2] * d.ang_vel[2]).sqrt()
+}
+
+/// How far the streamed orientation has rotated away from identity. The scalar
+/// part `w` of a unit quaternion is `cos(θ/2)`, so `1 - |w|` grows from 0 as the
+/// body turns.
+fn orient_divergence(d: &DebrisStateDelta) -> f32 {
+    1.0 - d.orient[3].abs()
+}
+
+#[tokio::test]
+async fn off_center_impact_accumulates_orientation() {
+    let addr = Address::World(WorldAddr::ROOT);
+    let host = host().await;
+    // A brick far from the fracture, to re-check GetBrick byte-identity after
+    // the body has tumbled.
+    let far = IVec3::new(0, 0, 0);
+    let before_far = get_brick_bytes(&host, addr, far).await;
+
+    let mut rx = subscribe(&host, addr).await;
+    place_blob(&host, addr).await;
+    // A strong impulse applied at the blob's `(0,0,0)` corner — off the body's
+    // center of mass — so `L = r × J` is non-zero and the body spins as it falls.
+    // Downward so it stays roughly under its footprint (in the subscribed region)
+    // rather than launching sideways out of view.
+    let force = Force::from_newtons([0.0, -50_000.0, 0.0]);
+    let applied = fracture_with(&host, addr, BASE, force).await;
+    let id = spawn_id(&applied);
+
+    let deltas = collect_debris(&mut rx, Duration::from_millis(600)).await;
+    let mine: Vec<&DebrisStateDelta> = deltas.iter().filter(|d| d.id == id).collect();
+    assert!(mine.len() >= 2, "expected streamed deltas, got {}", mine.len());
+
+    // The body carries a non-zero angular velocity from the off-center impulse…
+    assert!(
+        mine.iter().any(|d| ang_speed(d) > 1e-3),
+        "off-center impact should seed angular velocity"
+    );
+    // …and its orientation visibly diverges from identity across the stream.
+    assert!(
+        mine.iter().any(|d| orient_divergence(d) > 1e-3),
+        "orientation should accumulate (max divergence {})",
+        mine.iter().map(|d| orient_divergence(d)).fold(0.0_f32, f32::max)
+    );
+
+    // The debris tumble is ephemeral physics: it must never perturb stored voxels.
+    let after_far = get_brick_bytes(&host, addr, far).await;
+    assert_eq!(before_far, after_far, "debris tumble must not perturb GetBrick bytes");
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn zero_force_carve_yields_no_spin() {
+    let addr = Address::World(WorldAddr::ROOT);
+    let host = host().await;
+    let mut rx = subscribe(&host, addr).await;
+    place_blob(&host, addr).await;
+    // The common hand-carve path: `Force::ZERO` → no impulse → no spin, the
+    // island simply falls with identity orientation throughout.
+    let applied = fracture(&host, addr).await;
+    let id = spawn_id(&applied);
+
+    let deltas = collect_debris(&mut rx, Duration::from_millis(400)).await;
+    let mine: Vec<&DebrisStateDelta> = deltas.iter().filter(|d| d.id == id).collect();
+    assert!(!mine.is_empty(), "the body should still fall and stream");
+    for d in &mine {
+        assert!(ang_speed(d) == 0.0, "zero-force carve must not spin: {:?}", d.ang_vel);
+        assert_eq!(d.orient, [0.0, 0.0, 0.0, 1.0], "orientation must stay identity");
+    }
     host.shutdown().await.unwrap();
 }
